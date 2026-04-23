@@ -68,7 +68,12 @@ from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS as _PAGE_CSS
 from leilao_ia_v2.ui.sim_form_compact import (
     W_BRL,
     W_BRL_MED,
+    W_INT,
+    W_KM,
+    W_LATLON,
+    W_LIM,
     W_MESES,
+    W_NUM,
     W_PCT,
     W_SELECT,
     number_compact,
@@ -3945,7 +3950,7 @@ def _render_aba_anuncios() -> None:
         with c7:
             st.checkbox("Só sem coordenadas (lat/lon nulos)", value=False, key="ad_semgeo")
         with c8:
-            nlim = st.number_input("Máx. linhas", min_value=20, max_value=500, value=200, step=20, key="ad_limite")
+            nlim = number_compact("Máx. linhas", w=W_LIM, min_value=20, max_value=500, value=200, step=20, key="ad_limite")
 
         if st.button("Carregar anúncios", type="primary", key="ad_btn_carregar"):
             tr = st.session_state.get("ad_trans")
@@ -4106,26 +4111,32 @@ def _render_aba_anuncios() -> None:
                 f_uf = st.text_input("UF", value=str(b0.get("estado") or ""), key=f"ad_f_uf_{_eid}", max_chars=2)
                 a1, a2, a3 = st.columns(3)
                 with a1:
-                    f_area = st.number_input("Área m²", value=float(b0.get("area_construida_m2") or 0), min_value=0.1, key=f"ad_f_area_{_eid}")
+                    f_area = number_compact(
+                        "Área m²", w=W_BRL, value=float(b0.get("area_construida_m2") or 0), min_value=0.1, key=f"ad_f_area_{_eid}"
+                    )
                 with a2:
-                    f_val = st.number_input("Valor venda (R$)", value=float(b0.get("valor_venda") or 0), min_value=0.01, key=f"ad_f_val_{_eid}")
+                    f_val = number_compact(
+                        "Venda (R$)", w=W_BRL_MED, value=float(b0.get("valor_venda") or 0), min_value=0.01, key=f"ad_f_val_{_eid}"
+                    )
                 with a3:
-                    f_lat = st.number_input(
-                        "Latitude (manual)",
+                    f_lat = number_compact(
+                        "Lat. (manual)",
+                        w=W_LATLON,
                         value=float(b0["latitude"]) if b0.get("latitude") is not None else 0.0,
                         format="%.6f",
                         key=f"ad_f_lat_{_eid}",
                     )
                 a4, a5 = st.columns(2)
                 with a4:
-                    f_lon = st.number_input(
-                        "Longitude (manual)",
+                    f_lon = number_compact(
+                        "Lon. (manual)",
+                        w=W_LATLON,
                         value=float(b0["longitude"]) if b0.get("longitude") is not None else 0.0,
                         format="%.6f",
                         key=f"ad_f_lon_{_eid}",
                     )
                 with a5:
-                    f_qua = st.number_input("Quartos", value=int(b0.get("quartos") or 0), min_value=0, key=f"ad_f_q_{_eid}")
+                    f_qua = number_compact("Quartos", w=W_INT, value=int(b0.get("quartos") or 0), min_value=0, key=f"ad_f_q_{_eid}")
                 inc_geo = st.checkbox("Atualizar também lat/lon", value=True, key=f"ad_f_incgeo_{_eid}")
                 sub = st.form_submit_button("Gravar alterações", type="primary")
                 if sub:
@@ -4162,7 +4173,7 @@ def _render_aba_anuncios() -> None:
         with g3:
             st.text_input("Bairro (contém)", value="", key="ca_bairro")
         with g4:
-            nlim_c = st.number_input("Máx. linhas", min_value=20, max_value=400, value=200, step=20, key="ca_limite")
+            nlim_c = number_compact("Máx. linhas", w=W_LIM, min_value=20, max_value=400, value=200, step=20, key="ca_limite")
         g5, g6, g7 = st.columns(3, gap="small")
         with g5:
             st.text_input("geo_bucket (contém)", value="", key="ca_geo")
@@ -4564,24 +4575,27 @@ def _render_sidebar_ajustes_busca() -> None:
         for k, v in defaults.items():
             st.session_state.setdefault(k, v)
     with st.sidebar.expander("⚙️ Ajustes de busca", expanded=False):
-        st.number_input(
-            "Metragem mínima (% da ref.)",
+        number_compact(
+            "Metragem mín. (% ref.)",
+            w=W_PCT,
             min_value=30,
             max_value=120,
             step=1,
             key="bm_area_pct_min",
             help="Limite inferior na URL = área do edital × este % ÷ 100 (ex.: 100 m² e 65% → ~65 m²).",
         )
-        st.number_input(
-            "Metragem máxima (% da ref.)",
+        number_compact(
+            "Metragem máx. (% ref.)",
+            w=W_PCT,
             min_value=80,
             max_value=350,
             step=1,
             key="bm_area_pct_max",
             help="Limite superior na URL (ex.: 145% de 100 m² → ~145 m²).",
         )
-        st.number_input(
+        number_compact(
             "Raio (km)",
+            w=W_KM,
             min_value=0.5,
             max_value=80.0,
             step=0.5,
@@ -4589,32 +4603,36 @@ def _render_sidebar_ajustes_busca() -> None:
             key="bm_raio_km",
             help="Anúncios mais longe do imóvel do leilão são ignorados ao montar o cache de média.",
         )
-        st.number_input(
+        number_compact(
             "Mín. amostras (cache)",
+            w=W_NUM,
             min_value=1,
             max_value=25,
             step=1,
             key="bm_min_amostras_cache",
             help="Mínimo de comparáveis válidos (raio + faixa de área) para aceitar/reutilizar cache.",
         )
-        st.number_input(
-            "Máx. anúncios (cache principal)",
+        number_compact(
+            "Máx. anúncios (cache princ.)",
+            w=W_NUM,
             min_value=1,
             max_value=50,
             step=1,
             key="bm_cache_max_principal",
             help="Teto de anúncios no registo de cache “principal” (simulação). O excedente reparte-se em caches de lote de referência.",
         )
-        st.number_input(
-            "Máx. anúncios (lote de referência)",
+        number_compact(
+            "Máx. anúncios (lote ref.)",
+            w=W_NUM,
             min_value=1,
             max_value=50,
             step=1,
             key="bm_cache_max_lote",
             help="Tamanho de cada lote de anúncios em caches de referência (e terrenos em partes).",
         )
-        st.number_input(
-            "Máx. créditos Firecrawl por análise",
+        number_compact(
+            "Máx. créd. Firecrawl / análise",
+            w=W_NUM,
             min_value=1,
             max_value=50,
             step=1,

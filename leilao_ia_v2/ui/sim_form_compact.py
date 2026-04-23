@@ -1,8 +1,8 @@
 """
-Constantes e helper para o formulário de simulação compacto (larguras em px).
+Constantes e helper para inputs compactos (larguras em px) em toda a app Streamlit.
 
 Streamlit ≥1.33 aceita ``width`` em píxeis em ``st.number_input`` / ``st.selectbox``,
-evitando que campos de 2 dígitos ocupem toda a coluna.
+evitando que campos curtos ocupem toda a coluna.
 """
 from __future__ import annotations
 
@@ -17,6 +17,10 @@ W_MESES = 88
 W_BRL = 132
 W_BRL_MED = 152
 W_SELECT = 300
+W_LIM = 100  # máx. linhas, contagens pequenas
+W_KM = 96
+W_LATLON = 120
+W_INT = 80  # inteiros (quartos, passos)
 
 
 def number_compact(
