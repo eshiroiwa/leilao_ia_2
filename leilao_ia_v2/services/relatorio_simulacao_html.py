@@ -108,6 +108,62 @@ def _row_cache_principal_simulacao(caches: list[dict[str, Any]]) -> dict[str, An
     return None
 
 
+def _html_papel_cache_span(cache_row: dict[str, Any]) -> str:
+    """Etiqueta [simulação] ou [referência] (mesma lógica do painel de caches)."""
+    md = _metadados_cache_dict(cache_row)
+    if str(md.get("modo_cache") or "").strip().lower() == "terrenos":
+        return ' <span style="color:#fb923c;font-weight:600;">[referência]</span>'
+    if md.get("apenas_referencia") is True or md.get("uso_simulacao") is False:
+        return ' <span style="color:#fb923c;font-weight:600;">[referência]</span>'
+    return ' <span style="color:#4ade80;font-weight:600;">[simulação]</span>'
+
+
+def _html_sec_todos_caches(caches: list[dict[str, Any]]) -> str:
+    """KPIs por cada linha de ``cache_media_bairro`` vinculada ao leilão."""
+    if not caches:
+        return '<p class="sub">Nenhum cache de média vinculado a este leilão.</p>'
+    from leilao_ia_v2 import app_assistente_ingestao as ag
+
+    partes: list[str] = []
+    for c in caches:
+        if not isinstance(c, dict):
+            continue
+        nome = html.escape(str(c.get("nome_cache") or "Cache de mercado").strip() or "Cache")
+        tipo = html.escape(str(c.get("tipo_imovel") or "—"))
+        try:
+            n_am = int(c.get("n_amostras") or 0)
+        except (TypeError, ValueError):
+            n_am = 0
+        try:
+            pm2 = float(c.get("preco_m2_medio") or 0)
+        except (TypeError, ValueError):
+            pm2 = 0.0
+        try:
+            vm = float(c.get("valor_medio_venda") or 0)
+        except (TypeError, ValueError):
+            vm = 0.0
+        pm2_s = _fmt_rs_m2_br(pm2)
+        vm_s = ag._fmt_valor_campo("valor_venda", vm) if vm > 0 else "—"
+        papel = _html_papel_cache_span(c)
+        kpi = (
+            f'<div class="rel-kpi-row" style="margin-top:8px">'
+            f'<div class="rel-kpi"><div class="l">Amostras</div><div class="v">{n_am}</div></div>'
+            f'<div class="rel-kpi"><div class="l">Preço médio / m²</div><div class="v">{html.escape(pm2_s)}</div></div>'
+            f'<div class="rel-kpi"><div class="l">Valor médio venda</div><div class="v">{html.escape(vm_s)}</div></div>'
+            f"</div>"
+        )
+        partes.append(
+            '<div class="rel-cache-bloco" style="margin-bottom:20px;padding-bottom:16px;'
+            'border-bottom:1px solid var(--bd);">'
+            f'<h3 class="rel-cache-subh" style="font-size:0.95rem;font-weight:700;margin:0 0 6px 0;">'
+            f"{nome}{papel} · <span style=\"color:var(--muted);font-weight:500;\">{tipo}</span></h3>"
+            f"{kpi}</div>"
+        )
+    if not partes:
+        return '<p class="sub">Nenhum cache de média vinculado a este leilão.</p>'
+    return "".join(partes)
+
+
 def _parse_csv_anuncio_ids(raw: Any) -> list[str]:
     if not raw or not isinstance(raw, str):
         return []
@@ -186,12 +242,12 @@ def _fmt_rs_m2_br(v: float) -> str:
 
 def _map_comparativos_fragments(
     row: dict[str, Any],
-    principal: dict[str, Any] | None,
+    caches: list[dict[str, Any]],
     ads_map: dict[str, dict[str, Any]],
 ) -> tuple[str, str, str]:
     """
     Devolve (css_link_head, html_secao_mapa, scripts_fim_body) para Leaflet + OSM.
-    Vazio se não houver nenhuma coordenada (leilão ou anúncios do cache principal).
+    Vazio se não houver nenhuma coordenada (leilão ou anúncios de **qualquer** cache vinculado).
     """
     auction: dict[str, Any] | None = None
     lat0, lon0 = row.get("latitude"), row.get("longitude")
@@ -213,46 +269,53 @@ def _map_comparativos_fragments(
             pass
 
     markers: list[dict[str, Any]] = []
-    if principal is not None:
+    vistos: set[str] = set()
+    if caches:
         from leilao_ia_v2 import app_assistente_ingestao as ag
 
-        for idx, aid in enumerate(_parse_csv_anuncio_ids(principal.get("anuncios_ids"))):
-            ad = ads_map.get(aid)
-            if not isinstance(ad, dict):
+        for c in caches:
+            if not isinstance(c, dict):
                 continue
-            alat, alon = ad.get("latitude"), ad.get("longitude")
-            if alat is None or alon is None:
-                continue
-            try:
-                fa, fo = float(alat), float(alon)
-            except (TypeError, ValueError):
-                continue
-            if not (-90 <= fa <= 90 and -180 <= fo <= 180):
-                continue
-            try:
-                vv = float(ad.get("valor_venda") or 0)
-            except (TypeError, ValueError):
-                vv = 0.0
-            try:
-                ar = float(ad.get("area_construida_m2") or 0)
-            except (TypeError, ValueError):
-                ar = 0.0
-            vs = ag._fmt_valor_campo("valor_venda", vv) if vv > 0 else "—"
-            ars = ag._fmt_valor_campo("area_util", ar) if ar > 0 else "—"
-            if vs != "—" or ars != "—":
-                title = f"{vs} · {ars}"
-            else:
-                title = f"Comparável {idx + 1}"
-            url_a = str(ad.get("url_anuncio") or "").strip()
-            url_ok = url_a if (url_a.startswith("http://") or url_a.startswith("https://")) else ""
-            markers.append(
-                {
-                    "lat": fa,
-                    "lng": fo,
-                    "title": title,
-                    "url": url_ok,
-                }
-            )
+            for aid in _parse_csv_anuncio_ids(c.get("anuncios_ids")):
+                if aid in vistos:
+                    continue
+                vistos.add(aid)
+                ad = ads_map.get(aid)
+                if not isinstance(ad, dict):
+                    continue
+                alat, alon = ad.get("latitude"), ad.get("longitude")
+                if alat is None or alon is None:
+                    continue
+                try:
+                    fa, fo = float(alat), float(alon)
+                except (TypeError, ValueError):
+                    continue
+                if not (-90 <= fa <= 90 and -180 <= fo <= 180):
+                    continue
+                try:
+                    vv = float(ad.get("valor_venda") or 0)
+                except (TypeError, ValueError):
+                    vv = 0.0
+                try:
+                    ar = float(ad.get("area_construida_m2") or 0)
+                except (TypeError, ValueError):
+                    ar = 0.0
+                vs = ag._fmt_valor_campo("valor_venda", vv) if vv > 0 else "—"
+                ars = ag._fmt_valor_campo("area_util", ar) if ar > 0 else "—"
+                if vs != "—" or ars != "—":
+                    title = f"{vs} · {ars}"
+                else:
+                    title = f"Comparável {len(markers) + 1}"
+                url_a = str(ad.get("url_anuncio") or "").strip()
+                url_ok = url_a if (url_a.startswith("http://") or url_a.startswith("https://")) else ""
+                markers.append(
+                    {
+                        "lat": fa,
+                        "lng": fo,
+                        "title": title,
+                        "url": url_ok,
+                    }
+                )
 
     if auction is None and not markers:
         return "", "", ""
@@ -375,35 +438,14 @@ def montar_html_relatorio_simulacao(
     sec_adicionais = _html_secao_dados_adicionais(row, ag)
     sec_ctx_mercado = _html_secao_analise_mercado_ctx(row)
 
-    principal = _row_cache_principal_simulacao(caches)
-    sec_cache = ""
-    if principal is None:
-        sec_cache = ""
-    else:
-        try:
-            n_am = int(principal.get("n_amostras") or 0)
-        except (TypeError, ValueError):
-            n_am = 0
-        try:
-            pm2 = float(principal.get("preco_m2_medio") or 0)
-        except (TypeError, ValueError):
-            pm2 = 0.0
-        try:
-            vm = float(principal.get("valor_medio_venda") or 0)
-        except (TypeError, ValueError):
-            vm = 0.0
-        pm2_s = _fmt_rs_m2_br(pm2)
-        vm_s = ag._fmt_valor_campo("valor_venda", vm) if vm > 0 else "—"
-
+    _principal = _row_cache_principal_simulacao(caches)
+    sec_cache = _html_sec_todos_caches(caches)
+    if _principal is not None and len(caches) > 1:
         sec_cache = (
-            f'<div class="rel-kpi-row">'
-            f'<div class="rel-kpi"><div class="l">Amostras</div><div class="v">{n_am}</div></div>'
-            f'<div class="rel-kpi"><div class="l">Preço médio / m²</div><div class="v">{html.escape(pm2_s)}</div></div>'
-            f'<div class="rel-kpi"><div class="l">Valor médio venda</div><div class="v">{html.escape(vm_s)}</div></div>'
-            f"</div>"
+            '<p class="sub" style="margin:0 0 14px 0;">A simulação do painel financeiro abaixo usa o cache '
+            "marcado como <strong>[simulação]</strong> (principal) quando existir.</p>" + sec_cache
         )
-
-    map_head, map_sec, map_scripts = _map_comparativos_fragments(row, principal, ads_map)
+    map_head, map_sec, map_scripts = _map_comparativos_fragments(row, caches, ads_map)
 
     fin_html = ag._html_simulacao_resultado_cards(o)
     notas_fin = ""

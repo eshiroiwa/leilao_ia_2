@@ -79,3 +79,68 @@ def test_relatorio_inclui_secao_analise_mercado():
     assert "test-model" not in html
     assert "10 / 20" not in html
     assert "2026-01-01T12:00" not in html
+
+
+def test_relatorio_inclui_todos_caches_vinculados_e_mapa_todos_anuncios():
+    """Vários linhas de cache: secção HTML e marcadores a partir da união dos anuncios_ids."""
+    row = {
+        "id": "L1",
+        "endereco": "Rua Mapa",
+        "latitude": -22.0,
+        "longitude": -47.0,
+    }
+    c1 = {
+        "nome_cache": "Mercado 10km principal",
+        "tipo_imovel": "apartamento",
+        "n_amostras": 2,
+        "preco_m2_medio": 5000.0,
+        "valor_medio_venda": 500000.0,
+        "anuncios_ids": "u1,u2",
+        "metadados_json": {"uso_simulacao": True},
+    }
+    c2 = {
+        "nome_cache": "Terrenos ref.",
+        "tipo_imovel": "terreno",
+        "n_amostras": 1,
+        "preco_m2_medio": 0.0,
+        "valor_medio_venda": 0.0,
+        "anuncios_ids": "u3",
+        "metadados_json": {"modo_cache": "terrenos"},
+    }
+    ads_map = {
+        "u1": {
+            "latitude": -22.01,
+            "longitude": -47.01,
+            "valor_venda": 400000.0,
+            "area_construida_m2": 80.0,
+            "url_anuncio": "https://a.com/1",
+        },
+        "u2": {
+            "latitude": -22.02,
+            "longitude": -47.02,
+            "valor_venda": 450000.0,
+            "area_construida_m2": 90.0,
+            "url_anuncio": "https://a.com/2",
+        },
+        "u3": {
+            "latitude": -22.03,
+            "longitude": -47.03,
+            "valor_venda": 100000.0,
+            "area_construida_m2": 0.0,
+            "url_anuncio": "https://a.com/3",
+        },
+    }
+    html = montar_html_relatorio_simulacao(
+        row=row,
+        caches=[c1, c2],
+        ads_map=ads_map,
+        doc=OperacaoSimulacaoDocumento(),
+    )
+    assert "Mercado 10km principal" in html
+    assert "Terrenos ref." in html
+    assert "[referência]" in html
+    assert "rel-map-json" in html
+    # três anúncios com coords distintas → três itens no array markers do JSON embebido
+    assert html.count('"lat":-22.01') == 1
+    assert html.count('"lat":-22.02') == 1
+    assert html.count('"lat":-22.03') == 1

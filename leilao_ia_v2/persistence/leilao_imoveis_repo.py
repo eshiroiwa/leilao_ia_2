@@ -63,6 +63,7 @@ def listar_para_dashboard(
         .select(
             "id,url_leilao,cidade,estado,bairro,endereco,tipo_imovel,latitude,longitude,"
             "data_leilao_1_praca,data_leilao_2_praca,data_leilao,edital_coletado_em,"
+            "url_foto_imovel,"
             "operacao_simulacao_json,simulacoes_modalidades_json,relatorio_mercado_contexto_json,"
             "cache_media_bairro_ids,leilao_extra_json"
         )

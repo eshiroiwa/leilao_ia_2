@@ -34,6 +34,7 @@ class _RowOut:
     cidade: str
     estado: str
     bairro: str
+    tipo_imovel: str
     url: str
     endereco: str
     prox_data: date | None
@@ -43,6 +44,7 @@ class _RowOut:
     tem_mercado_llm: bool
     tem_cache: bool
     praca_label: str
+    url_foto_imovel: str | None = None
 
 
 @dataclass
@@ -243,6 +245,17 @@ section[data-testid="stMain"] [data-testid="stBaseButton-primary"]:hover {
   filter: brightness(1.05);
   transform: scale(1.05);
 }
+/* Oportunidades: miniatura do imóvel (url_foto_imovel) ao lado do botão */
+section[data-testid="stMain"] .dash-op-thumb-ph {
+  width: 72px;
+  height: 72px;
+  min-width: 72px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  box-sizing: border-box;
+}
+section[data-testid="stMain"] .dash-op-thumb-wrap { line-height: 0; margin: 0.1rem 0 0.35rem 0; }
 </style>
 """
 
@@ -344,6 +357,13 @@ def _roi_bruto_de_row(row: dict[str, Any]) -> float | None:
     return None
 
 
+def _url_foto_imovel_row(r: dict[str, Any]) -> str | None:
+    u = str(r.get("url_foto_imovel") or "").strip()
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    return None
+
+
 def _elegivel_oportunidades_roi(o: _RowOut) -> bool:
     """Sem simulação: aparece nas listagens de oportunidade. Com simulação: só se ROI bruto > limiar."""
     if not o.tem_simulacao:
@@ -362,6 +382,7 @@ def _row_to_out(r: dict[str, Any], *, hoje: date) -> _RowOut:
         cidade=str(r.get("cidade") or "—")[:32],
         estado=str(r.get("estado") or "")[:3],
         bairro=str(r.get("bairro") or "")[:28],
+        tipo_imovel=str(r.get("tipo_imovel") or "")[:40],
         url=str(r.get("url_leilao") or "")[:120],
         endereco=str(r.get("endereco") or "")[:60],
         prox_data=d,
@@ -371,6 +392,7 @@ def _row_to_out(r: dict[str, Any], *, hoje: date) -> _RowOut:
         tem_mercado_llm=_tem_mercado_llm(r),
         tem_cache=ncache > 0,
         praca_label=pl,
+        url_foto_imovel=_url_foto_imovel_row(r),
     )
 
 

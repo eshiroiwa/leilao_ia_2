@@ -8,10 +8,16 @@ from leilao_ia_v2.schemas.edital import ExtracaoEditalLLM, LeilaoExtraJson
 from leilao_ia_v2.services import comparaveis_pos_ingestao as cpi
 
 
+@patch("leilao_ia_v2.services.comparaveis_pos_ingestao.get_busca_mercado_parametros")
 @patch("leilao_ia_v2.fc_search.pipeline.complementar_anuncios_firecrawl_search")
-def test_executar_comparaveis_chama_pipeline_fc(mock_fc, monkeypatch):
+def test_executar_comparaveis_chama_pipeline_fc(mock_fc, mock_bp, monkeypatch):
     monkeypatch.setenv("FIRECRAWL_API_KEY", "k")
     mock_fc.return_value = (3, "search: ok", 6)
+    mock_bp.return_value = MagicMock(
+        confirmar_frase_firecrawl_search=False,
+        min_amostras_cache=3,
+        max_firecrawl_creditos_analise=15,
+    )
     cli = MagicMock()
     ext = ExtracaoEditalLLM(
         url_leilao="https://x.com",

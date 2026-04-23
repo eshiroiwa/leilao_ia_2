@@ -122,6 +122,7 @@ from leilao_ia_v2.services.cache_media_leilao import (
     criar_cache_manual_de_anuncios,
     formatar_log_pos_cache,
     recalcular_caches_mercado_para_leilao,
+    resolver_cache_media_pos_ingestao,
 )
 from leilao_ia_v2.services.geocoding import geocodificar_endereco, geocodificar_texto_livre
 from leilao_ia_v2.services.saldos_providers import buscar_saldo_firecrawl_cached, invalidar_cache_saldos
@@ -1523,6 +1524,26 @@ def _simop_labels_venda_com_valores(
     return out
 
 
+def _normalizar_selecao_modo_venda(
+    raw: Any,
+    modo_order: list[str],
+    label_map: dict[str, str],
+) -> str:
+    """
+    Garante chave canónica (``ModoValorVenda.value``) para o selectbox.
+    O estado ou versões do Streamlit podem expor o **rótulo** (``format_func``) em vez da opção.
+    """
+    if raw in modo_order:
+        return str(raw)
+    s = (str(raw) if raw is not None else "").strip()
+    for mv in modo_order:
+        if label_map.get(mv) == s:
+            return mv
+    if modo_order:
+        return modo_order[0]
+    return ModoValorVenda.CACHE_VALOR_MEDIO_VENDA.value
+
+
 def _html_analise_mercado_ctx_painel(row: dict[str, Any]) -> str:
     """HTML dos cards de ``relatorio_mercado_contexto_json`` (vazio se não houver tópicos)."""
     raw = row.get("relatorio_mercado_contexto_json")
@@ -1814,6 +1835,12 @@ def _render_simulacao_operacao(
             _mk_mv = _sk("modo_val")
             if _mk_mv in st.session_state and isinstance(st.session_state[_mk_mv], enum.Enum):
                 st.session_state[_mk_mv] = st.session_state[_mk_mv].value
+            if _mk_mv in st.session_state:
+                _mv_ok = _normalizar_selecao_modo_venda(
+                    st.session_state[_mk_mv], modo_order, label_map
+                )
+                if _mv_ok != st.session_state[_mk_mv]:
+                    st.session_state[_mk_mv] = _mv_ok
             modo_sel = st.selectbox(
                 "Fonte da estimativa",
                 options=modo_order,
@@ -1822,7 +1849,10 @@ def _render_simulacao_operacao(
                 key=_mk_mv,
                 help="Montantes calculados na hora. O cache do bairro é escolhido automaticamente pelo registro.",
             )
-            modo = ModoValorVenda(modo_sel)
+            modo_val_str = _normalizar_selecao_modo_venda(modo_sel, modo_order, label_map)
+            if modo_val_str != modo_sel:
+                st.session_state[_mk_mv] = modo_val_str
+            modo = ModoValorVenda(modo_val_str)
             if modo == ModoValorVenda.MANUAL:
                 st.number_input(
                     "Valor manual da venda (R$)",
@@ -2924,6 +2954,123 @@ def _agregar_caches_para_painel_sim(
     }
 
 
+def _proposta_frase_busca_imovel_id(iid: str) -> str:
+    """Texto padrão da pesquisa Firecrawl a partir do registo no Supabase (mesma regra do pipeline)."""
+    from leilao_ia_v2.fc_search.query_builder import montar_frase_busca_mercado
+    from leilao_ia_v2.normalizacao import normalizar_tipo_imovel
+
+    try:
+        cli = get_supabase_client()
+    except Exception:
+        return ""
+    r = leilao_imoveis_repo.buscar_por_id(str(iid).strip(), cli)
+    if not isinstance(r, dict) or not r:
+        return ""
+    try:
+        t = str(normalizar_tipo_imovel(r.get("tipo_imovel")) or "apartamento")
+    except Exception:
+        t = "apartamento"
+    return (montar_frase_busca_mercado(r, t) or "").strip()
+
+
+def _executar_pendente_frase_firecrawl_pos_ingest(frase_digitada: str) -> None:
+    """Corre o Firecrawl Search pós-ingestão com a frase escolhida e depois o cache automático."""
+    p = st.session_state.get("fc_pendente_pos_ingest")
+    if not isinstance(p, dict) or not p.get("leilao_imovel_id"):
+        return
+    frase = (frase_digitada or "").strip()
+    if len(frase) < 8:
+        st.error("A frase de busca deve ter pelo menos 8 caracteres (requisito do Firecrawl Search).")
+        return
+    pl = p.get("payload_comparaveis")
+    if not isinstance(pl, dict):
+        st.error("Dados pendentes inválidos — volte a ingerir o edital.")
+        return
+    try:
+        cli = get_supabase_client()
+    except Exception as e:
+        st.error(f"Supabase indisponível: {e}")
+        return
+    from leilao_ia_v2.fc_search.pipeline import complementar_anuncios_firecrawl_search
+
+    lid = str(p.get("leilao_imovel_id") or "").strip()
+    cap0 = int(p.get("restante_fc_antes_comparaveis") or 0)
+    ign = bool(p.get("ignorar_cache_firecrawl", False))
+    with st.spinner("Firecrawl Search (comparáveis) e montagem de cache…"):
+        try:
+            salvos, diag_fc, n_api = complementar_anuncios_firecrawl_search(
+                cli,
+                leilao_imovel_id=lid,
+                cidade=str(pl.get("cidade") or ""),
+                estado_raw=str(pl.get("estado_raw") or ""),
+                bairro=str(pl.get("bairro") or ""),
+                tipo_imovel=str(pl.get("tipo_imovel") or "apartamento"),
+                area_ref=float(pl.get("area_ref") or 0),
+                ignorar_cache_firecrawl=ign,
+                max_chamadas_api=cap0,
+                frase_busca_override=frase,
+            )
+        except Exception as e:
+            st.error(f"Falha no Firecrawl Search: {e}")
+            logger.exception("Pendente pós-ingest: complementar")
+            return
+        rest2 = max(0, cap0 - int(n_api or 0))
+        try:
+            cres = resolver_cache_media_pos_ingestao(
+                cli,
+                lid,
+                ignorar_cache_firecrawl=ign,
+                max_chamadas_api_firecrawl=rest2,
+                frase_busca_firecrawl_override=frase,
+            )
+        except Exception as e:
+            st.error(f"Falha ao montar cache: {e}")
+            logger.exception("Pendente pós-ingest: resolver cache")
+            return
+    st.session_state.pop("fc_pendente_pos_ingest", None)
+    for k in list(st.session_state.keys()):
+        if k.startswith("fc_pendente_frase_draft"):
+            st.session_state.pop(k, None)
+    st.success(
+        f"Concluído: comparáveis gravados={int(salvos or 0)} · cache={'OK' if cres.ok else cres.mensagem}"
+    )
+    st.text((diag_fc or "")[:4000] + ("\n" + formatar_log_pos_cache(cres))[:2000])
+    try:
+        fresh = leilao_imoveis_repo.buscar_por_id(lid, cli)
+    except Exception:
+        fresh = None
+    if isinstance(fresh, dict) and fresh.get("id"):
+        st.session_state["ultimo_extracao"] = fresh
+    st.rerun()
+
+
+def _render_pendente_frase_firecrawl_pos_ingest() -> None:
+    p = st.session_state.get("fc_pendente_pos_ingest")
+    if not isinstance(p, dict) or not p.get("leilao_imovel_id"):
+        return
+    proposta = str(p.get("frase_proposta") or "")
+    lidp = str(p.get("leilao_imovel_id") or "").strip()
+    kdraft = f"fc_pendente_frase_draft_{lidp}"
+    st.session_state.setdefault(kdraft, proposta)
+    with st.container(border=True):
+        st.warning("**Pendente:** confirmação da frase de **Firecrawl Search** (anúncios na web) antes de gastar créditos.")
+        st.caption("Edite a frase se quiser — o sistema usa exatamente o texto abaixo na pesquisa.")
+        t = st.text_area(
+            "Frase de busca a usar",
+            key=kdraft,
+            height=100,
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Executar busca e montar cache", type="primary", key="fc_pendente_executar"):
+                _executar_pendente_frase_firecrawl_pos_ingest(t)
+        with c2:
+            if st.button("Descartar pendência", key="fc_pendente_descartar"):
+                st.session_state.pop("fc_pendente_pos_ingest", None)
+                st.session_state.pop(kdraft, None)
+                st.rerun()
+
+
 def _html_kpis_caches_simulacao(agg: dict[str, Any]) -> str:
     pm2_t = html.escape(_fmt_rs_m2_resumo(agg.get("media_pm2")))
     vm_t = html.escape(_fmt_valor_campo("valor_venda", agg.get("media_valor")))
@@ -2967,6 +3114,16 @@ def _render_bloco_recalcular_caches_mercado(imovel_id: str) -> None:
             value=False,
             key=f"recache_ignfc_{iid}",
         )
+        bp = parametros_de_session_state(st.session_state)
+        sk = f"recache_frase_draft_{iid}"
+        if bp.confirmar_frase_firecrawl_search:
+            st.session_state.setdefault(sk, _proposta_frase_busca_imovel_id(iid))
+            st.text_area(
+                "Frase de busca (Firecrawl Search)",
+                key=sk,
+                height=90,
+                help="Texto exato a usar na pesquisa web (mínimo 8 caracteres). Ajuste em **Ajustes de busca** para não pedir confirmação.",
+            )
         if st.button(
             "Recalcular caches agora",
             key=f"recache_run_{iid}",
@@ -2977,7 +3134,13 @@ def _render_bloco_recalcular_caches_mercado(imovel_id: str) -> None:
             except Exception as e:
                 st.error(f"Supabase indisponível: {e}")
                 return
-            bp = parametros_de_session_state(st.session_state)
+            frase_oc: str | None = None
+            if bp.confirmar_frase_firecrawl_search:
+                fr = (st.session_state.get(sk) or "").strip()
+                if len(fr) < 8:
+                    st.error("A frase de busca deve ter pelo menos 8 caracteres.")
+                    return
+                frase_oc = fr
             with st.spinner("A desvincular, eventualmente apagar orfãs e a criar novos caches…"):
                 r = recalcular_caches_mercado_para_leilao(
                     cli,
@@ -2986,6 +3149,7 @@ def _render_bloco_recalcular_caches_mercado(imovel_id: str) -> None:
                     ignorar_cache_firecrawl=ign_fc,
                     raio_km=float(bp.raio_km),
                     max_chamadas_api_firecrawl=int(bp.max_firecrawl_creditos_analise),
+                    frase_busca_firecrawl_override=frase_oc,
                 )
             if r.ok:
                 st.success(r.mensagem)
@@ -4397,6 +4561,11 @@ def _render_sidebar_ajustes_busca() -> None:
             key="bm_max_firecrawl_creditos",
             help="Teto de chamadas API (1 search + N scrapes) numa mesma ingestão: edital, comparáveis e montagem de cache partilham este saldo.",
         )
+        st.checkbox(
+            "Confirmar frase (Firecrawl Search)",
+            key="bm_confirmar_frase_fc_search",
+            help="Se ativo, a frase de busca na web é mostrada para confirmar ou editar antes de pesquisar (ingestão e recálculo de cache).",
+        )
         if st.button("Repor padrões", key="bm_reset_defaults", use_container_width=True):
             st.session_state[_BM_APPLY_DEFAULTS_FLAG] = True
             st.rerun()
@@ -4418,40 +4587,37 @@ def _render_sidebar_app() -> None:
     _render_sidebar_ajustes_busca()
 
 
-def _fmt_br_reais(n: float | None) -> str:
-    if n is None:
-        return "—"
-    v = int(round(float(n)))
-    s = f"{v:,}".replace(",", ".")
-    return f"R$ {s}"
+def _dash_txt_card_resumo_local(x: Any) -> str:
+    """Texto do botão nas oportunidades: estado, cidade, bairro e tipo (ex.: apartamento, casa)."""
+    uf = (getattr(x, "estado", None) or "").strip() or "—"
+    cid = (getattr(x, "cidade", None) or "").strip() or "—"
+    bai = (getattr(x, "bairro", None) or "").strip() or "—"
+    tip = (getattr(x, "tipo_imovel", None) or "").strip() or "—"
+    return f"{uf}  ·  {cid}\n{bai}  ·  {tip}"
 
 
-def _dash_txt_card_proximo(x: Any) -> str:
-    dtxt = x.prox_data.strftime("%d/%m/%Y") if x.prox_data else "—"
-    l1 = f"{dtxt}  ·  {x.cidade}/{x.estado}  ·  {x.praca_label or 'praça'}"
-    l2 = (x.bairro or x.endereco or (x.url[:64] if x.url else "") or "—")[:80]
-    return f"{l1}\n{l2}"
-
-
-def _dash_txt_card_lucro(x: Any) -> str:
-    l1 = f"{_fmt_br_reais(x.lucro_liq)}  ·  {x.cidade}/{x.estado}"
-    l2 = (x.bairro or x.endereco or (x.url[:64] if x.url else "") or "—")[:80]
-    return f"{l1}\n{l2}"
-
-
-def _dash_txt_card_pendencia(x: Any) -> str:
-    faltas: list[str] = []
-    if not x.tem_simulacao:
-        faltas.append("simulação")
-    if not x.tem_mercado_llm:
-        faltas.append("mercado")
-    dtxt = x.prox_data.strftime("%d/%m/%Y") if x.prox_data else "sem data"
-    l1 = f"{dtxt}  ·  {x.cidade} / {x.estado}"
-    l2 = "Falta: " + (", ".join(faltas) if faltas else "—")
-    l3 = (x.bairro or (x.endereco[:56] if x.endereco else "") or "")[:60]
-    if l3:
-        return f"{l1}\n{l2}\n{l3}"
-    return f"{l1}\n{l2}"
+def _dash_linha_oportunidade_com_foto(x: Any, *, texto_botao: str, st_key: str, modo_aba: str) -> None:
+    """Uma linha de oportunidade: miniatura (``url_foto_imovel``) + botão de navegação."""
+    c_img, c_txt = st.columns([0.2, 0.8], gap="small")
+    with c_img:
+        u = getattr(x, "url_foto_imovel", None)
+        if u:
+            uq = html.escape(str(u), quote=True)
+            st.markdown(
+                f'<div class="dash-op-thumb-wrap"><img src="{uq}" alt="" loading="lazy" '
+                f'referrerpolicy="no-referrer" width="72" height="72" '
+                "style=\"display:block;width:72px;height:72px;object-fit:cover;border-radius:10px;"
+                'border:1px solid rgba(255,255,255,0.08);\" /></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="dash-op-thumb-ph" title="Sem foto no edital"></div>',
+                unsafe_allow_html=True,
+            )
+    with c_txt:
+        if st.button(texto_botao, key=st_key, use_container_width=True, type="secondary"):
+            _abrir_leilao_e_mudar_aba(x.id, modo_aba)
 
 
 def _abrir_leilao_e_mudar_aba(iid: str, modo: str) -> None:
@@ -4637,13 +4803,12 @@ def _render_painel_inicial() -> None:
                 unsafe_allow_html=True,
             )
             for i, x in enumerate(prox_s[:8]):
-                if st.button(
-                    _dash_txt_card_proximo(x),
-                    key=f"dbc_prox_{i}_{x.id}",
-                    use_container_width=True,
-                    type="secondary",
-                ):
-                    _abrir_leilao_e_mudar_aba(x.id, "ingestao")
+                _dash_linha_oportunidade_com_foto(
+                    x,
+                    texto_botao=_dash_txt_card_resumo_local(x),
+                    st_key=f"dbc_prox_{i}_{x.id}",
+                    modo_aba="ingestao",
+                )
     with a2:
         with st.container(border=True):
             st.markdown(
@@ -4652,13 +4817,12 @@ def _render_painel_inicial() -> None:
                 unsafe_allow_html=True,
             )
             for i, x in enumerate(top_s[:8]):
-                if st.button(
-                    _dash_txt_card_lucro(x),
-                    key=f"dbc_luc_{i}_{x.id}",
-                    use_container_width=True,
-                    type="secondary",
-                ):
-                    _abrir_leilao_e_mudar_aba(x.id, "simulacao")
+                _dash_linha_oportunidade_com_foto(
+                    x,
+                    texto_botao=_dash_txt_card_resumo_local(x),
+                    st_key=f"dbc_luc_{i}_{x.id}",
+                    modo_aba="simulacao",
+                )
     with a3:
         with st.container(border=True):
             st.markdown(
@@ -4666,13 +4830,12 @@ def _render_painel_inicial() -> None:
                 unsafe_allow_html=True,
             )
             for i, x in enumerate(pnd_s[:8]):
-                if st.button(
-                    _dash_txt_card_pendencia(x),
-                    key=f"dbc_pnd_{i}_{x.id}",
-                    use_container_width=True,
-                    type="secondary",
-                ):
-                    _abrir_leilao_e_mudar_aba(x.id, "simulacao")
+                _dash_linha_oportunidade_com_foto(
+                    x,
+                    texto_botao=_dash_txt_card_resumo_local(x),
+                    st_key=f"dbc_pnd_{i}_{x.id}",
+                    modo_aba="simulacao",
+                )
     st.divider()
 
 
@@ -4704,6 +4867,8 @@ def _render_conteudo_principal() -> None:
     if st.session_state.pending_duplicate_url:
         _render_bloco_duplicata_ingestao()
         st.stop()
+
+    _render_pendente_frase_firecrawl_pos_ingest()
 
     _sp_hero = st.session_state.snapshot or {}
     _st_hero = _sp_hero.get("status")

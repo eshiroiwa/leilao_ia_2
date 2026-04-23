@@ -34,11 +34,13 @@ def complementar_anuncios_firecrawl_search(
     area_ref: float,
     ignorar_cache_firecrawl: bool,
     max_chamadas_api: int | None = None,
+    frase_busca_override: str | None = None,
 ) -> tuple[int, str, int]:
     """
     Complemento de ``anuncios_mercado`` via Firecrawl Search + scrape de 3–5 portais.
 
     Usa os mesmos campos de geolocalização e persistência que o fluxo Viva Real.
+    Com ``frase_busca_override``, essa cadeia (após ``strip``) substitui a frase montada a partir do edital.
 
     Devolve ``(n_gravados, diagnostico_texto, n_chamadas_api_estimadas)`` — ``n_chamadas_api_estimadas``
     soma 1 por ``search`` e 1 por cada ``scrape`` HTTP executado (alinhado ao painel de uso).
@@ -63,7 +65,12 @@ def complementar_anuncios_firecrawl_search(
         linhas.append(f"erro: leilão não encontrado no Supabase (id={lid})")
         return 0, _diag(), 0
 
-    query = montar_frase_busca_mercado(row, tipo_imovel)
+    override = (str(frase_busca_override).strip() if frase_busca_override is not None else "") or None
+    if override:
+        query = override
+        linhas.append("search: frase=override_utilizador")
+    else:
+        query = montar_frase_busca_mercado(row, tipo_imovel)
     if not query or len(query) < 8:
         logger.warning("Firecrawl Search complemento: frase de busca vazia demais")
         linhas.append(f"erro: frase_busca inválida ou curta demais (len={len(query or '')})")

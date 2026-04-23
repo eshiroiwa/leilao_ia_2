@@ -350,27 +350,44 @@ def executar_ingestao_edital(
 
         log_parts.append(comparaveis_pos_ingestao.formatar_log_pos_ingestao(summ))
 
-        restante_fc = max(0, restante_fc - int(summ.get("firecrawl_chamadas_api") or 0))
-        try:
-            cres = resolver_cache_media_pos_ingestao(
-                client,
-                imovel_id,
-                ignorar_cache_firecrawl=ignorar_cache_firecrawl,
-                max_chamadas_api_firecrawl=restante_fc,
+        if summ.get("aguarda_confirmacao_frase"):
+            try:
+                import streamlit as st
+
+                st.session_state["fc_pendente_pos_ingest"] = {
+                    "leilao_imovel_id": str(imovel_id),
+                    "frase_proposta": str(summ.get("frase_proposta") or ""),
+                    "restante_fc_antes_comparaveis": int(restante_fc),
+                    "payload_comparaveis": dict(summ.get("payload_comparaveis") or {}),
+                    "ignorar_cache_firecrawl": bool(ignorar_cache_firecrawl),
+                }
+            except Exception:
+                pass
+            log_parts.append(
+                "Cache (automático): adiado — aguarda confirmação da frase de busca (Firecrawl) na aplicação."
             )
-            pos_cache = {
-                "ok": cres.ok,
-                "mensagem": cres.mensagem,
-                "reutilizou_existente": cres.reutilizou_existente,
-                "usou_firecrawl_extra": cres.usou_firecrawl_extra,
-                "caches_criados": cres.caches_criados,
-                "firecrawl_chamadas_api": int(getattr(cres, "firecrawl_chamadas_api", 0) or 0),
-            }
-            log_parts.append(formatar_log_pos_cache(cres))
-        except Exception:
-            logger.exception("Cache (automático) pós-ingestão")
-            pos_cache = {"ok": False, "erro": "excecao_ver_log", "firecrawl_chamadas_api": 0}
-            log_parts.append("Cache (automático): falha — exceção (ver log).")
+        else:
+            restante_fc = max(0, restante_fc - int(summ.get("firecrawl_chamadas_api") or 0))
+            try:
+                cres = resolver_cache_media_pos_ingestao(
+                    client,
+                    imovel_id,
+                    ignorar_cache_firecrawl=ignorar_cache_firecrawl,
+                    max_chamadas_api_firecrawl=restante_fc,
+                )
+                pos_cache = {
+                    "ok": cres.ok,
+                    "mensagem": cres.mensagem,
+                    "reutilizou_existente": cres.reutilizou_existente,
+                    "usou_firecrawl_extra": cres.usou_firecrawl_extra,
+                    "caches_criados": cres.caches_criados,
+                    "firecrawl_chamadas_api": int(getattr(cres, "firecrawl_chamadas_api", 0) or 0),
+                }
+                log_parts.append(formatar_log_pos_cache(cres))
+            except Exception:
+                logger.exception("Cache (automático) pós-ingestão")
+                pos_cache = {"ok": False, "erro": "excecao_ver_log", "firecrawl_chamadas_api": 0}
+                log_parts.append("Cache (automático): falha — exceção (ver log).")
 
         final_log = _montar_log_linhas(*log_parts, f"Tokens: {metricas}")
         try:

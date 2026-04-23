@@ -558,10 +558,6 @@ def _resultado_por_modo_e_tempo(
         pmt = 0.0
         saldo_q = 0.0
         juros_ate = 0.0
-        explic.append(
-            f"Modalidade **à vista**: lucro/ROI com custo do subtotal até a venda. "
-            f"ROI anualizado com tempo estimado T = {T:.1f} meses."
-        )
     elif modo == ModoPagamentoSimulacao.PRAZO:
         e_pct = max(0.0, min(95.0, float(getattr(inp, "prazo_entrada_pct", 30.0) or 0.0)))
         n = max(1, min(60, int(getattr(inp, "prazo_num_parcelas", 30) or 30)))

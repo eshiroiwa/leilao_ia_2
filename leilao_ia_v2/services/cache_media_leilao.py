@@ -393,6 +393,7 @@ def _uma_coleta_firecrawl_search(
     leilao_id: str,
     ignorar_cache_firecrawl: bool,
     max_chamadas_api: int | None = None,
+    frase_busca_override: str | None = None,
 ) -> tuple[int, int]:
     """Devolve ``(n_anuncios_gravados, n_chamadas_api_estimadas)``."""
     if not os.getenv("FIRECRAWL_API_KEY", "").strip():
@@ -410,6 +411,7 @@ def _uma_coleta_firecrawl_search(
             area_ref=float(area_ref or 0),
             ignorar_cache_firecrawl=ignorar_cache_firecrawl,
             max_chamadas_api=max_chamadas_api,
+            frase_busca_override=frase_busca_override,
         )
         return int(n_fc or 0), int(n_api or 0)
     except Exception:
@@ -758,11 +760,13 @@ def _montar_amostras_para_tipos(
     ignorar_cache_firecrawl: bool,
     max_chamadas_api_firecrawl: int | None = None,
     leilao: dict[str, Any] | None = None,
+    frase_busca_firecrawl_override: str | None = None,
 ) -> tuple[list[dict[str, Any]], bool, str, str, int]:
     """
     Devolve (amostras, usou_firecrawl_listagem, mensagem_erro, log_diagnostico, n_chamadas_api_fc).
     ``usou_firecrawl_listagem`` indica se Firecrawl Search foi usado com sucesso (amostras suficientes após a rodada).
     ``n_chamadas_api_fc`` é a estimativa de chamadas à API (só >0 quando ``_uma_coleta_firecrawl_search`` corre).
+    ``frase_busca_firecrawl_override`` substitui a frase automática nessa ida à pesquisa web (confirmação do utilizador).
     ``max_chamadas_api_firecrawl``: teto de chamadas (search + scrapes) para esta rodada; ``None`` = sem teto extra.
     Ordem: (1) lista no BD por cidade/UF/tipos → filtro raio/área; (2) geocode + re-lista;
     (3) só se ainda faltar amostra, uma Firecrawl Search → re-lista.
@@ -844,6 +848,7 @@ def _montar_amostras_para_tipos(
             leilao_id=leilao_id,
             ignorar_cache_firecrawl=ignorar_cache_firecrawl,
             max_chamadas_api=max_chamadas_api_firecrawl,
+            frase_busca_override=frase_busca_firecrawl_override,
         )
         logger.info(
             "Complemento Firecrawl Search para cache: %s anúncios gravados (api_estimada=%s)",
@@ -1053,6 +1058,7 @@ def resolver_cache_media_pos_ingestao(
     ignorar_cache_firecrawl: bool = False,
     raio_km: float | None = None,
     max_chamadas_api_firecrawl: int | None = None,
+    frase_busca_firecrawl_override: str | None = None,
 ) -> ResultadoCriacaoCacheLeilao:
     """
     Fluxo automático pós-ingestão: tenta **reutilizar** linhas em ``cache_media_bairro`` no mesmo
@@ -1192,6 +1198,7 @@ def resolver_cache_media_pos_ingestao(
             ignorar_cache_firecrawl=ignorar_cache_firecrawl,
             max_chamadas_api_firecrawl=orcamento_fc,
             leilao=leilao,
+            frase_busca_firecrawl_override=frase_busca_firecrawl_override,
         )
         if usou_vr:
             usou_fc = True
@@ -1258,6 +1265,7 @@ def resolver_cache_media_pos_ingestao(
                 ignorar_cache_firecrawl=ignorar_cache_firecrawl,
                 max_chamadas_api_firecrawl=orcamento_fc,
                 leilao=leilao,
+                frase_busca_firecrawl_override=frase_busca_firecrawl_override,
             )
             if usou_vr2:
                 usou_fc = True
@@ -1331,6 +1339,7 @@ def criar_caches_media_para_leilao(
     ignorar_cache_firecrawl: bool = False,
     raio_km: float | None = None,
     max_chamadas_api_firecrawl: int | None = None,
+    frase_busca_firecrawl_override: str | None = None,
 ) -> ResultadoCriacaoCacheLeilao:
     """
     Cria um ou dois caches (principal + opcional terrenos só a partir do já existente no BD).
@@ -1407,6 +1416,7 @@ def criar_caches_media_para_leilao(
         ignorar_cache_firecrawl=ignorar_cache_firecrawl,
         max_chamadas_api_firecrawl=orcamento_fc,
         leilao=leilao,
+        frase_busca_firecrawl_override=frase_busca_firecrawl_override,
     )
     if usou_vr:
         usou_fc = True
@@ -1460,6 +1470,7 @@ def criar_caches_media_para_leilao(
             ignorar_cache_firecrawl=ignorar_cache_firecrawl,
             max_chamadas_api_firecrawl=orcamento_fc,
             leilao=leilao,
+            frase_busca_firecrawl_override=frase_busca_firecrawl_override,
         )
         if usou_vr2:
             usou_fc = True
@@ -1513,6 +1524,7 @@ def recalcular_caches_mercado_para_leilao(
     ignorar_cache_firecrawl: bool = False,
     raio_km: float | None = None,
     max_chamadas_api_firecrawl: int | None = None,
+    frase_busca_firecrawl_override: str | None = None,
 ) -> ResultadoCriacaoCacheLeilao:
     """
     Recálculo: remove todos os UUIDs de ``cache_media_bairro`` do imóvel, depois cria novos caches
@@ -1562,6 +1574,7 @@ def recalcular_caches_mercado_para_leilao(
         ignorar_cache_firecrawl=ignorar_cache_firecrawl,
         raio_km=raio_km,
         max_chamadas_api_firecrawl=max_chamadas_api_firecrawl,
+        frase_busca_firecrawl_override=frase_busca_firecrawl_override,
     )
     if not anteriores and not orfas_apagadas:
         return res

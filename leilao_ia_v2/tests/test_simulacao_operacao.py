@@ -367,3 +367,23 @@ def test_financiado_sac_primeira_prestacao_inclui_juros_sobre_saldo():
     o = calcular_simulacao(row_leilao=row, inp=inp, caches_ordenados=[cache], ads_por_id={}).outputs
     assert o is not None
     assert abs(o.pmt_mensal_resolvido - p1) < 1.0
+
+
+def test_normalizar_selecao_modo_venda_reverte_rotulo_format_func():
+    """Evita ValueError quando o estado do selectbox guarda o rótulo (ex.: Manual — R$ …)."""
+    from leilao_ia_v2.app_assistente_ingestao import _normalizar_selecao_modo_venda
+
+    order = [
+        ModoValorVenda.CACHE_VALOR_MEDIO_VENDA.value,
+        ModoValorVenda.MANUAL.value,
+    ]
+    labels = {
+        ModoValorVenda.CACHE_VALOR_MEDIO_VENDA.value: "Cache · valor médio — R$ 800.000,00",
+        ModoValorVenda.MANUAL.value: "Manual — R$ 1.400.000,00",
+    }
+    assert _normalizar_selecao_modo_venda("manual", order, labels) == ModoValorVenda.MANUAL.value
+    assert (
+        _normalizar_selecao_modo_venda("Manual — R$ 1.400.000,00", order, labels)
+        == ModoValorVenda.MANUAL.value
+    )
+    assert _normalizar_selecao_modo_venda(None, order, labels) in order

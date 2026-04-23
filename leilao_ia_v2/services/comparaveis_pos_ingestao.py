@@ -12,7 +12,8 @@ from typing import Any
 from supabase import Client
 
 from leilao_ia_v2.config.busca_mercado_parametros import get_busca_mercado_parametros
-from leilao_ia_v2.persistence import anuncios_mercado_repo
+from leilao_ia_v2.fc_search.query_builder import montar_frase_busca_mercado
+from leilao_ia_v2.persistence import anuncios_mercado_repo, leilao_imoveis_repo
 from leilao_ia_v2.schemas.edital import ExtracaoEditalLLM
 from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
 
@@ -49,6 +50,9 @@ def _listagem_bd_parece_suficiente_para_comparaveis(
 
 def formatar_log_pos_ingestao(resumo: dict[str, Any]) -> str:
     """Texto curto para anexar a ``ultima_ingestao_log_text``."""
+    if resumo.get("aguarda_confirmacao_frase"):
+        p = (resumo.get("frase_proposta") or "")[:200]
+        return f"Comparáveis (Firecrawl): aguarda confirmação da frase na app — proposta (prévia)={p!r}"
     if resumo.get("omitido"):
         return f"Comparáveis (Firecrawl): omitido — {resumo.get('motivo', '')}"
     if not resumo.get("ok"):
@@ -142,6 +146,35 @@ def executar_comparaveis_apos_ingestao_leilao(
             area_ref = float(extn.area_total)
     except (TypeError, ValueError):
         area_ref = 0.0
+
+    if get_busca_mercado_parametros().confirmar_frase_firecrawl_search:
+        proposta = ""
+        row_cf = leilao_imoveis_repo.buscar_por_id(str(leilao_imovel_id), client)
+        if isinstance(row_cf, dict):
+            try:
+                proposta = (montar_frase_busca_mercado(row_cf, tipo_imovel) or "").strip()
+            except Exception:
+                logger.debug("montar_frase_busca_mercado (confirmação pós-ingestão)", exc_info=True)
+        return {
+            "ok": True,
+            "omitido": True,
+            "motivo": "aguarda_confirmacao_frase_firecrawl",
+            "aguarda_confirmacao_frase": True,
+            "frase_proposta": proposta,
+            "payload_comparaveis": {
+                "cidade": cidade,
+                "estado_raw": estado_raw,
+                "bairro": bairro,
+                "tipo_imovel": tipo_imovel,
+                "area_ref": float(area_ref or 0),
+            },
+            "anuncios_salvos": 0,
+            "url_listagem": "",
+            "n_geocodificados": 0,
+            "markdown_insuficiente": True,
+            "firecrawl_chamadas_api": 0,
+            "diagnostico_firecrawl_search": "Confirme ou edite a frase na aplicação para executar o Firecrawl Search.",
+        }
 
     try:
         from leilao_ia_v2.fc_search.pipeline import complementar_anuncios_firecrawl_search

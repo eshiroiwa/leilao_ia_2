@@ -26,6 +26,8 @@ class BuscaMercadoParametros:
     area_fator_max: float = 1.45
     raio_km: float = 10.0
     min_amostras_cache: int = 3
+    #: Se True, a app mostra a frase do Firecrawl Search para confirmar/alterar antes de pesquisar.
+    confirmar_frase_firecrawl_search: bool = False
     #: Teto de chamadas Firecrawl (search + scrapes) por **análise/ingestão** e por invocação de cache isolada.
     max_firecrawl_creditos_analise: int = 15
     #: Máximo de anúncios no **cache principal** (simulação); o resto vai a caches de referência em lotes.
@@ -50,6 +52,19 @@ def _clamp_float(v: Any, lo: float, hi: float, default: float) -> float:
     return max(lo, min(hi, x))
 
 
+def _bool_sess(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on", "sim"):
+        return True
+    if s in ("0", "false", "no", "off", "não", "nao"):
+        return False
+    return default
+
+
 def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametros:
     """
     Constrói parâmetros a partir do estado da sessão Streamlit.
@@ -66,6 +81,7 @@ def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametr
     max_fc_src = sess.get("bm_max_firecrawl_creditos", d.get("max_firecrawl_creditos_analise", 15))
     cap_pri_src = sess.get("bm_cache_max_principal", d.get("cache_max_amostras_principal", 10))
     cap_lote_src = sess.get("bm_cache_max_lote", d.get("cache_max_amostras_lote", 10))
+    conf_fc_src = sess.get("bm_confirmar_frase_fc_search", d.get("confirmar_frase_firecrawl_search", False))
 
     amin_p = _clamp_int(amin_src, 30, 120, 65)
     amax_p = _clamp_int(amax_src, 80, 350, 145)
@@ -87,6 +103,7 @@ def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametr
         area_fator_max=amax_p / 100.0,
         raio_km=raio,
         min_amostras_cache=min_cache,
+        confirmar_frase_firecrawl_search=_bool_sess(conf_fc_src, False),
         max_firecrawl_creditos_analise=max_fc,
         cache_max_amostras_principal=cap_pri,
         cache_max_amostras_lote=cap_lote,
@@ -135,4 +152,5 @@ def defaults_chaves_busca_mercado_session() -> dict[str, Any]:
         "bm_max_firecrawl_creditos": 15,
         "bm_cache_max_principal": 10,
         "bm_cache_max_lote": 10,
+        "bm_confirmar_frase_fc_search": False,
     }
