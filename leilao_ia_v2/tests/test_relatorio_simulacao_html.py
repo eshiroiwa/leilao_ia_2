@@ -19,6 +19,7 @@ def test_relatorio_inclui_dados_adicionais_leilao_extra():
     }
     doc = OperacaoSimulacaoDocumento()
     html = montar_html_relatorio_simulacao(row=row, caches=[], ads_map={}, doc=doc)
+    assert "dc-root" in html and "sp-sim-financeiro" in html
     assert "Dados adicionais" in html
     assert "formas_pagamento" in html
     assert "financiamento" in html

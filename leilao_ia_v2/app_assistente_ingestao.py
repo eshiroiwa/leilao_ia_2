@@ -65,10 +65,7 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
 )
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
 from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS as _PAGE_CSS
-from leilao_ia_v2.ui.dashboard_comparacao_modais import (
-    build_dashboard_comparacao_html,
-    build_painel_simulacao_resumo_html,
-)
+from leilao_ia_v2.ui.dashboard_comparacao_modais import build_painel_simulacao_resumo_html
 from leilao_ia_v2.ui.simulacao_estado import (
     TAGS,
     construir_inputs_de_sessao,
@@ -1192,76 +1189,6 @@ def _construir_inp_por_tag(
     return inp, it0
 
 
-def _render_aba_comparacoes(
-    row: dict[str, Any],
-    caches: list[dict[str, Any]],
-    ads_map: dict[str, dict[str, Any]],
-) -> None:
-    iid = str(row.get("id") or "").strip()
-    if not iid:
-        return
-    _simop_hidratar_modalidades(iid, row, row.get("operacao_simulacao_json"))
-    simop_ensure_tempo_venda_global(iid)
-    st.caption(
-        "Mesmo **lance** para as três modalidades. Ajuste premissas na aba **Simulação**; "
-        "valores não gravados ainda entram no cálculo. **Gravar** aí persiste tudo no banco."
-    )
-    _suf_cmp = str(iid).replace("-", "")[:20]
-    k_dash = f"simop_dash_lance_brl_{_suf_cmp}"
-    k_trk = f"simop_dash_trk_lance_db_{_suf_cmp}"
-    lance_gravado = _lance_brl_da_simulacao_gravada(row)
-    trk = st.session_state.get(k_trk)
-    if lance_gravado > 0 and (trk is None or abs(float(trk) - lance_gravado) > 0.5):
-        st.session_state[k_dash] = lance_gravado
-        st.session_state[k_trk] = lance_gravado
-    elif k_dash not in st.session_state:
-        lv0 = float(st.session_state.get(simop_key(iid, "vista", "lance"), 0) or 0)
-        l1p = float(_lance_valor_praca_row(row, segunda=False) or 0.0)
-        l2p = float(_lance_valor_praca_row(row, segunda=True) or 0.0)
-        st.session_state[k_dash] = max(lv0, l1p, l2p, 0.0) or 0.0
-        st.session_state[k_trk] = lance_gravado if lance_gravado > 0 else None
-    c_d0, c_d1 = st.columns([2, 1], gap="medium")
-    with c_d0:
-        st.number_input(
-            "Lance único para as 3 modalidades (R$)",
-            min_value=0.0,
-            step=1000.0,
-            key=k_dash,
-            format="%.0f",
-            help="À vista, parcelado e financiado recalculam com este mesmo lance.",
-        )
-    with c_d1:
-        st.caption("Cada card recalcula a modalidade com o mesmo lance. Tempo T e % vêm da Simulação.")
-
-    lance_dash = max(0.0, float(st.session_state.get(k_dash) or 0.0))
-
-    def _doc_mesmo_lance(tag_sim: str) -> OperacaoSimulacaoDocumento:
-        inp, _t0 = _construir_inp_por_tag(iid, row, tag_sim, caches)
-        inp2 = inp.model_copy(update={"lance_brl": lance_dash})
-        return calcular_simulacao(
-            row_leilao=row, inp=inp2, caches_ordenados=caches, ads_por_id=ads_map
-        )
-
-    try:
-        d_v = _doc_mesmo_lance("vista")
-        d_p = _doc_mesmo_lance("prazo")
-        d_f = _doc_mesmo_lance("financiado")
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Dashboard de comparação")
-        st.error(f"Não foi possível simular: {e}")
-        return
-    if not (d_v.outputs and d_p.outputs and d_f.outputs):
-        st.info("Ajuste o **lance** e parâmetros na aba **Simulação** (cache, encargos) e volte.")
-        return
-
-    st.markdown(
-        build_dashboard_comparacao_html(
-            lance=lance_dash, doc_vista=d_v, doc_prazo=d_p, doc_fin=d_f
-        ),
-        unsafe_allow_html=True,
-    )
-
-
 def _render_aba_simulacao() -> None:
     """Formulário e resultados lado a lado; o leilão ativo vem da tabela no topo da página."""
     _STATUS_EXCLUI_MAPA = frozenset({"processando", "sem_conteudo", "url_invalida"})
@@ -1296,11 +1223,7 @@ def _render_aba_simulacao() -> None:
 
     caches_ui, ads_map_ui = _carregar_caches_e_anuncios_ui(row_ex)
 
-    tab_s, tab_c = st.tabs(["Simulação", "Comparar"])
-    with tab_s:
-        _render_simulacao_operacao(row_ex, caches_ui, ads_map_ui)
-    with tab_c:
-        _render_aba_comparacoes(row_ex, caches_ui, ads_map_ui)
+    _render_simulacao_operacao(row_ex, caches_ui, ads_map_ui)
 
     st.markdown("**Relatório HTML**")
     rid = str(row_ex.get("id") or "").strip()
@@ -1378,11 +1301,19 @@ def _render_aba_simulacao() -> None:
             doc_rep = parse_operacao_simulacao_json(raw_snap)
         else:
             doc_rep = parse_operacao_simulacao_json(row_ex.get("operacao_simulacao_json"))
+        k_cmp = simop_key_cmp_painel(rid)
+        # Mesma chave usada após o rádio de comparação (evita divergência com simop_key_cmp_painel).
+        _cache_cmp = st.session_state.get(f"_rpt_painel_cmp|{rid}")
+        if isinstance(_cache_cmp, dict) and str(_cache_cmp.get("sel") or "").strip():
+            cmp_sel = str(_cache_cmp.get("sel") or "nenhum").strip().lower()
+        else:
+            cmp_sel = str(st.session_state.get(k_cmp) or "nenhum").strip().lower()
         html_rep = montar_html_relatorio_simulacao(
             row=row_ex,
             caches=caches_ui,
             ads_map=ads_map_ui,
             doc=doc_rep,
+            cmp_painel=cmp_sel,
         )
         fn = (
             f"relatorio_simulacao_{rid[:8] or 'leilao'}_"
@@ -1393,7 +1324,7 @@ def _render_aba_simulacao() -> None:
             data=html_rep.encode("utf-8"),
             file_name=fn,
             mime="text/html",
-            key="sim_gerar_relatorio_html",
+            key=f"sim_gerar_rel_{rid[:12] or 'x'}_{cmp_sel}",
             help="HTML único: edital, dados adicionais, análise de mercado (se você gerou via LLM), comparáveis, mapa e painel financeiro.",
             use_container_width=False,
         )
@@ -1591,9 +1522,9 @@ def _render_simulacao_operacao(
 ) -> None:
     """Simulação de custos, venda estimada (cache), IR editável, lucro/ROI — persiste em ``operacao_simulacao_json``.
 
-    Formulário em fluxo único; o painel financeiro (estilo **Comparar**) aparece abaixo dos campos
+    Formulário em fluxo único; o painel financeiro aparece abaixo dos campos
     e da área de persistência. ``form_column`` / ``results_column`` permanecem por compatibilidade
-    (ambos ``None`` na aba Simulação).
+    (ambos ``None`` neste fluxo).
     """
     iid = str(row.get("id") or "").strip()
     if not iid:
@@ -1731,7 +1662,7 @@ def _render_simulacao_operacao(
             format="%.1f",
             key=tvk,
             help="Mesmo T para **à vista**, **parcelado** e **financiado**: afeta fluxo, saldo, juros, ROI e anualização. "
-            "A aba **Comparar** (dashboard) e cada modalidade usam este valor.",
+            "A comparação de painéis (quando ativa) e cada modalidade usam este valor.",
         )
         st.toggle(
             "Mostrar opções de parcelado (judicial) e de financiamento (bancário)",
@@ -2347,12 +2278,18 @@ def _render_simulacao_operacao(
                 if o and o.notas:
                     for n in o.notas:
                         st.caption(n)
+            # Cache para o «Gerar relatório HTML»: mesmos resultados e seleção de comparação que a tela.
+            st.session_state[f"_rpt_painel_cmp|{iid}"] = {
+                "sel": str(st.session_state.get(k_cmp_painel) or "nenhum"),
+                "out": o_cmp.model_dump(mode="json") if o_cmp is not None else None,
+            }
             _render_analise_mercado_abaixo_painel(row)
 
     if results_column is not None:
         with results_column:
             _pinta_saida_sim(o, titulo="À vista")
             _render_analise_mercado_abaixo_painel(row)
+        st.session_state[f"_rpt_painel_cmp|{iid}"] = {"sel": "nenhum", "out": None}
 
 
 def _render_mapa_folium_row(

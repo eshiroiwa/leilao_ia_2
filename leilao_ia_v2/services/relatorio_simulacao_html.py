@@ -8,10 +8,20 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from leilao_ia_v2.schemas.operacao_simulacao import OperacaoSimulacaoDocumento, SimulacaoOperacaoOutputs
+logger = logging.getLogger(__name__)
+
+from leilao_ia_v2.schemas.operacao_simulacao import (
+    OperacaoSimulacaoDocumento,
+    SimulacaoOperacaoOutputs,
+)
+from leilao_ia_v2.ui.dashboard_comparacao_modais import (
+    PAINEL_SIMULACAO_RESUMO_DASH_STYLES,
+    build_painel_simulacao_resumo_html,
+)
 from leilao_ia_v2.schemas.relatorio_mercado_contexto import parse_relatorio_mercado_contexto_json
 from leilao_ia_v2.services.simulacao_operacao import calcular_simulacao
 
@@ -68,6 +78,17 @@ a.lei-top { color: var(--acc); word-break: break-all; }
 .rel-ctx-card .rel-ctx-tit { font-size: 0.78rem; font-weight: 700; color: var(--acc); margin-bottom: 10px; line-height: 1.3; }
 .rel-ctx-card ul { margin: 0; padding-left: 1.1em; color: var(--txt); font-size: 0.86rem; line-height: 1.45; }
 .rel-ctx-card li { margin-bottom: 6px; }
+.rel-sim-cmp-paineis { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; align-items: start; }
+@media (max-width: 900px) { .rel-sim-cmp-paineis { grid-template-columns: 1fr; } }
+.rel-sim-painel-slot { min-width: 0; }
+.rel-sim-cmp-tit {
+  font-size: 0.72rem; font-weight: 700; color: #5eead4; letter-spacing: 0.04em; text-transform: uppercase;
+  margin: 0.15rem 0 0.45rem 0; padding: 0 0.1rem;
+}
+.rel-sim-painel-borda {
+  border: 1px solid var(--bd); border-radius: 16px; overflow: hidden; background: rgba(15, 23, 42, 0.35);
+}
+.rel-sim-embed .dc-root.sp-sim-financeiro { margin: 0; border-radius: 0; box-shadow: none; }
 """
 
 
@@ -240,6 +261,91 @@ def _fmt_rs_m2_br(v: float) -> str:
     return s + " R$/m²"
 
 
+def _monta_painel_rel_embed(o: SimulacaoOperacaoOutputs) -> str:
+    """Fragmento de painel (sem CSS); estilos em ``PAINEL_SIMULACAO_RESUMO_DASH_STYLES`` no head."""
+    return build_painel_simulacao_resumo_html(
+        o,
+        embutir_css=False,
+        incluir_cabecalho_rodape=False,
+    )
+
+
+def _o_cmp_do_cache_streamlit(iid: str, sel_esperada: str) -> SimulacaoOperacaoOutputs | None:
+    """
+    Lê a saída do painel de comparação gravada em sessão em ``_rpt_painel_cmp|{iid}``
+    (mesma simulação que a aba mostra). Fora do Streamlit / sem cache, devolve None.
+    """
+    try:
+        import streamlit as st
+
+        raw = st.session_state.get(f"_rpt_painel_cmp|{iid}")
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    if str(raw.get("sel") or "").strip().lower() != sel_esperada.strip().lower():
+        return None
+    out = raw.get("out")
+    if not out:
+        return None
+    try:
+        return SimulacaoOperacaoOutputs.model_validate(out)
+    except Exception:
+        return None
+
+
+def _html_secao_paineis_simulacao(
+    ag: Any,
+    row: dict[str, Any],
+    caches: list[dict[str, Any]],
+    ads_map: dict[str, dict[str, Any]],
+    o: SimulacaoOperacaoOutputs,
+    cmp_painel: str,
+) -> tuple[str, list[SimulacaoOperacaoOutputs]]:
+    """Mesmo layout do painel da aba Simulação; coluna extra se comparação ativa. Devolve HTML + outputs p/ notas."""
+    bloco_unico = f'<div class="rel-sim-embed rel-sim-painel-borda">{_monta_painel_rel_embed(o)}</div>'
+
+    cp = (cmp_painel or "nenhum").strip().lower()
+    if cp not in ("prazo", "financiado"):
+        return f'<div class="rel-sim-cmp-unico">{bloco_unico}</div>', [o]
+
+    iid = str(row.get("id") or "").strip()
+    if not iid:
+        return f'<div class="rel-sim-cmp-unico">{bloco_unico}</div>', [o]
+
+    tag = "prazo" if cp == "prazo" else "financiado"
+    tit_cmp = (
+        "Parcelado (judicial) — comparação" if tag == "prazo" else "Financiado (bancário) — comparação"
+    )
+    o2: SimulacaoOperacaoOutputs | None = _o_cmp_do_cache_streamlit(iid, cp)
+    if o2 is None:
+        try:
+            inp2, _t0 = ag._construir_inp_por_tag(iid, row, tag, caches)
+            d2 = calcular_simulacao(
+                row_leilao=row, inp=inp2, caches_ordenados=caches, ads_por_id=ads_map
+            )
+            o2 = d2.outputs
+        except Exception:
+            logger.exception("Relatório HTML: simulação do painel de comparação (fallback recálculo)")
+            o2 = None
+
+    if o2 is None:
+        return f'<div class="rel-sim-cmp-unico">{bloco_unico}</div>', [o]
+
+    slot_v = (
+        '<div class="rel-sim-painel-slot">'
+        f'<p class="rel-sim-cmp-tit">{html.escape("À vista — painel principal")}</p>'
+        f'{bloco_unico}</div>'
+    )
+    bloco_cmp = f'<div class="rel-sim-embed rel-sim-painel-borda">{_monta_painel_rel_embed(o2)}</div>'
+    slot_c = (
+        '<div class="rel-sim-painel-slot">'
+        f'<p class="rel-sim-cmp-tit">{html.escape(tit_cmp)}</p>'
+        f"{bloco_cmp}</div>"
+    )
+    return f'<div class="rel-sim-cmp-paineis">{slot_v}{slot_c}</div>', [o, o2]
+
+
 def _map_comparativos_fragments(
     row: dict[str, Any],
     caches: list[dict[str, Any]],
@@ -392,7 +498,12 @@ def montar_html_relatorio_simulacao(
     caches: list[dict[str, Any]],
     ads_map: dict[str, dict[str, Any]],
     doc: OperacaoSimulacaoDocumento,
+    cmp_painel: str = "nenhum",
 ) -> str:
+    """
+    ``cmp_painel``: ``nenhum`` (só à vista) | ``prazo`` | ``financiado`` — alinhado ao rádio da simulação.
+    Fora do Streamlit, omitir ou usar ``nenhum`` (relatório só com painel à vista).
+    """
     from leilao_ia_v2 import app_assistente_ingestao as ag
 
     doc2 = doc
@@ -447,17 +558,24 @@ def montar_html_relatorio_simulacao(
         )
     map_head, map_sec, map_scripts = _map_comparativos_fragments(row, caches, ads_map)
 
-    fin_html = ag._html_simulacao_resultado_cards(o)
+    fin_html, _outs_cmp = _html_secao_paineis_simulacao(
+        ag, row, caches, ads_map, o, cmp_painel
+    )
     notas_fin = ""
     extra_lines: list[str] = []
-    for n in o.lance_maximo_roi_notas or []:
-        t = str(n).strip()
-        if t:
-            extra_lines.append(html.escape(t))
-    for n in o.notas or []:
-        t = str(n).strip()
-        if t:
-            extra_lines.append(html.escape(t))
+    for ox in _outs_cmp:
+        for n in ox.lance_maximo_roi_notas or []:
+            t = str(n).strip()
+            if t:
+                s = html.escape(t)
+                if s not in extra_lines:
+                    extra_lines.append(s)
+        for n in ox.notas or []:
+            t = str(n).strip()
+            if t:
+                s = html.escape(t)
+                if s not in extra_lines:
+                    extra_lines.append(s)
     if extra_lines:
         lis = "".join(f"<li>{ln}</li>" for ln in extra_lines)
         notas_fin = f'<div class="rel-card" style="margin-top:16px;"><div class="l">Notas do cálculo</div><ul style="margin:8px 0 0 18px;color:var(--muted);font-size:0.88rem;line-height:1.5;">{lis}</ul></div>'
@@ -483,7 +601,11 @@ def montar_html_relatorio_simulacao(
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Relatório — Simulação</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet" />
 <style>{_REL_CSS}</style>
+{PAINEL_SIMULACAO_RESUMO_DASH_STYLES}
 {map_head}
 </head>
 <body>

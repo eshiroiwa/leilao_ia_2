@@ -269,11 +269,19 @@ def _roi_painel_liquido(o: SimulacaoOperacaoOutputs) -> str:
     return f"ROI líquido {rl}{anual}"
 
 
-def build_painel_simulacao_resumo_html(o: SimulacaoOperacaoOutputs) -> str:
+def build_painel_simulacao_resumo_html(
+    o: SimulacaoOperacaoOutputs,
+    *,
+    embutir_css: bool = True,
+    incluir_cabecalho_rodape: bool = True,
+) -> str:
     """
     Painel financeiro da aba Simulação: dois destaques (lance, venda), um bloco detalhado,
     dois destaques (lucro bruto / líquido com ROI) e o lance máximo recomendado.
     Reutiliza o visual ``dc-*`` do dashboard Comparar.
+
+    ``embutir_css``: em relatórios HTML, passar False e injetar ``PAINEL_SIMULACAO_RESUMO_DASH_STYLES`` uma vez.
+    ``incluir_cabecalho_rodape``: False omite título/rodapé do cartão (ex.: colunas de comparação no relatório).
     """
     lance_n = o.lance_brl
     venda = o.valor_venda_estimado
@@ -493,118 +501,30 @@ def build_painel_simulacao_resumo_html(o: SimulacaoOperacaoOutputs) -> str:
     lmx_val_col = "#6ee7b7" if lmx_ok else "hsl(215, 18%, 70%)"
     lmx_brl_txt = _brl(lmx) if lmx_ok else "—"
 
-    return f"""
-{CSS_DASH}
-<style>
-.dc-root.sp-sim-financeiro .sp-sim-hero-grid {{
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
-  padding: 0 1.25rem 1rem 1.25rem;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-hero-grid .dc-card {{ min-height: 0; }}
-.dc-root.sp-sim-financeiro .sp-sim-hero-tit {{ font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: hsl(var(--dc-muted)); display: block; margin-bottom: 0.35rem; }}
-.dc-root.sp-sim-financeiro .sp-sim-hero-amt {{ font-size: 1.65rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.2; color: #f1f5f9; }}
-.dc-root.sp-sim-financeiro .sp-sim-hero-sub {{ font-size: 0.8rem; color: hsl(215 18% 62%); margin-top: 0.45rem; line-height: 1.35; }}
-.dc-root.sp-sim-financeiro .sp-sim-hero-g {{
-  border-radius: 14px;
-  padding: 1.1rem 1.15rem 1rem;
-  background: linear-gradient(135deg, hsl(0 0% 100% / .07) 0%, hsl(0 0% 100% / .02) 100%);
-  border: 1px solid rgba(255,255,255,.08);
-}}
-.dc-root.sp-sim-financeiro .sp-sim-main .dc-stack {{ max-height: none; }}
-.dc-root.sp-sim-financeiro .sp-sim-mid-h {{ margin: 0 0 0.5rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: hsl(215 20% 58%); font-weight: 600; padding: 0 0.1rem; }}
-.dc-root.sp-sim-financeiro .sp-sim-lmx .dc-hero {{ margin: 0.5rem 1.1rem 1rem; }}
-.dc-root.sp-sim-financeiro .sp-sim-detail-list {{
-  display: flex; flex-direction: column; gap: 0.65rem; padding: 0.15rem 0 0.1rem 0;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-grupo {{
-  border-radius: 12px; overflow: hidden;
-  border: 1px solid rgba(99, 102, 241, 0.14);
-  background: linear-gradient(165deg, rgba(15, 23, 42, 0.55) 0%, rgba(12, 18, 32, 0.42) 100%);
-  box-shadow: 0 2px 14px rgba(0,0,0,.2);
-}}
-.dc-root.sp-sim-financeiro .sp-sim-sec {{
-  display: flex; align-items: center; gap: 0.4rem;
-  padding: 0.48rem 0.7rem 0.38rem;
-  background: linear-gradient(90deg, hsl(200 50% 22% / .38) 0%, hsl(255 30% 18% / .12) 100%);
-  border-bottom: 1px solid rgba(99, 102, 241, 0.12);
-}}
-.dc-root.sp-sim-financeiro .sp-sim-sec::before {{
-  content: "";
-  width: 3px; height: 0.85rem; border-radius: 2px; flex-shrink: 0;
-  background: linear-gradient(180deg, #6ee7b7, #2dd4bf 55%, #6366f1);
-  box-shadow: 0 0 10px rgba(110, 231, 183, 0.25);
-}}
-.dc-root.sp-sim-financeiro .sp-sim-sec-tit {{
-  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.11em;
-  color: #c7d2fe;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-grupo-lines {{ padding: 0.1rem 0; }}
-.dc-root.sp-sim-financeiro .sp-sim-line {{
-  display: flex; flex-wrap: nowrap; align-items: baseline; gap: 0.35rem;
-  font-size: 0.82rem; min-height: 1.5rem; padding: 0.4rem 0.7rem 0.42rem; margin: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
-  transition: background 0.12s ease;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-grupo-lines .sp-sim-line:last-child {{ border-bottom: none; padding-bottom: 0.5rem; }}
-.dc-root.sp-sim-financeiro .sp-sim-grupo-lines .sp-sim-line:nth-child(odd) {{
-  background: rgba(99, 102, 241, 0.04);
-}}
-.dc-root.sp-sim-financeiro .sp-sim-grupo-lines .sp-sim-line:nth-child(even) {{
-  background: rgba(16, 185, 129, 0.05);
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line:hover {{
-  background: rgba(110, 231, 183, 0.07) !important;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line--muted .sp-sim-line-lbl {{ color: hsl(215 16% 58%) !important; }}
-.dc-root.sp-sim-financeiro .sp-sim-line--muted .sp-sim-line-val {{ color: hsl(215 20% 72%) !important; font-weight: 500; }}
-.dc-root.sp-sim-financeiro .sp-sim-line-lbl {{
-  flex: 0 1 auto; max-width: 52%; text-align: left; color: hsl(214 20% 78%);
-  line-height: 1.3; min-width: 0;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line-dots {{
-  flex: 1 1 0.5rem; min-width: 0.4rem; align-self: center; height: 0;
-  border-bottom: 1px dotted rgba(148, 163, 184, 0.38);
-  margin: 0 0.15rem; opacity: 0.95;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line-val {{
-  flex: 0 0 auto; text-align: right; font-weight: 600; color: #f1f5f9; font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 20px rgba(110, 231, 183, 0.12);
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line-sub {{
-  margin: -0.12rem 0.7rem 0.4rem; padding: 0.15rem 0 0 0.35rem; border-left: 2px solid rgba(100, 116, 139, 0.35);
-  font-size: 0.7rem; color: hsl(215 16% 62%); line-height: 1.4;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line--subtot {{
-  margin-top: 0.18rem; padding-top: 0.52rem; border-top: 1px solid rgba(99, 102, 241, 0.28);
-  background: rgba(99, 102, 241, 0.07) !important;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line--subtot .sp-sim-line-lbl {{
-  font-weight: 650; color: #e0e7ff;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line-val--sum {{
-  color: #a5f3d0 !important; font-size: 0.92rem;
-}}
-.dc-root.sp-sim-financeiro .sp-sim-line-sub--sum {{
-  border-left-color: rgba(52, 211, 153, 0.45); color: hsl(152 35% 72%); font-style: italic;
-}}
-@media (max-width: 640px) {{
-  .dc-root.sp-sim-financeiro .sp-sim-hero-grid {{ grid-template-columns: 1fr; }}
-  .dc-root.sp-sim-financeiro .sp-sim-line-lbl {{ max-width: 100%; margin-bottom: 0.1rem; }}
-  .dc-root.sp-sim-financeiro .sp-sim-line {{ flex-wrap: wrap; }}
-  .dc-root.sp-sim-financeiro .sp-sim-line-dots {{ display: none; }}
-  .dc-root.sp-sim-financeiro .sp-sim-line-val {{ width: 100%; text-align: right; border-top: 1px dotted rgba(148, 163, 184, 0.25); margin-top: 0.1rem; padding-top: 0.15rem; }}
-}}
-</style>
-<div class="dc-root sp-sim-financeiro" lang="pt-BR">
-  <header class="dc-top">
+    css_bloco = (
+        (CSS_DASH + f"\n<style>\n{PAINEL_SIMULACAO_SCOPED_ONLY}\n</style>\n")
+        if embutir_css
+        else ""
+    )
+    bloco_cab = (
+        """  <header class="dc-top">
     <div class="dc-top-inner">
       <h2 class="dc-h2" style="font-size:1.15rem;">Painel financeiro</h2>
       <p class="dc-hint" style="margin-top:0.45rem">Resumo da modalidade e parâmetros atuais. Mesmo estilo do painel <strong>Comparar</strong>.</p>
     </div>
   </header>
-  <div class="sp-sim-hero-grid">
+"""
+        if incluir_cabecalho_rodape
+        else ""
+    )
+    bloco_rod = (
+        '  <p class="dc-foot">T e modalidade afetam juros, caixa e ROI. Use <strong>Gravar</strong> para persistir no banco.</p>\n'
+        if incluir_cabecalho_rodape
+        else ""
+    )
+    return f"""
+{css_bloco}<div class="dc-root sp-sim-financeiro" lang="pt-BR">
+{bloco_cab}  <div class="sp-sim-hero-grid">
     <article class="dc-card" style="--dc-accent: var(--dc-a);">
       <div class="dc-card-head"><span class="dc-badge">Lance (arrematação)</span></div>
       <div class="sp-sim-hero-g">
@@ -658,8 +578,7 @@ def build_painel_simulacao_resumo_html(o: SimulacaoOperacaoOutputs) -> str:
       </div>
     </article>
   </div>
-  <p class="dc-foot">T e modalidade afetam juros, caixa e ROI. Use <strong>Gravar</strong> para persistir no banco.</p>
-</div>
+{bloco_rod}</div>
 """
 
 
@@ -836,3 +755,111 @@ CSS_DASH = """
 }
 </style>
 """
+
+# Regras adicionais do painel Simulação (`.dc-root.sp-sim-financeiro`), injetadas após `CSS_DASH`.
+PAINEL_SIMULACAO_SCOPED_ONLY = """
+.dc-root.sp-sim-financeiro .sp-sim-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 0 1.25rem 1rem 1.25rem;
+}
+.dc-root.sp-sim-financeiro .sp-sim-hero-grid .dc-card { min-height: 0; }
+.dc-root.sp-sim-financeiro .sp-sim-hero-tit { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: hsl(var(--dc-muted)); display: block; margin-bottom: 0.35rem; }
+.dc-root.sp-sim-financeiro .sp-sim-hero-amt { font-size: 1.65rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.2; color: #f1f5f9; }
+.dc-root.sp-sim-financeiro .sp-sim-hero-sub { font-size: 0.8rem; color: hsl(215 18% 62%); margin-top: 0.45rem; line-height: 1.35; }
+.dc-root.sp-sim-financeiro .sp-sim-hero-g {
+  border-radius: 14px;
+  padding: 1.1rem 1.15rem 1rem;
+  background: linear-gradient(135deg, hsl(0 0% 100% / .07) 0%, hsl(0 0% 100% / .02) 100%);
+  border: 1px solid rgba(255,255,255,.08);
+}
+.dc-root.sp-sim-financeiro .sp-sim-main .dc-stack { max-height: none; }
+.dc-root.sp-sim-financeiro .sp-sim-mid-h { margin: 0 0 0.5rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: hsl(215 20% 58%); font-weight: 600; padding: 0 0.1rem; }
+.dc-root.sp-sim-financeiro .sp-sim-lmx .dc-hero { margin: 0.5rem 1.1rem 1rem; }
+.dc-root.sp-sim-financeiro .sp-sim-detail-list {
+  display: flex; flex-direction: column; gap: 0.65rem; padding: 0.15rem 0 0.1rem 0;
+}
+.dc-root.sp-sim-financeiro .sp-sim-grupo {
+  border-radius: 12px; overflow: hidden;
+  border: 1px solid rgba(99, 102, 241, 0.14);
+  background: linear-gradient(165deg, rgba(15, 23, 42, 0.55) 0%, rgba(12, 18, 32, 0.42) 100%);
+  box-shadow: 0 2px 14px rgba(0,0,0,.2);
+}
+.dc-root.sp-sim-financeiro .sp-sim-sec {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.48rem 0.7rem 0.38rem;
+  background: linear-gradient(90deg, hsl(200 50% 22% / .38) 0%, hsl(255 30% 18% / .12) 100%);
+  border-bottom: 1px solid rgba(99, 102, 241, 0.12);
+}
+.dc-root.sp-sim-financeiro .sp-sim-sec::before {
+  content: "";
+  width: 3px; height: 0.85rem; border-radius: 2px; flex-shrink: 0;
+  background: linear-gradient(180deg, #6ee7b7, #2dd4bf 55%, #6366f1);
+  box-shadow: 0 0 10px rgba(110, 231, 183, 0.25);
+}
+.dc-root.sp-sim-financeiro .sp-sim-sec-tit {
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.11em;
+  color: #c7d2fe;
+}
+.dc-root.sp-sim-financeiro .sp-sim-grupo-lines { padding: 0.1rem 0; }
+.dc-root.sp-sim-financeiro .sp-sim-line {
+  display: flex; flex-wrap: nowrap; align-items: baseline; gap: 0.35rem;
+  font-size: 0.82rem; min-height: 1.5rem; padding: 0.4rem 0.7rem 0.42rem; margin: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  transition: background 0.12s ease;
+}
+.dc-root.sp-sim-financeiro .sp-sim-grupo-lines .sp-sim-line:last-child { border-bottom: none; padding-bottom: 0.5rem; }
+.dc-root.sp-sim-financeiro .sp-sim-grupo-lines .sp-sim-line:nth-child(odd) {
+  background: rgba(99, 102, 241, 0.04);
+}
+.dc-root.sp-sim-financeiro .sp-sim-grupo-lines .sp-sim-line:nth-child(even) {
+  background: rgba(16, 185, 129, 0.05);
+}
+.dc-root.sp-sim-financeiro .sp-sim-line:hover {
+  background: rgba(110, 231, 183, 0.07) !important;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line--muted .sp-sim-line-lbl { color: hsl(215 16% 58%) !important; }
+.dc-root.sp-sim-financeiro .sp-sim-line--muted .sp-sim-line-val { color: hsl(215 20% 72%) !important; font-weight: 500; }
+.dc-root.sp-sim-financeiro .sp-sim-line-lbl {
+  flex: 0 1 auto; max-width: 52%; text-align: left; color: hsl(214 20% 78%);
+  line-height: 1.3; min-width: 0;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line-dots {
+  flex: 1 1 0.5rem; min-width: 0.4rem; align-self: center; height: 0;
+  border-bottom: 1px dotted rgba(148, 163, 184, 0.38);
+  margin: 0 0.15rem; opacity: 0.95;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line-val {
+  flex: 0 0 auto; text-align: right; font-weight: 600; color: #f1f5f9; font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 20px rgba(110, 231, 183, 0.12);
+}
+.dc-root.sp-sim-financeiro .sp-sim-line-sub {
+  margin: -0.12rem 0.7rem 0.4rem; padding: 0.15rem 0 0 0.35rem; border-left: 2px solid rgba(100, 116, 139, 0.35);
+  font-size: 0.7rem; color: hsl(215 16% 62%); line-height: 1.4;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line--subtot {
+  margin-top: 0.18rem; padding-top: 0.52rem; border-top: 1px solid rgba(99, 102, 241, 0.28);
+  background: rgba(99, 102, 241, 0.07) !important;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line--subtot .sp-sim-line-lbl {
+  font-weight: 650; color: #e0e7ff;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line-val--sum {
+  color: #a5f3d0 !important; font-size: 0.92rem;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line-sub--sum {
+  border-left-color: rgba(52, 211, 153, 0.45); color: hsl(152 35% 72%); font-style: italic;
+}
+@media (max-width: 640px) {
+  .dc-root.sp-sim-financeiro .sp-sim-hero-grid { grid-template-columns: 1fr; }
+  .dc-root.sp-sim-financeiro .sp-sim-line-lbl { max-width: 100%; margin-bottom: 0.1rem; }
+  .dc-root.sp-sim-financeiro .sp-sim-line { flex-wrap: wrap; }
+  .dc-root.sp-sim-financeiro .sp-sim-line-dots { display: none; }
+  .dc-root.sp-sim-financeiro .sp-sim-line-val { width: 100%; text-align: right; border-top: 1px dotted rgba(148, 163, 184, 0.25); margin-top: 0.1rem; padding-top: 0.15rem; }
+}
+"""
+
+PAINEL_SIMULACAO_RESUMO_DASH_STYLES = (
+    f"{CSS_DASH}\n<style>\n{PAINEL_SIMULACAO_SCOPED_ONLY}\n</style>\n"
+)
