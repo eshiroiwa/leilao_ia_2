@@ -495,6 +495,15 @@ div[data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] .stText
   line-height: 1.35;
 }
 .sim-praca-ref strong { color: #6ee7b7; font-weight: 600; }
+.sim-cmp-painel-tit {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #6ee7b7;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 0.35rem 0 0.12rem 0;
+  padding: 0 0.1rem;
+}
 .sim-op-h {
   font-size: 0.58rem;
   font-weight: 600;

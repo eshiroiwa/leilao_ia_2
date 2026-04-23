@@ -54,8 +54,13 @@ def simop_key(iid: str, tag: str, campo: str) -> str:
 
 
 def simop_key_mpag(iid: str) -> str:
-    """Controle global: qual modalidade de cálculo / painel (à vista, prazo, financiado) está ativa."""
+    """Legado: ex-seletor 3 vias. Mantido para compat.; o painel principal passou a ser sempre à vista."""
     return f"simop_global_mpag_seg_{_suf(iid)}"
+
+
+def simop_key_cmp_painel(iid: str) -> str:
+    """Comparação ao lado do painel: ``nenhum`` | ``prazo`` | ``financiado`` (só um painel extra)."""
+    return f"simop_cmp_painel_{_suf(iid)}"
 
 
 def simop_key_ui_nicho_prazo_fin(iid: str) -> str:

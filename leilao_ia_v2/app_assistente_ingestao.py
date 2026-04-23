@@ -76,6 +76,7 @@ from leilao_ia_v2.ui.simulacao_estado import (
     simop_ensure_tempo_venda_global,
     simop_hidratou_chave,
     simop_key,
+    simop_key_cmp_painel,
     simop_key_mpag,
     simop_key_tempo_venda_global,
     simop_key_ui_nicho_prazo_fin,
@@ -1600,10 +1601,12 @@ def _render_simulacao_operacao(
 
     _form_ctx = form_column if form_column is not None else contextlib.nullcontext()
 
-    def _pinta_saida_sim(o_local: SimulacaoOperacaoOutputs | None) -> None:
+    def _pinta_saida_sim(o_local: SimulacaoOperacaoOutputs | None, *, titulo: str | None = None) -> None:
         if not o_local:
             st.caption("Ajuste os parâmetros acima para ver o painel financeiro.")
             return
+        if titulo:
+            st.markdown(f'<p class="sim-cmp-painel-tit">{titulo}</p>', unsafe_allow_html=True)
         with st.container(border=True):
             # st.html: evita o parser Markdown, que trata linhas com recuo (4+ espaços) como código
             # e mostrava o detalhamento do painel como texto bruto.
@@ -1623,21 +1626,15 @@ def _render_simulacao_operacao(
         _simop_hidratar_modalidades(iid, row, row.get("operacao_simulacao_json"))
         mpk = simop_key_mpag(iid)
         if mpk not in st.session_state:
-            st.session_state[mpk] = _simop_mpag_valor_default_para_label(
-                getattr(inp0, "modo_pagamento", None)
-            )
+            st.session_state[mpk] = "À vista"
+        k_cmp_painel = simop_key_cmp_painel(iid)
+        if k_cmp_painel not in st.session_state:
+            st.session_state[k_cmp_painel] = "nenhum"
         st.caption(
-            "Lance, arrematação, tributos, venda, IR e demais entradas são **as mesmas** para as três modalidades; "
-            "o seletor abaixo só define **qual cálculo** (à vista, parcelado, financiado) aparece no painel. "
-            "Ative o interruptor para editar % entrada, parcelas e juros do parcelado judicial e do bancário."
+            "O **painel financeiro principal** é sempre **à vista**. Use a comparação abaixo do painel para ver, "
+            "em paralelo, **parcelado judicial** ou **financiado** com os mesmos números de lance e custos. "
+            "Ative o interruptor para editar % entrada, parcelas e juros do parcelado e do bancário."
         )
-        st.segmented_control(
-            "Cálculo e painel (modalidade de pagamento)",
-            options=list(_SIMOP_MPAG_LABS),
-            key=mpk,
-        )
-        m_lab = str(st.session_state.get(mpk) or "À vista")
-        cur_tag = simop_m_lab_to_tag(m_lab)
 
         def _sk(c: str) -> str:
             return simop_key(iid, "vista", c)
@@ -1960,7 +1957,7 @@ def _render_simulacao_operacao(
                     "Desconto à vista",
                     key=dsk,
                     help="Reduz o caixa pago do lance. Comissão do leiloeiro e % de ITBI/registro permanecem sobre o lance nominal (cheio). Só aplica na modalidade **à vista**.",
-                    disabled=(m_lab != "À vista"),
+                    disabled=False,
                 )
             with r_av[1]:
                 st.number_input(
@@ -1970,8 +1967,7 @@ def _render_simulacao_operacao(
                     step=0.5,
                     format="%.2f",
                     key=dsk_pct,
-                    disabled=(m_lab != "À vista")
-                    or (not bool(st.session_state.get(dsk, False))),
+                    disabled=(not bool(st.session_state.get(dsk, False))),
                     help="Típico em leilões com incentivo a pagamento único (ex.: 10%).",
                 )
 
@@ -2187,7 +2183,7 @@ def _render_simulacao_operacao(
         )
         inp = construir_inputs_de_sessao(
             iid=iid,
-            tag=cur_tag,
+            tag="vista",
             inp0=inp0_tag,
             modo_valor=modo,
             v_manual_st=v_manual_st,
@@ -2204,16 +2200,13 @@ def _render_simulacao_operacao(
             st.session_state["_sim_report_doc_iid"] = iid
         except Exception:
             logger.debug("Snapshot relatório simulação", exc_info=True)
-        if results_column is None:
-            _pinta_saida_sim(o)
-            _render_analise_mercado_abaixo_painel(row)
         with st.container(border=True):
             st.markdown('<div class="sim-card-head">Persistência</div>', unsafe_allow_html=True)
             _tip_btn_persist = "primary" if _row_tem_simulacao_gravada(row) else "secondary"
             ab1, ab2, ab3 = st.columns(3, gap="small")
             with ab1:
                 if st.button(
-                    "Gravar simulação (modalidade atual)",
+                    "Gravar simulação (à vista)",
                     type=_tip_btn_persist,
                     use_container_width=True,
                     key=_sk("save"),
@@ -2225,14 +2218,14 @@ def _render_simulacao_operacao(
                             row.get("simulacoes_modalidades_json"),
                             legado_operacao=row.get("operacao_simulacao_json"),
                         )
-                        b_new = b_merge.model_copy(update={str(cur_tag): doc})
+                        b_new = b_merge.model_copy(update={"vista": doc})
                         leilao_imoveis_repo.atualizar_operacao_e_modalidades(
                             iid, pay_doc, b_new.model_dump(mode="json"), cli
                         )
                         atual = leilao_imoveis_repo.buscar_por_id(iid, cli)
                         if isinstance(atual, dict):
                             st.session_state["ultimo_extracao"] = atual
-                        st.success("Simulação e bundle da modalidade atual gravados (`operacao_simulacao_json` + `simulacoes_modalidades_json`).")
+                        st.success("Simulação **à vista** e slot do bundle gravados (`operacao_simulacao_json` + `simulacoes_modalidades_json`).")
                     except Exception as e:
                         logger.exception("Gravar operacao_simulacao_json")
                         st.error(
@@ -2260,16 +2253,14 @@ def _render_simulacao_operacao(
                             prazo=docs3[1][1],
                             financiado=docs3[2][1],
                         )
-                        m_lab0 = str(st.session_state.get(mpk) or "À vista")
-                        ct0 = simop_m_lab_to_tag(m_lab0)
-                        doc0 = getattr(b3, str(ct0))
+                        doc0 = b3.vista
                         leilao_imoveis_repo.atualizar_operacao_e_modalidades(
                             iid, doc0.model_dump(mode="json"), b3.model_dump(mode="json"), cli
                         )
                         atual = leilao_imoveis_repo.buscar_por_id(iid, cli)
                         if isinstance(atual, dict):
                             st.session_state["ultimo_extracao"] = atual
-                        st.success("Três simulações gravadas em `simulacoes_modalidades_json` e legado = modalidade ativa no controle.")
+                        st.success("Três simulações gravadas; legado = **à vista** (como o painel principal).")
                     except Exception as e:
                         logger.exception("Gravar 3 simulacoes")
                         st.error(
@@ -2278,14 +2269,89 @@ def _render_simulacao_operacao(
                         )
             with ab3:
                 st.caption(
-                    "Gravar **modalidade atual**: atualiza o relatório/legado e o slot do bundle. "
-                    "**Gravar as 3** recalcula e salva vista + parcelado + financiado. "
+                    "Gravar **(à vista)**: atualiza o relatório/legado e o slot **vista** do bundle. "
+                    "**Gravar as 3** recalcula e salva vista + parcelado + financiado; o legado segue a simulação **à vista**. "
                     "Lucro bruto = venda − custos − corretagem; com desconto à vista, subtotal com **lance pago**; ITBI comiss. no nominal."
                 )
 
+        o_cmp: SimulacaoOperacaoOutputs | None = None
+        _tit_cmp: str | None = None
+        if results_column is None:
+            _cmp_opcoes: tuple[str, ...] = ("nenhum", "prazo", "financiado")
+            _cmp_labels: dict[str, str] = {
+                "nenhum": "Não comparar (só à vista)",
+                "prazo": "Comparar com parcelado (judicial)",
+                "financiado": "Comparar com financiado (bancário)",
+            }
+            st.radio(
+                "Comparar com outra modalidade (painel adicional)",
+                options=list(_cmp_opcoes),
+                key=k_cmp_painel,
+                format_func=lambda k: _cmp_labels.get(k, k),
+                horizontal=True,
+            )
+            _cmp_sel = str(st.session_state.get(k_cmp_painel) or "nenhum")
+            if _cmp_sel == "prazo":
+                _inp2 = construir_inputs_de_sessao(
+                    iid=iid,
+                    tag="prazo",
+                    inp0=inp0_tag,
+                    modo_valor=modo,
+                    v_manual_st=v_manual_st,
+                    def_lance=def_lance,
+                    ref_mod=ref_mod2,
+                    reforma_brl_inp=ref_brl2,
+                    cache_sel=cache_sel,
+                )
+                _d2 = calcular_simulacao(
+                    row_leilao=row, inp=_inp2, caches_ordenados=caches, ads_por_id=ads_map
+                )
+                o_cmp = _d2.outputs
+                _tit_cmp = "Parcelado (judicial) — comparação"
+            elif _cmp_sel == "financiado":
+                _inp2 = construir_inputs_de_sessao(
+                    iid=iid,
+                    tag="financiado",
+                    inp0=inp0_tag,
+                    modo_valor=modo,
+                    v_manual_st=v_manual_st,
+                    def_lance=def_lance,
+                    ref_mod=ref_mod2,
+                    reforma_brl_inp=ref_brl2,
+                    cache_sel=cache_sel,
+                )
+                _d2 = calcular_simulacao(
+                    row_leilao=row, inp=_inp2, caches_ordenados=caches, ads_por_id=ads_map
+                )
+                o_cmp = _d2.outputs
+                _tit_cmp = "Financiado (bancário) — comparação"
+            if o_cmp is not None:
+                c_l, c_r = st.columns(2, gap="large")
+                with c_l:
+                    _pinta_saida_sim(o, titulo="À vista — painel principal")
+                with c_r:
+                    _pinta_saida_sim(o_cmp, titulo=_tit_cmp or "Comparação")
+                _n1 = o.lance_maximo_roi_notas or []
+                _n2 = o_cmp.lance_maximo_roi_notas or []
+                for n in {*(_n1 + _n2)}:
+                    st.caption(n)
+                _a1 = o.notas or []
+                _a2 = o_cmp.notas or []
+                for n in {*(_a1 + _a2)}:
+                    st.caption(n)
+            else:
+                _pinta_saida_sim(o, titulo="À vista")
+                if o and o.lance_maximo_roi_notas:
+                    for n in o.lance_maximo_roi_notas:
+                        st.caption(n)
+                if o and o.notas:
+                    for n in o.notas:
+                        st.caption(n)
+            _render_analise_mercado_abaixo_painel(row)
+
     if results_column is not None:
         with results_column:
-            _pinta_saida_sim(o)
+            _pinta_saida_sim(o, titulo="À vista")
             _render_analise_mercado_abaixo_painel(row)
 
 
