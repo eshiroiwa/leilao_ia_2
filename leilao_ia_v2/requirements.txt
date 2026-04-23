@@ -1,13 +1,19 @@
 agno>=2.5.0
 openai>=1.40.0
-httpx>=0.27.0
+# supabase 2.3.x exige httpx<0.26. Desde ~2.5, httpx 0.27+ é aceite. 2.26+ puxa storage3 com
+# pyiceberg (wheel sem gcc em alguns ambientes) — manter <2.26 se não tiver toolchain C.
+httpx>=0.27.0,<0.28
 pydantic>=2.0
 pandas>=2.0
 openpyxl>=3.1
-supabase>=2.3.0,<2.4.0
+supabase>=2.12.0,<2.26.0
+# realtime 2.2x (supabase) usa ``websockets.asyncio`` (websockets >= 13)
+websockets>=13,<16
 python-dotenv>=1.0
 firecrawl-py>=1.15
 streamlit>=1.36
+streamlit-extras>=0.3.5
+streamlit-shadcn-ui>=0.1.19
 streamlit-folium>=0.23.0
 folium>=0.17.0
 geopy>=2.4

@@ -492,6 +492,179 @@ div[data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] .stText
   padding-top: 0.12rem !important;
   padding-bottom: 0.12rem !important;
 }
+/*
+ * Aba Simulação: o formulário principal não fica em stColumn, então as regras
+ * "coluna + cartão" acima não se aplicam. O marcador [data-simop-anchor] liga
+ * o mesmo estilo denso (próximo ao painel financeiro HTML) a inputs e cartões
+ * no corpo do formulário, sem afetar outras abas.
+ */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stHorizontalBlock"] {
+  row-gap: 0.12rem !important;
+  column-gap: 0.28rem !important;
+  align-items: start !important;
+}
+/* Evita grelhas 2–3 colunas a forçar scroll horizontal */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stColumn"] {
+  min-width: 0;
+}
+/* Cabeçalho do “formulário” (HTML inject junto a data-simop-anchor) */
+body:has([data-simop-anchor]) [data-testid="stMain"] .sim-form-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.8rem;
+  margin: 0 0 0.35rem 0;
+  padding: 0.28rem 0.42rem 0.32rem;
+  border-radius: 10px;
+  background: linear-gradient(130deg, rgba(18, 26, 42, 0.88) 0%, rgba(12, 18, 32, 0.55) 100%);
+  border: 1px solid rgba(110, 231, 183, 0.14);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] .sim-form-hero-tit {
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  background: linear-gradient(120deg, hsl(160 55% 56%), hsl(250 50% 70%));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] .sim-form-hero-sub {
+  font-size: 0.66rem;
+  color: #94a3b8;
+  line-height: 1.3;
+  max-width: 34rem;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] p[data-testid="stCaption"] {
+  font-size: 0.68rem !important;
+  line-height: 1.35 !important;
+  margin: 0 0 0.28rem 0 !important;
+  color: #94a3b8 !important;
+}
+/* Simulação: ainda mais compacto (zoom só na coluna principal; [data-sim-form-dense] no hero) */
+body:has([data-sim-form-dense]) [data-testid="stAppViewContainer"] [data-testid="stMain"] .block-container {
+  max-width: 100%;
+  padding-top: 0.2rem;
+  padding-bottom: 0.3rem;
+  zoom: 0.9;
+}
+body:has([data-sim-form-dense]) [data-testid="stMain"] [data-testid="stElementContainer"] {
+  margin-bottom: 0.1rem;
+}
+body:has([data-sim-form-dense]) [data-testid="stMain"] [data-testid="stNumberInput"] [data-baseweb="input"] {
+  max-width: min(10rem, 100%) !important;
+  min-width: 0 !important;
+  box-sizing: border-box;
+}
+/* Cartões borda (st.container): grelha tipo formulário, mais baixos */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+  background: linear-gradient(160deg, rgba(20, 28, 44, 0.72) 0%, rgba(12, 18, 32, 0.55) 100%) !important;
+  border-radius: 9px !important;
+  border: 1px solid rgba(110, 231, 183, 0.12) !important;
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.18) !important;
+  margin-bottom: 0.22rem !important;
+  padding: 0.1rem 0.2rem 0.14rem !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] label,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stWidgetLabel"] p,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stNumberInput"] [data-testid="stWidgetLabel"] p,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSelectbox"] [data-testid="stWidgetLabel"] p,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stTextInput"] [data-testid="stWidgetLabel"] p,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stToggle"] [data-testid="stWidgetLabel"] p {
+  font-size: 0.65rem !important;
+  line-height: 1.12 !important;
+  margin-bottom: 0.04rem !important;
+  color: #a8b4c8 !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.02em;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] [data-baseweb="input"] {
+  font-size: 0.72rem !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stWidgetLabel"] {
+  margin-bottom: 0.04rem !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] .stNumberInput input,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] .stTextInput input {
+  min-height: 1.38rem !important;
+  padding-top: 0.05rem !important;
+  padding-bottom: 0.05rem !important;
+  font-size: 0.75rem !important;
+}
+/* Linhas st.columns: trilhos densos */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stColumn"] [data-testid="stNumberInput"] [data-baseweb="input"] {
+  min-height: 1.36rem !important;
+  font-size: 0.74rem !important;
+  padding-top: 0.04rem !important;
+  padding-bottom: 0.04rem !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stColumn"] [data-testid="stNumberInput"] {
+  margin-bottom: 0.04rem;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stNumberInput"] {
+  margin-bottom: 0.08rem;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSelectbox"] {
+  margin-bottom: 0.08rem;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSegmentedControl"] {
+  margin-bottom: 0.08rem;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-baseweb="select"] {
+  font-size: 0.7rem;
+  min-height: 1.32rem;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stToggle"] {
+  min-height: auto !important;
+  padding: 0 !important;
+  margin-bottom: 0.06rem !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stToggle"] [data-testid="stWidgetLabel"] p {
+  font-size: 0.68rem !important;
+  line-height: 1.2 !important;
+}
+/* Toggle: menos altura e label compacto (coluna "Exibir: …") */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stCheckbox"] {
+  min-height: auto;
+  margin-bottom: 0.12rem;
+  padding: 0.1rem 0 0.15rem 0;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stCheckbox"] label p {
+  font-size: 0.7rem !important;
+  line-height: 1.25 !important;
+  margin: 0 !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] .sim-card-head {
+  padding: 0.12rem 0.05rem 0.1rem;
+  margin: 0 0 0.06rem 0;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] .sim-kpi-strip,
+body:has([data-simop-anchor]) [data-testid="stMain"] .sim-kpi-strip strong {
+  font-size: 0.56rem;
+  line-height: 1.2;
+  padding: 0.04rem 0 0.06rem 0;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] .sim-praca-ref {
+  font-size: 0.62rem;
+  margin: 0 0 0.1rem 0;
+}
+/* Botões no bloco de simulação */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stButton"] {
+  margin-bottom: 0.08rem;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stButton"] > button {
+  min-height: 1.75rem;
+  padding-top: 0.12rem;
+  padding-bottom: 0.12rem;
+  font-size: 0.76rem;
+  border-radius: 8px !important;
+}
 .sim-card-head {
   font-size: 0.52rem;
   font-weight: 650;
@@ -719,6 +892,66 @@ div[data-baseweb="tab"][aria-selected="true"] {
   font-weight: 600 !important;
   border-bottom: 2px solid hsl(160 48% 48% / 0.85) !important;
   border-radius: 0 !important;
+}
+/* Simulação: Base Web alinhado ao bloco denso (sem altura 2rem+) */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stNumberInput"] [data-baseweb="input"],
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stTextInput"] [data-baseweb="input"] {
+  border-radius: 8px !important;
+  background: linear-gradient(180deg, rgba(20, 28, 44, 0.92) 0%, rgba(12, 18, 32, 0.88) 100%) !important;
+  border: 1px solid rgba(110, 231, 183, 0.22) !important;
+  color: #e8edf3 !important;
+  font-size: 0.74rem !important;
+  min-height: 1.42rem !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stNumberInput"] [data-baseweb="input"]:hover,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stTextInput"] [data-baseweb="input"]:hover {
+  border-color: rgba(110, 231, 183, 0.38) !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stNumberInput"] [data-baseweb="input"]:focus,
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stTextInput"] [data-baseweb="input"]:focus {
+  border-color: rgba(45, 212, 191, 0.5) !important;
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.22) !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+  border-radius: 8px !important;
+  min-height: 1.42rem !important;
+  background: linear-gradient(180deg, rgba(20, 28, 44, 0.92) 0%, rgba(12, 18, 32, 0.88) 100%) !important;
+  border: 1px solid rgba(110, 231, 183, 0.22) !important;
+  font-size: 0.74rem !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSegmentedControl"] [role="radiogroup"] {
+  padding: 2px !important;
+  min-height: 0 !important;
+  background: rgba(6, 10, 20, 0.65) !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(110, 231, 183, 0.16) !important;
+  gap: 0 !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSegmentedControl"] [role="radio"] {
+  border-radius: 6px !important;
+  font-size: 0.7rem !important;
+  font-weight: 600 !important;
+  padding: 0.2rem 0.45rem !important;
+  min-height: 0 !important;
+}
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSegmentedControl"] [role="radio"][aria-checked="true"] {
+  background: linear-gradient(160deg, hsl(160 36% 30%) 0%, hsl(168 28% 24%) 100%) !important;
+  color: #ecfdf5 !important;
+}
+/* Variante de DOM: botões no grupo segmentado */
+body:has([data-simop-anchor]) [data-testid="stMain"] [data-testid="stSegmentedControl"] button {
+  border-radius: 6px !important;
+  font-weight: 600 !important;
+  font-size: 0.7rem !important;
+  padding: 0.2rem 0.45rem !important;
+  min-height: 1.35rem !important;
+}
+/* shadcn (iframes) — cantos; altura fica a cargo do componente */
+body:has([data-simop-anchor]) [data-testid="stMain"] iframe[title^="streamlit"] {
+  border-radius: 6px;
 }
 .stButton > button {
   font-family: "DM Sans", system-ui, sans-serif !important;

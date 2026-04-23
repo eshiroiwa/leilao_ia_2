@@ -65,6 +65,14 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
 )
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
 from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS as _PAGE_CSS
+from leilao_ia_v2.ui.sim_form_compact import (
+    W_BRL,
+    W_BRL_MED,
+    W_MESES,
+    W_PCT,
+    W_SELECT,
+    number_compact,
+)
 from leilao_ia_v2.ui.dashboard_comparacao_modais import (
     PAINEL_SIMULACAO_SCOPED_ONLY,
     build_painel_simulacao_resumo_html,
@@ -1554,6 +1562,17 @@ def _render_simulacao_operacao(
     if not iid:
         return
 
+    st.html(
+        f'<div data-simop-anchor aria-hidden="true" data-iid="{html.escape(iid[:24], quote=True)}" '
+        'style="height:0;width:0;overflow:hidden;position:absolute;pointer-events:none"></div>',
+    )
+    st.html(
+        '<div class="sim-form-hero" data-sim-form-dense role="group" aria-label="Parâmetros da simulação">'
+        '<span class="sim-form-hero-tit">Simulação</span>'
+        "<span class=\"sim-form-hero-sub\">O painel abaixo usa estes parâmetros (à vista, parcelado, financiado). "
+        "Toggle à direita: campos de nicho.</span></div>"
+    )
+
     _form_ctx = form_column if form_column is not None else contextlib.nullcontext()
 
     def _pinta_saida_sim(o_local: SimulacaoOperacaoOutputs | None, *, titulo: str | None = None) -> None:
@@ -1586,9 +1605,8 @@ def _render_simulacao_operacao(
         if k_cmp_painel not in st.session_state:
             st.session_state[k_cmp_painel] = "nenhum"
         st.caption(
-            "O **painel financeiro principal** é sempre **à vista**. Use a comparação abaixo do painel para ver, "
-            "em paralelo, **parcelado judicial** ou **financiado** com os mesmos números de lance e custos. "
-            "Ative o interruptor para editar % entrada, parcelas e juros do parcelado e do bancário."
+            "À vista no painel · comparação com parcelado/financiado abaixo. "
+            "Interruptor: nicho (judicial + bancário)."
         )
 
         def _sk(c: str) -> str:
@@ -1678,162 +1696,250 @@ def _render_simulacao_operacao(
             )
         except ValueError:
             mi = 0
-        st.number_input(
-            "Tempo estimado até a venda (meses) — comum a todas as modalidades",
-            min_value=0.5,
-            max_value=360.0,
-            step=0.5,
-            format="%.1f",
-            key=tvk,
-            help="Mesmo T para **à vista**, **parcelado** e **financiado**: afeta fluxo, saldo, juros, ROI e anualização. "
-            "A comparação de painéis (quando ativa) e cada modalidade usam este valor.",
-        )
-        st.toggle(
-            "Mostrar opções de parcelado (judicial) e de financiamento (bancário)",
-            key=k_nicho,
-            help="Exibe entradas %, parcelas, juros, prazo, taxa a.a. e sistema (SAC/PRICE). Desligar só oculta; os valores seguem no cálculo em sessão e ao gravar.",
-        )
+        r_sim_top = st.columns([1.35, 0.7], gap="small")
+        with r_sim_top[0]:
+            number_compact(
+                "T venda (meses)",
+                w=W_MESES,
+                min_value=0.5,
+                max_value=360.0,
+                step=0.5,
+                format="%.1f",
+                key=tvk,
+                help="Mesmo T em todas as modalidades; afeta fluxo, saldo, juros, ROI. Painéis e comparação usam este valor.",
+            )
+        with r_sim_top[1]:
+            st.toggle(
+                "Nicho: judic. + banc.",
+                key=k_nicho,
+                help="Parcelado (judicial) e financ. (banc.): entradas %, prazos, juros, SAC/PRICE. Desligar oculta; valores mantêm na sessão e ao gravar.",
+            )
         if st.session_state.get(k_nicho, True):
-            st.markdown(
-                '<div class="sim-card-head">Opções (parcelado judicial)</div>', unsafe_allow_html=True
-            )
-            rpc = st.columns(3)
-            with rpc[0]:
-                st.number_input(
-                    "Entrada s/ lance (%)",
-                    min_value=0.0,
-                    max_value=95.0,
-                    step=0.5,
-                    format="%.2f",
-                    key=pr_e,
+            _jui, _bui = st.columns(2, gap="small", vertical_alignment="top")
+            with _jui:
+                st.markdown(
+                    '<div class="sim-card-head">Parcelado (judicial)</div>', unsafe_allow_html=True
                 )
-            with rpc[1]:
-                st.number_input(
-                    "Nº de parcelas",
-                    min_value=1,
-                    max_value=60,
-                    step=1,
-                    key=pr_n,
-                )
-            with rpc[2]:
-                st.number_input(
-                    "Juros % ao mês (s/ saldo)",
-                    min_value=0.0,
-                    max_value=5.0,
-                    step=0.05,
-                    format="%.2f",
-                    key=pr_jm,
-                    help="Referência: editais costumam usar ~1% a.m. em alguns casos; PGFN/CPC: IPCA-E + 1% no mês do pag. em execução fiscal (consulte o edital).",
-                )
-            st.markdown(
-                '<div class="sim-card-head">Opções (financiamento bancário)</div>',
-                unsafe_allow_html=True,
-            )
-            rfc = st.columns(4)
-            with rfc[0]:
-                st.number_input(
-                    "Entrada (%)",
-                    min_value=5.0,
-                    max_value=50.0,
-                    step=0.5,
-                    format="%.2f",
-                    key=fn_e,
-                )
-            with rfc[1]:
-                st.number_input(
-                    "Prazo (meses)",
-                    min_value=12,
-                    max_value=480,
-                    step=12,
-                    key=fn_n,
-                )
-            with rfc[2]:
-                st.number_input(
-                    "Juros a.a. (%)",
-                    min_value=0.0,
-                    max_value=20.0,
-                    step=0.1,
-                    format="%.2f",
-                    key=fn_tx,
-                )
-            with rfc[3]:
-                st.segmented_control(
-                    "Sistema",
-                    options=["SAC", "PRICE"],
-                    key=fn_sys,
-                )
-
-        with st.container(border=True):
-            st.markdown(
-                '<div class="sim-card-head">Valor de venda estimado</div>',
-                unsafe_allow_html=True,
-            )
-            # Streamlit: session com membro Enum + options=list[str] → coerção falha (Enum vs str).
-            _mk_mv = _sk("modo_val")
-            if _mk_mv in st.session_state and isinstance(st.session_state[_mk_mv], enum.Enum):
-                st.session_state[_mk_mv] = st.session_state[_mk_mv].value
-            if _mk_mv in st.session_state:
-                _mv_ok = _normalizar_selecao_modo_venda(
-                    st.session_state[_mk_mv], modo_order, label_map
-                )
-                if _mv_ok != st.session_state[_mk_mv]:
-                    st.session_state[_mk_mv] = _mv_ok
-            modo_sel = st.selectbox(
-                "Fonte da estimativa",
-                options=modo_order,
-                index=min(mi, len(modo_order) - 1),
-                format_func=lambda k: label_map.get(k, k),
-                key=_mk_mv,
-                help="Montantes calculados na hora. O cache do bairro é escolhido automaticamente pelo registro.",
-            )
-            modo_val_str = _normalizar_selecao_modo_venda(modo_sel, modo_order, label_map)
-            if modo_val_str != modo_sel:
-                st.session_state[_mk_mv] = modo_val_str
-            modo = ModoValorVenda(modo_val_str)
-            if modo == ModoValorVenda.MANUAL:
-                st.number_input(
-                    "Valor manual da venda (R$)",
-                    min_value=0.0,
-                    value=float(inp0_tag.valor_venda_manual or 0),
-                    step=25_000.0,
-                    key=_sk("vmanual"),
-                )
-
-        with st.container(border=True):
-            st.markdown(
-                '<div class="sim-card-head">Imposto de renda</div>',
-                unsafe_allow_html=True,
-            )
-            ir_top = st.columns([1.15, 1.85], gap="small")
-            with ir_top[0]:
-                tipo_raw = st.segmented_control(
-                    "Pessoa",
-                    options=["PF", "PJ"],
-                    default="PJ" if inp0_tag.tipo_pessoa == "PJ" else "PF",
-                    key=_sk("tipo"),
-                )
-            tipo = _seg_sim_single(tipo_raw, "PF")
-            with ir_top[1]:
-                if tipo == "PF":
-                    st.number_input(
-                        "Alíquota IR (%)",
+                rpc = st.columns(3, gap="small")
+                with rpc[0]:
+                    number_compact(
+                        "Entr. s/ lance (%)",
+                        w=W_PCT,
                         min_value=0.0,
-                        max_value=100.0,
-                        value=float(inp0_tag.ir_aliquota_pf_pct),
+                        max_value=95.0,
                         step=0.5,
                         format="%.2f",
-                        key=_sk("ir_pf"),
+                        key=pr_e,
                     )
-                else:
-                    st.number_input(
-                        "Alíquota IR (%)",
+                with rpc[1]:
+                    number_compact(
+                        "Parc.",
+                        w=72,
+                        min_value=1,
+                        max_value=60,
+                        step=1,
+                        key=pr_n,
+                    )
+                with rpc[2]:
+                    number_compact(
+                        "Juros % mês (saldo)",
+                        w=W_PCT,
                         min_value=0.0,
-                        max_value=100.0,
-                        value=float(inp0_tag.ir_aliquota_pj_pct),
+                        max_value=5.0,
+                        step=0.05,
+                        format="%.2f",
+                        key=pr_jm,
+                        help="Referência: editais ~1% a.m.; execução fiscal: IPCA-E +1% (edital).",
+                    )
+            with _bui:
+                st.markdown(
+                    '<div class="sim-card-head">Bancário</div>',
+                    unsafe_allow_html=True,
+                )
+                rfc = st.columns(4, gap="small")
+                with rfc[0]:
+                    number_compact(
+                        "Entr. (%)",
+                        w=W_PCT,
+                        min_value=5.0,
+                        max_value=50.0,
+                        step=0.5,
+                        format="%.2f",
+                        key=fn_e,
+                    )
+                with rfc[1]:
+                    number_compact(
+                        "Meses",
+                        w=W_MESES,
+                        min_value=12,
+                        max_value=480,
+                        step=12,
+                        key=fn_n,
+                    )
+                with rfc[2]:
+                    number_compact(
+                        "Juros a.a. (%)",
+                        w=W_PCT,
+                        min_value=0.0,
+                        max_value=20.0,
                         step=0.1,
                         format="%.2f",
-                        key=_sk("ir_pj"),
+                        key=fn_tx,
                     )
+                with rfc[3]:
+                    st.segmented_control(
+                        "Sist.",
+                        options=["SAC", "PRICE"],
+                        key=fn_sys,
+                    )
+
+        _sim_c_esq, _sim_c_dir = st.columns(2, gap="small", vertical_alignment="top")
+        with _sim_c_esq:
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="sim-card-head">Valor de venda estimado</div>',
+                    unsafe_allow_html=True,
+                )
+                # Streamlit: session com membro Enum + options=list[str] → coerção falha (Enum vs str).
+                _mk_mv = _sk("modo_val")
+                if _mk_mv in st.session_state and isinstance(st.session_state[_mk_mv], enum.Enum):
+                    st.session_state[_mk_mv] = st.session_state[_mk_mv].value
+                if _mk_mv in st.session_state:
+                    _mv_ok = _normalizar_selecao_modo_venda(
+                        st.session_state[_mk_mv], modo_order, label_map
+                    )
+                    if _mv_ok != st.session_state[_mk_mv]:
+                        st.session_state[_mk_mv] = _mv_ok
+                modo_sel = st.selectbox(
+                    "Fonte",
+                    options=modo_order,
+                    index=min(mi, len(modo_order) - 1),
+                    format_func=lambda k: label_map.get(k, k),
+                    key=_mk_mv,
+                    width=W_SELECT,
+                    help="Montantes na hora; cache de bairro vem do registro.",
+                )
+                modo_val_str = _normalizar_selecao_modo_venda(modo_sel, modo_order, label_map)
+                if modo_val_str != modo_sel:
+                    st.session_state[_mk_mv] = modo_val_str
+                modo = ModoValorVenda(modo_val_str)
+                if modo == ModoValorVenda.MANUAL:
+                    number_compact(
+                        "Venda R$ (manual)",
+                        w=W_BRL_MED,
+                        min_value=0.0,
+                        value=float(inp0_tag.valor_venda_manual or 0),
+                        step=25_000.0,
+                        key=_sk("vmanual"),
+                    )
+
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="sim-card-head">Imposto de renda</div>',
+                    unsafe_allow_html=True,
+                )
+                ir_top = st.columns([1.15, 1.85], gap="small")
+                with ir_top[0]:
+                    tipo_raw = st.segmented_control(
+                        "Pessoa",
+                        options=["PF", "PJ"],
+                        default="PJ" if inp0_tag.tipo_pessoa == "PJ" else "PF",
+                        key=_sk("tipo"),
+                    )
+                tipo = _seg_sim_single(tipo_raw, "PF")
+                with ir_top[1]:
+                    if tipo == "PF":
+                        number_compact(
+                            "IR (%)",
+                            w=W_PCT,
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=float(inp0_tag.ir_aliquota_pf_pct),
+                            step=0.5,
+                            format="%.2f",
+                            key=_sk("ir_pf"),
+                        )
+                    else:
+                        number_compact(
+                            "IR (%)",
+                            w=W_PCT,
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=float(inp0_tag.ir_aliquota_pj_pct),
+                            step=0.1,
+                            format="%.2f",
+                            key=_sk("ir_pj"),
+                        )
+
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="sim-card-head">Reforma e débitos do imóvel</div>',
+                    unsafe_allow_html=True,
+                )
+                r3 = st.columns(4, gap="small")
+                with r3[0]:
+                    cond = number_compact(
+                        "Condom. (R$)",
+                        w=W_BRL,
+                        min_value=0.0,
+                        value=float(inp0_tag.condominio_atrasado_brl),
+                        step=250.0,
+                        key=_sk("cond"),
+                    )
+                with r3[1]:
+                    iptu = number_compact(
+                        "IPTU (R$)",
+                        w=W_BRL,
+                        min_value=0.0,
+                        value=float(inp0_tag.iptu_atrasado_brl),
+                        step=250.0,
+                        key=_sk("iptu"),
+                    )
+                with r3[2]:
+                    desoc = number_compact(
+                        "Desoc. (R$)",
+                        w=W_BRL,
+                        min_value=0.0,
+                        value=float(inp0_tag.desocupacao_brl),
+                        step=250.0,
+                        key=_sk("des"),
+                    )
+                with r3[3]:
+                    outros = number_compact(
+                        "Outros (R$)",
+                        w=W_BRL,
+                        min_value=0.0,
+                        value=float(inp0_tag.outros_custos_brl),
+                        step=250.0,
+                        key=_sk("out"),
+                    )
+                ref_pick = st.selectbox(
+                    "Reforma",
+                    options=ref_ui_labels,
+                    index=ref_ui_ix,
+                    key=_sk("refui_lbl"),
+                    width="stretch",
+                )
+                ref_ui_key = ref_ui_keys[ref_ui_labels.index(ref_pick)]
+                ref_manual_val = 0.0
+                if ref_ui_key == "manual":
+                    ref_manual_val = float(
+                        number_compact(
+                            "R$ reforma (livre)",
+                            w=W_BRL_MED,
+                            min_value=0.0,
+                            value=float(rm0 or inp0_tag.reforma_brl or 0),
+                            step=5_000.0,
+                            key=_sk("refmanual"),
+                        )
+                    )
+                ref_mod, reforma_brl_inp = _reforma_modo_valor_de_ui(ref_ui_key, ref_manual_val)
+                area_sim = _area_m2_row_sim(row)
+                ref_pv_brl, ref_pv_tag = _preview_brl_reforma(area_sim, ref_mod, ref_manual_val)
+                st.caption(
+                    f"Prévia reforma: {_fmt_valor_campo('valor_venda', ref_pv_brl)} ({ref_pv_tag})"
+                    + (f" · {area_sim:.0f} m²" if area_sim > 0 else "")
+                )
 
         ir_pf_pct = float(st.session_state.get(_sk("ir_pf"), inp0_tag.ir_aliquota_pf_pct))
         ir_pj_pct = float(st.session_state.get(_sk("ir_pj"), inp0_tag.ir_aliquota_pj_pct))
@@ -1857,259 +1963,203 @@ def _render_simulacao_operacao(
             ads_por_id=ads_map,
         )
 
-        with st.container(border=True):
-            st.markdown(
-                '<div class="sim-card-head">Arrematação</div>',
-                unsafe_allow_html=True,
-            )
-            col_sw, col_ref = st.columns([1.15, 2.85], gap="small")
-            with col_sw:
-                st.toggle(
-                    "2ª praça",
-                    key=t2k,
-                    help="Desligado = referência da 1ª praça no edital. Ligado = referência da 2ª praça. "
-                    "O lance em R$ é preenchido com o valor da praça quando existir no edital.",
-                    on_change=_on_praca_toggle,
-                )
-            with col_ref:
-                bits: list[str] = []
-                if l1_ed > 0:
-                    bits.append(
-                        f'1ª <strong>{html.escape(_fmt_valor_campo("valor_venda", l1_ed))}</strong>'
-                    )
-                if l2_ed > 0:
-                    bits.append(
-                        f'2ª <strong>{html.escape(_fmt_valor_campo("valor_venda", l2_ed))}</strong>'
-                    )
-                if not bits:
-                    v_ref = _defaults_lance_row(row)
-                    if v_ref > 0:
-                        bits.append(
-                            f'<strong>{html.escape(_fmt_valor_campo("valor_venda", v_ref))}</strong>'
-                        )
-                if bits:
-                    _tit_ref = (
-                        "Lances no edital"
-                        if (l1_ed > 0 or l2_ed > 0)
-                        else "Referência do edital"
-                    )
-                    st.markdown(
-                        f'<p class="sim-praca-ref">{_tit_ref}: ' + " · ".join(bits) + "</p>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.caption("Sem valores de lance no edital — informe o lance abaixo.")
-            st.number_input(
-                "Lance (R$)",
-                min_value=0.0,
-                value=float(st.session_state.get(lk, def_lance)),
-                step=5_000.0,
-                key=lk,
-            )
-            r_av = st.columns([1.1, 1.9], gap="small")
-            with r_av[0]:
-                st.toggle(
-                    "Desconto à vista",
-                    key=dsk,
-                    help="Reduz o caixa pago do lance. Comissão do leiloeiro e % de ITBI/registro permanecem sobre o lance nominal (cheio). Só aplica na modalidade **à vista**.",
-                    disabled=False,
-                )
-            with r_av[1]:
-                st.number_input(
-                    "Desconto s/ lance (%)",
-                    min_value=0.0,
-                    max_value=99.0,
-                    step=0.5,
-                    format="%.2f",
-                    key=dsk_pct,
-                    disabled=(not bool(st.session_state.get(dsk, False))),
-                    help="Típico em leilões com incentivo a pagamento único (ex.: 10%).",
-                )
-
-        with st.container(border=True):
-            st.markdown(
-                '<div class="sim-card-head">Tributos</div>',
-                unsafe_allow_html=True,
-            )
-            r2a = st.columns(3, gap="small")
-            with r2a[0]:
-                st.number_input(
-                    "Leiloeiro %",
-                    min_value=0.0,
-                    max_value=100.0,
-                    value=float(inp0_tag.comissao_leiloeiro_pct_sobre_arrematacao),
-                    step=0.25,
-                    format="%.2f",
-                    key=_sk("cleipct"),
-                )
-            with r2a[1]:
-                st.number_input(
-                    "ITBI %",
-                    min_value=0.0,
-                    max_value=100.0,
-                    value=float(inp0_tag.itbi_pct_sobre_arrematacao),
-                    step=0.25,
-                    format="%.2f",
-                    key=_sk("itbipct"),
-                )
-            legacy_reg_brl = float(inp0_tag.registro_brl or 0) > 0
-            with r2a[2]:
-                if legacy_reg_brl:
-                    st.number_input(
-                        "Registro R$",
-                        min_value=0.0,
-                        value=float(inp0_tag.registro_brl),
-                        step=250.0,
-                        key=_sk("regfix"),
-                        help="Legado: gravar de novo usa %.",
-                    )
-                else:
-                    st.number_input(
-                        "Registro %",
-                        min_value=0.0,
-                        max_value=100.0,
-                        value=float(inp0_tag.registro_pct_sobre_arrematacao or 3.5),
-                        step=0.1,
-                        format="%.2f",
-                        key=_sk("regpct"),
-                    )
-            lance = float(st.session_state.get(lk, def_lance))
-            clei_pct = float(
-                st.session_state.get(_sk("cleipct"), inp0_tag.comissao_leiloeiro_pct_sobre_arrematacao)
-            )
-            itbi_pct = float(st.session_state.get(_sk("itbipct"), inp0_tag.itbi_pct_sobre_arrematacao))
-            if legacy_reg_brl:
-                reg_brl_inp = float(st.session_state.get(_sk("regfix"), inp0_tag.registro_brl))
-                reg_pct = float(inp0_tag.registro_pct_sobre_arrematacao or 0)
-            else:
-                reg_brl_inp = 0.0
-                reg_pct = float(st.session_state.get(_sk("regpct"), inp0_tag.registro_pct_sobre_arrematacao or 3.5))
-            clei_pv = _preview_brl_leiloeiro(lance, clei_pct, 0.0)
-            itbi_pv = _preview_brl_itbi(lance, itbi_pct, 0.0)
-            reg_pv = _preview_brl_itbi(lance, reg_pct, reg_brl_inp)
-            st.markdown(
-                '<div class="sim-kpi-strip">'
-                f'<span>Leiloeiro <strong>{html.escape(_fmt_valor_campo("valor_venda", clei_pv))}</strong></span>'
-                f'<span class="sim-kpi-dot">·</span>'
-                f'<span>ITBI <strong>{html.escape(_fmt_valor_campo("valor_venda", itbi_pv))}</strong></span>'
-                f'<span class="sim-kpi-dot">·</span>'
-                f'<span>Registro <strong>{html.escape(_fmt_valor_campo("valor_venda", reg_pv))}</strong></span>'
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-        with st.container(border=True):
-            st.markdown(
-                '<div class="sim-card-head">Reforma e débitos do imóvel</div>',
-                unsafe_allow_html=True,
-            )
-            r3 = st.columns(4, gap="small")
-            with r3[0]:
-                cond = st.number_input(
-                    "Condomínio (R$)",
-                    min_value=0.0,
-                    value=float(inp0_tag.condominio_atrasado_brl),
-                    step=250.0,
-                    key=_sk("cond"),
-                )
-            with r3[1]:
-                iptu = st.number_input(
-                    "IPTU (R$)",
-                    min_value=0.0,
-                    value=float(inp0_tag.iptu_atrasado_brl),
-                    step=250.0,
-                    key=_sk("iptu"),
-                )
-            with r3[2]:
-                desoc = st.number_input(
-                    "Desocupação (R$)",
-                    min_value=0.0,
-                    value=float(inp0_tag.desocupacao_brl),
-                    step=250.0,
-                    key=_sk("des"),
-                )
-            with r3[3]:
-                outros = st.number_input(
-                    "Outros (R$)",
-                    min_value=0.0,
-                    value=float(inp0_tag.outros_custos_brl),
-                    step=250.0,
-                    key=_sk("out"),
-                )
-            ref_pick = st.selectbox(
-                "Reforma estimada",
-                options=ref_ui_labels,
-                index=ref_ui_ix,
-                key=_sk("refui_lbl"),
-            )
-            ref_ui_key = ref_ui_keys[ref_ui_labels.index(ref_pick)]
-            ref_manual_val = 0.0
-            if ref_ui_key == "manual":
-                ref_manual_val = float(
-                    st.number_input(
-                        "R$ reforma (livre)",
-                        min_value=0.0,
-                        value=float(rm0 or inp0_tag.reforma_brl or 0),
-                        step=5_000.0,
-                        key=_sk("refmanual"),
-                    )
-                )
-            ref_mod, reforma_brl_inp = _reforma_modo_valor_de_ui(ref_ui_key, ref_manual_val)
-            area_sim = _area_m2_row_sim(row)
-            ref_pv_brl, ref_pv_tag = _preview_brl_reforma(area_sim, ref_mod, ref_manual_val)
-            st.caption(
-                f"Prévia reforma: {_fmt_valor_campo('valor_venda', ref_pv_brl)} ({ref_pv_tag})"
-                + (f" · {area_sim:.0f} m²" if area_sim > 0 else "")
-            )
-
-        with st.container(border=True):
-            st.markdown(
-                '<div class="sim-card-head">Corretagem (saída)</div>',
-                unsafe_allow_html=True,
-            )
-            rr = st.columns([1, 1, 1.4], gap="small")
-            with rr[0]:
-                st.number_input(
-                    "Fixo (R$)",
-                    min_value=0.0,
-                    value=float(inp0_tag.comissao_imobiliaria_brl),
-                    step=500.0,
-                    help="Se > 0, ignora o percentual.",
-                    key=_sk("cimob"),
-                )
-            with rr[1]:
-                st.number_input(
-                    "% s/ venda",
-                    min_value=0.0,
-                    max_value=100.0,
-                    value=float(inp0_tag.comissao_imobiliaria_pct_sobre_venda),
-                    step=0.1,
-                    format="%.2f",
-                    key=_sk("cimobpct"),
-                )
-            with rr[2]:
-                cimob_brl = float(st.session_state.get(_sk("cimob"), inp0_tag.comissao_imobiliaria_brl))
-                cimob_pct = float(
-                    st.session_state.get(_sk("cimobpct"), inp0_tag.comissao_imobiliaria_pct_sobre_venda)
-                )
-                cim_pv = _preview_brl_corretagem(float(venda_prev), cimob_pct, cimob_brl)
-                cim_hint = "fixo" if cimob_brl > 0 else (f"{cimob_pct:.2f} %" if cimob_pct > 0 else "—")
+        with _sim_c_dir:
+            with st.container(border=True):
                 st.markdown(
-                    f'<div class="sim-kpi-strip">Estimativa venda <strong>{html.escape(_fmt_valor_campo("valor_venda", float(venda_prev)))}</strong>'
-                    f' · Corretagem <strong>{html.escape(_fmt_valor_campo("valor_venda", cim_pv))}</strong> <span class="sim-kpi-muted">({html.escape(cim_hint)})</span></div>',
+                    '<div class="sim-card-head">Arrematação</div>',
                     unsafe_allow_html=True,
                 )
+                _ar1 = st.columns([0.55, 1.45, 1.0, 0.5, 0.9], gap="small", vertical_alignment="top")
+                with _ar1[0]:
+                    st.toggle(
+                        "2ª praça",
+                        key=t2k,
+                        on_change=_on_praca_toggle,
+                    )
+                with _ar1[1]:
+                    _bits: list[str] = []
+                    if l1_ed > 0:
+                        _bits.append(
+                            f'1ª <strong>{html.escape(_fmt_valor_campo("valor_venda", l1_ed))}</strong>'
+                        )
+                    if l2_ed > 0:
+                        _bits.append(
+                            f'2ª <strong>{html.escape(_fmt_valor_campo("valor_venda", l2_ed))}</strong>'
+                        )
+                    if not _bits:
+                        v_ref = _defaults_lance_row(row)
+                        if v_ref > 0:
+                            _bits.append(
+                                f'<strong>{html.escape(_fmt_valor_campo("valor_venda", v_ref))}</strong>'
+                            )
+                    if _bits:
+                        _tit_ref2 = (
+                            "Lances no edital"
+                            if (l1_ed > 0 or l2_ed > 0)
+                            else "Referência do edital"
+                        )
+                        st.markdown(
+                            f'<p class="sim-praca-ref">{_tit_ref2}: ' + " · ".join(_bits) + "</p>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("Sem lance no edital — lance abaixo.")
+                with _ar1[2]:
+                    number_compact(
+                        "Lance (R$)",
+                        w=W_BRL_MED,
+                        min_value=0.0,
+                        value=float(st.session_state.get(lk, def_lance)),
+                        step=5_000.0,
+                        key=lk,
+                    )
+                with _ar1[3]:
+                    st.toggle(
+                        "Desc. à vista",
+                        key=dsk,
+                        disabled=False,
+                    )
+                with _ar1[4]:
+                    number_compact(
+                        "Desc. % s/ lance",
+                        w=W_PCT,
+                        min_value=0.0,
+                        max_value=99.0,
+                        step=0.5,
+                        format="%.2f",
+                        key=dsk_pct,
+                        disabled=(not bool(st.session_state.get(dsk, False))),
+                        help="Típico com incentivo a pagamento à vista (ex. 10%).",
+                    )
+
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="sim-card-head">Tributos</div>',
+                    unsafe_allow_html=True,
+                )
+                r2a = st.columns(3, gap="small")
+                with r2a[0]:
+                    number_compact(
+                        "Leil. %",
+                        w=W_PCT,
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=float(inp0_tag.comissao_leiloeiro_pct_sobre_arrematacao),
+                        step=0.25,
+                        format="%.2f",
+                        key=_sk("cleipct"),
+                    )
+                with r2a[1]:
+                    number_compact(
+                        "ITBI %",
+                        w=W_PCT,
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=float(inp0_tag.itbi_pct_sobre_arrematacao),
+                        step=0.25,
+                        format="%.2f",
+                        key=_sk("itbipct"),
+                    )
+                legacy_reg_brl = float(inp0_tag.registro_brl or 0) > 0
+                with r2a[2]:
+                    if legacy_reg_brl:
+                        number_compact(
+                            "Reg. R$",
+                            w=W_BRL,
+                            min_value=0.0,
+                            value=float(inp0_tag.registro_brl),
+                            step=250.0,
+                            key=_sk("regfix"),
+                            help="Legado: gravar de novo usa %.",
+                        )
+                    else:
+                        number_compact(
+                            "Reg. %",
+                            w=W_PCT,
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=float(inp0_tag.registro_pct_sobre_arrematacao or 3.5),
+                            step=0.1,
+                            format="%.2f",
+                            key=_sk("regpct"),
+                        )
+                lance = float(st.session_state.get(lk, def_lance))
+                clei_pct = float(
+                    st.session_state.get(_sk("cleipct"), inp0_tag.comissao_leiloeiro_pct_sobre_arrematacao)
+                )
+                itbi_pct = float(st.session_state.get(_sk("itbipct"), inp0_tag.itbi_pct_sobre_arrematacao))
+                if legacy_reg_brl:
+                    reg_brl_inp = float(st.session_state.get(_sk("regfix"), inp0_tag.registro_brl))
+                    reg_pct = float(inp0_tag.registro_pct_sobre_arrematacao or 0)
+                else:
+                    reg_brl_inp = 0.0
+                    reg_pct = float(st.session_state.get(_sk("regpct"), inp0_tag.registro_pct_sobre_arrematacao or 3.5))
+                clei_pv = _preview_brl_leiloeiro(lance, clei_pct, 0.0)
+                itbi_pv = _preview_brl_itbi(lance, itbi_pct, 0.0)
+                reg_pv = _preview_brl_itbi(lance, reg_pct, reg_brl_inp)
+                st.markdown(
+                    '<div class="sim-kpi-strip">'
+                    f'<span>Leiloeiro <strong>{html.escape(_fmt_valor_campo("valor_venda", clei_pv))}</strong></span>'
+                    f'<span class="sim-kpi-dot">·</span>'
+                    f'<span>ITBI <strong>{html.escape(_fmt_valor_campo("valor_venda", itbi_pv))}</strong></span>'
+                    f'<span class="sim-kpi-dot">·</span>'
+                    f'<span>Registro <strong>{html.escape(_fmt_valor_campo("valor_venda", reg_pv))}</strong></span>'
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="sim-card-head">Corretagem (saída)</div>',
+                    unsafe_allow_html=True,
+                )
+                rr = st.columns([1, 1, 1.4], gap="small")
+                with rr[0]:
+                    number_compact(
+                        "Corret. fixo (R$)",
+                        w=W_BRL,
+                        min_value=0.0,
+                        value=float(inp0_tag.comissao_imobiliaria_brl),
+                        step=500.0,
+                        help="Se > 0, ignora o percentual.",
+                        key=_sk("cimob"),
+                    )
+                with rr[1]:
+                    number_compact(
+                        "Corret. % s/ venda",
+                        w=W_PCT,
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=float(inp0_tag.comissao_imobiliaria_pct_sobre_venda),
+                        step=0.1,
+                        format="%.2f",
+                        key=_sk("cimobpct"),
+                    )
+                with rr[2]:
+                    cimob_brl = float(st.session_state.get(_sk("cimob"), inp0_tag.comissao_imobiliaria_brl))
+                    cimob_pct = float(
+                        st.session_state.get(_sk("cimobpct"), inp0_tag.comissao_imobiliaria_pct_sobre_venda)
+                    )
+                    cim_pv = _preview_brl_corretagem(float(venda_prev), cimob_pct, cimob_brl)
+                    cim_hint = "fixo" if cimob_brl > 0 else (f"{cimob_pct:.2f} %" if cimob_pct > 0 else "—")
+                    st.markdown(
+                        f'<div class="sim-kpi-strip">Estimativa venda <strong>{html.escape(_fmt_valor_campo("valor_venda", float(venda_prev)))}</strong>'
+                        f' · Corretagem <strong>{html.escape(_fmt_valor_campo("valor_venda", cim_pv))}</strong> <span class="sim-kpi-muted">({html.escape(cim_hint)})</span></div>',
+                        unsafe_allow_html=True,
+                    )
 
         _roi_ui_default = float(inp0_tag.roi_desejado_pct or 0) or 50.0
         with st.container(border=True):
             st.markdown(
-                '<div class="sim-card-head">Sensibilidade (lance máximo)</div>',
+                '<div class="sim-card-head">Sensibilidade (lance máx.)</div>',
                 unsafe_allow_html=True,
             )
             r4 = st.columns([1.1, 1.2], gap="small")
+            roi_seg_ix = 1 if inp0_tag.roi_desejado_modo == ModoRoiDesejado.LIQUIDO else 0
             with r4[0]:
-                st.number_input(
-                    "ROI desejado %",
+                number_compact(
+                    "ROI desejado (%)",
+                    w=W_PCT,
                     min_value=0.0,
                     max_value=200.0,
                     value=_roi_ui_default,
@@ -2118,10 +2168,9 @@ def _render_simulacao_operacao(
                     help="0% desliga o cálculo de lance máximo (bissecção).",
                     key=_sk("roi_w"),
                 )
-            roi_seg_ix = 1 if inp0_tag.roi_desejado_modo == ModoRoiDesejado.LIQUIDO else 0
             with r4[1]:
                 st.segmented_control(
-                    "Base do ROI",
+                    "Base ROI",
                     options=["Bruto", "Líquido"],
                     default=["Bruto", "Líquido"][roi_seg_ix],
                     key=_sk("roi_seg"),
@@ -4968,10 +5017,9 @@ def main() -> None:
     load_dotenv(_REPO_ROOT / ".env")
     _init_session()
     _aplicar_modo_pendente_antes_dos_widgets()
-    st.markdown(
+    st.html(
         _PAGE_CSS
         + f"<style>\n{PAINEL_SIMULACAO_SCOPED_ONLY}\n</style>",
-        unsafe_allow_html=True,
     )
 
     _render_sidebar_app()

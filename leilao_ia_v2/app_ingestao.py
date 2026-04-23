@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Leilão IA v2 — Ingestão", layout="wide")
-st.markdown(STREAMLIT_PAGE_CSS, unsafe_allow_html=True)
+st.html(STREAMLIT_PAGE_CSS)
 
 if "pending_duplicate_url" not in st.session_state:
     st.session_state.pending_duplicate_url = None
