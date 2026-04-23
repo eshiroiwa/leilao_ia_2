@@ -20,13 +20,16 @@ def test_relatorio_inclui_dados_adicionais_leilao_extra():
     doc = OperacaoSimulacaoDocumento()
     html = montar_html_relatorio_simulacao(row=row, caches=[], ads_map={}, doc=doc)
     assert "dc-root" in html and "sp-sim-financeiro" in html
+    assert "sp-sim-line" in html
+    assert "Campinas" in html
     assert "Dados adicionais" in html
+    assert "rel-dois-col" in html
     assert "formas_pagamento" in html
     assert "financiamento" in html
     assert "processo_judicial" in html
 
 
-def test_relatorio_sem_secao_adicionais_quando_extra_vazio():
+def test_relatorio_coluna_adicionais_vazia_mostra_aviso():
     row = {
         "id": "x",
         "endereco": "Rua Y",
@@ -35,7 +38,9 @@ def test_relatorio_sem_secao_adicionais_quando_extra_vazio():
         "leilao_extra_json": {},
     }
     html = montar_html_relatorio_simulacao(row=row, caches=[], ads_map={}, doc=OperacaoSimulacaoDocumento())
-    assert "Dados adicionais" not in html
+    assert "Dados adicionais" in html
+    assert "Nenhum dado adicional registrado" in html
+    assert "rel-dois-col" in html
 
 
 def test_relatorio_inclui_secao_analise_mercado():
@@ -82,11 +87,13 @@ def test_relatorio_inclui_secao_analise_mercado():
     assert "2026-01-01T12:00" not in html
 
 
-def test_relatorio_inclui_todos_caches_vinculados_e_mapa_todos_anuncios():
-    """Vários linhas de cache: secção HTML e marcadores a partir da união dos anuncios_ids."""
+def test_relatorio_mapa_marcadores_uniao_anuncios_dos_caches():
+    """Mapa: marcadores a partir da união dos anuncios_ids dos caches; sem texto de comparáveis no HTML."""
     row = {
         "id": "L1",
         "endereco": "Rua Mapa",
+        "cidade": "Jundiaí",
+        "estado": "SP",
         "latitude": -22.0,
         "longitude": -47.0,
     }
@@ -137,9 +144,12 @@ def test_relatorio_inclui_todos_caches_vinculados_e_mapa_todos_anuncios():
         ads_map=ads_map,
         doc=OperacaoSimulacaoDocumento(),
     )
-    assert "Mercado 10km principal" in html
-    assert "Terrenos ref." in html
-    assert "[referência]" in html
+    assert "Mercado 10km principal" not in html
+    assert "Anúncios comparativos" not in html
+    assert "Mapa" in html
+    assert "Clique nos pontos do mapa para ver mais informações" in html
+    assert "Jundiaí" in html
+    assert "sp-sim-line" in html
     assert "rel-map-json" in html
     # três anúncios com coords distintas → três itens no array markers do JSON embebido
     assert html.count('"lat":-22.01') == 1

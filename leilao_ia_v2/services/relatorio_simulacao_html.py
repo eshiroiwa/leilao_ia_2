@@ -1,5 +1,5 @@
 """
-Relatório HTML estático da aba Simulação (dados extraídos, cache principal, painel financeiro).
+Relatório HTML estático da aba Simulação (dados do edital, adicionais, mapa, painel financeiro).
 
 Usado via import tardio a partir do app Streamlit para reutilizar formatação e cards do painel.
 """
@@ -37,10 +37,12 @@ h1 { font-size: 1.55rem; font-weight: 700; margin: 0 0 10px; letter-spacing: -0.
 a.lei-top { color: var(--acc); word-break: break-all; }
 .sec { margin-bottom: 32px; }
 .sec-h { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); margin: 0 0 14px; font-weight: 600; }
-.hero { display: grid; grid-template-columns: 1fr minmax(280px, 360px); gap: 22px; align-items: start; margin-bottom: 8px; }
+/* Metade + metade, alinhado à grelha dos dois paineis (edital | adicionais) */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.25rem; align-items: start; margin-bottom: 8px; }
+.hero > * { min-width: 0; }
 @media (max-width: 720px) { .hero { grid-template-columns: 1fr; } }
-.foto { border-radius: 14px; overflow: hidden; border: 1px solid var(--bd); background: #0c1322; max-height: 420px; display:flex; align-items:center; justify-content:center; }
-.foto img { width: 100%; max-height: 420px; object-fit: contain; display: block; }
+.foto { border-radius: 14px; overflow: hidden; border: 1px solid var(--bd); background: #0c1322; min-height: 200px; max-height: 480px; display:flex; align-items:center; justify-content:center; }
+.foto img { width: 100%; max-height: 480px; object-fit: contain; display: block; }
 .rel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); gap: 12px; }
 .rel-card { background: var(--card); border: 1px solid var(--bd); border-radius: 14px; padding: 14px 16px; box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
 .rel-card .l { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 6px; }
@@ -89,100 +91,19 @@ a.lei-top { color: var(--acc); word-break: break-all; }
   border: 1px solid var(--bd); border-radius: 16px; overflow: hidden; background: rgba(15, 23, 42, 0.35);
 }
 .rel-sim-embed .dc-root.sp-sim-financeiro { margin: 0; border-radius: 0; box-shadow: none; }
+/* Edital + adicionais em duas colunas */
+.rel-dois-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .rel-dois-col { grid-template-columns: 1fr; }
+}
+.rel-dois-col-item { min-width: 0; }
+.rel-dois-col-item > .sec-h { margin-top: 0; }
 """
-
-
-def _metadados_cache_dict(c: dict[str, Any]) -> dict[str, Any]:
-    raw = c.get("metadados_json")
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str) and raw.strip():
-        try:
-            import json
-
-            return dict(json.loads(raw))
-        except Exception:
-            return {}
-    return {}
-
-
-def _cache_e_principal_simulacao(cache_row: dict[str, Any]) -> bool:
-    md = _metadados_cache_dict(cache_row)
-    papel = str(md.get("cache_papel") or "").strip()
-    if papel == "principal_simulacao":
-        return True
-    if papel in ("referencia_extra", "terrenos_referencia"):
-        return False
-    if str(md.get("modo_cache") or "").strip().lower() == "terrenos":
-        return False
-    if md.get("apenas_referencia") is True:
-        return False
-    if md.get("uso_simulacao") is False:
-        return False
-    return True
-
-
-def _row_cache_principal_simulacao(caches: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for c in caches:
-        if _cache_e_principal_simulacao(c):
-            return c
-    return None
-
-
-def _html_papel_cache_span(cache_row: dict[str, Any]) -> str:
-    """Etiqueta [simulação] ou [referência] (mesma lógica do painel de caches)."""
-    md = _metadados_cache_dict(cache_row)
-    if str(md.get("modo_cache") or "").strip().lower() == "terrenos":
-        return ' <span style="color:#fb923c;font-weight:600;">[referência]</span>'
-    if md.get("apenas_referencia") is True or md.get("uso_simulacao") is False:
-        return ' <span style="color:#fb923c;font-weight:600;">[referência]</span>'
-    return ' <span style="color:#4ade80;font-weight:600;">[simulação]</span>'
-
-
-def _html_sec_todos_caches(caches: list[dict[str, Any]]) -> str:
-    """KPIs por cada linha de ``cache_media_bairro`` vinculada ao leilão."""
-    if not caches:
-        return '<p class="sub">Nenhum cache de média vinculado a este leilão.</p>'
-    from leilao_ia_v2 import app_assistente_ingestao as ag
-
-    partes: list[str] = []
-    for c in caches:
-        if not isinstance(c, dict):
-            continue
-        nome = html.escape(str(c.get("nome_cache") or "Cache de mercado").strip() or "Cache")
-        tipo = html.escape(str(c.get("tipo_imovel") or "—"))
-        try:
-            n_am = int(c.get("n_amostras") or 0)
-        except (TypeError, ValueError):
-            n_am = 0
-        try:
-            pm2 = float(c.get("preco_m2_medio") or 0)
-        except (TypeError, ValueError):
-            pm2 = 0.0
-        try:
-            vm = float(c.get("valor_medio_venda") or 0)
-        except (TypeError, ValueError):
-            vm = 0.0
-        pm2_s = _fmt_rs_m2_br(pm2)
-        vm_s = ag._fmt_valor_campo("valor_venda", vm) if vm > 0 else "—"
-        papel = _html_papel_cache_span(c)
-        kpi = (
-            f'<div class="rel-kpi-row" style="margin-top:8px">'
-            f'<div class="rel-kpi"><div class="l">Amostras</div><div class="v">{n_am}</div></div>'
-            f'<div class="rel-kpi"><div class="l">Preço médio / m²</div><div class="v">{html.escape(pm2_s)}</div></div>'
-            f'<div class="rel-kpi"><div class="l">Valor médio venda</div><div class="v">{html.escape(vm_s)}</div></div>'
-            f"</div>"
-        )
-        partes.append(
-            '<div class="rel-cache-bloco" style="margin-bottom:20px;padding-bottom:16px;'
-            'border-bottom:1px solid var(--bd);">'
-            f'<h3 class="rel-cache-subh" style="font-size:0.95rem;font-weight:700;margin:0 0 6px 0;">'
-            f"{nome}{papel} · <span style=\"color:var(--muted);font-weight:500;\">{tipo}</span></h3>"
-            f"{kpi}</div>"
-        )
-    if not partes:
-        return '<p class="sub">Nenhum cache de média vinculado a este leilão.</p>'
-    return "".join(partes)
 
 
 def _parse_csv_anuncio_ids(raw: Any) -> list[str]:
@@ -235,30 +156,20 @@ def _html_secao_analise_mercado_ctx(row: dict[str, Any]) -> str:
     )
 
 
-def _html_secao_dados_adicionais(row: dict[str, Any], ag: Any) -> str:
-    """Bloco ``leilao_extra_json`` (formas de pagamento, observações, etc.), alinhado à aba de análise."""
+def _html_dados_adicionais_coluna(row: dict[str, Any], ag: Any) -> str:
+    """Conteúdo da coluna *Dados adicionais* (``leilao_extra_json``) ou aviso de vazio."""
     extra = _leilao_extra_json_como_dict(row)
+    vazio = '<p class="sub" style="margin:0">Nenhum dado adicional registrado.</p>'
     if not extra or not ag._leilao_extra_tem_conteudo(extra):
-        return ""
+        return vazio
     txt = ag._leilao_extra_como_texto(extra).strip()
     if not txt or txt == "—":
-        return ""
+        return vazio
     return (
-        '<div class="sec">'
-        '<h2 class="sec-h">Dados adicionais</h2>'
         '<div class="rel-card rel-extra-dados" style="white-space:pre-wrap;font-size:0.87rem;'
         'line-height:1.55;color:var(--txt);">'
-        f"{html.escape(txt)}</div></div>"
+        f"{html.escape(txt)}</div>"
     )
-
-
-def _fmt_rs_m2_br(v: float) -> str:
-    if v <= 0:
-        return "—"
-    s = f"{float(v):,.2f}"
-    if "," in s and "." in s:
-        s = s.replace(",", "_T_").replace(".", ",").replace("_T_", ".")
-    return s + " R$/m²"
 
 
 def _monta_painel_rel_embed(o: SimulacaoOperacaoOutputs) -> str:
@@ -531,32 +442,26 @@ def montar_html_relatorio_simulacao(
         fq = html.escape(foto_u, quote=True)
         foto_html = f'<div class="foto"><img src="{fq}" alt="Foto do imóvel" loading="lazy" referrerpolicy="no-referrer" /></div>'
 
-    cards_ex: list[str] = []
-    for label, key in ag._CAMPOS_EXTRACAO:
-        if key == "url_leilao":
-            continue
-        raw = row.get(key)
-        if ag._raw_extracao_ocultar(raw):
-            continue
-        disp = ag._fmt_valor_campo(key, raw)
-        if disp == "—" or not str(disp).strip():
-            continue
-        cards_ex.append(
-            '<div class="rel-card"><div class="l">' + html.escape(label) + "</div>"
-            '<div class="v">' + html.escape(disp) + "</div></div>"
-        )
-    grid_ex = '<div class="rel-grid">' + "".join(cards_ex) + "</div>" if cards_ex else "<p class=\"sub\">Sem campos extraídos para exibir.</p>"
-    sec_adicionais = _html_secao_dados_adicionais(row, ag)
+    painel_ex = ag._html_painel_extraidos_lista_painel_fin(row)
+    if painel_ex:
+        grid_ex = painel_ex
+    else:
+        grid_ex = '<p class="sub" style="margin:0">Sem campos extraídos para exibir.</p>'
+    col_adicionais = _html_dados_adicionais_coluna(row, ag)
     sec_ctx_mercado = _html_secao_analise_mercado_ctx(row)
 
-    _principal = _row_cache_principal_simulacao(caches)
-    sec_cache = _html_sec_todos_caches(caches)
-    if _principal is not None and len(caches) > 1:
-        sec_cache = (
-            '<p class="sub" style="margin:0 0 14px 0;">A simulação do painel financeiro abaixo usa o cache '
-            "marcado como <strong>[simulação]</strong> (principal) quando existir.</p>" + sec_cache
-        )
     map_head, map_sec, map_scripts = _map_comparativos_fragments(row, caches, ads_map)
+    if map_sec.strip():
+        sec_mapa = (
+            '<div class="sec">'
+            '<h2 class="sec-h">Mapa</h2>'
+            '<p class="sub" style="margin:0 0 12px 0">'
+            "Clique nos pontos do mapa para ver mais informações."
+            "</p>"
+            f"{map_sec}</div>"
+        )
+    else:
+        sec_mapa = ""
 
     fin_html, _outs_cmp = _html_secao_paineis_simulacao(
         ag, row, caches, ads_map, o, cmp_painel
@@ -617,17 +522,20 @@ def montar_html_relatorio_simulacao(
   </div>
 
   <div class="sec">
-    <h2 class="sec-h">Dados extraídos do edital</h2>
-    {grid_ex}
+    <div class="rel-dois-col">
+      <div class="rel-dois-col-item">
+        <h2 class="sec-h">Dados extraídos do edital</h2>
+        {grid_ex}
+      </div>
+      <div class="rel-dois-col-item">
+        <h2 class="sec-h">Dados adicionais</h2>
+        {col_adicionais}
+      </div>
+    </div>
   </div>
-  {sec_adicionais}
   {sec_ctx_mercado}
 
-  <div class="sec">
-    <h2 class="sec-h">Anúncios comparativos</h2>
-    {sec_cache}
-    {map_sec}
-  </div>
+  {sec_mapa}
 
   <div class="sec">
     <h2 class="sec-h">Painel financeiro</h2>
