@@ -1,0 +1,400 @@
+{
+  "$defs": {
+    "LeilaoExtraJson": {
+      "description": "Conteúdo gravado em `leilao_imoveis.leilao_extra_json`.\nTextos longos em markdown onde fizer sentido para o próximo agente.",
+      "properties": {
+        "formas_pagamento": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Formas Pagamento",
+          "type": "array"
+        },
+        "processo_judicial": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcessoJudicial"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "regras_leilao_markdown": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Regras Leilao Markdown"
+        },
+        "observacoes_markdown": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observacoes Markdown"
+        },
+        "tipo_pagamento_resumo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tipo Pagamento Resumo"
+        },
+        "modalidade_venda": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "leilao = há datas de 1ª e/ou 2ª praça ou leilão explícito; venda_direta = oferta sem 1ª/2ª praça (ex.: 'venda direta', 'Tipo de Venda: vendadireta') ou quando não houver data_leilao_1_praca nem data_leilao_2_praca e o anúncio for compra direta",
+          "title": "Modalidade Venda"
+        }
+      },
+      "title": "LeilaoExtraJson",
+      "type": "object"
+    },
+    "ProcessoJudicial": {
+      "description": "Processo judicial relacionado ao leilão (dados públicos do edital).",
+      "properties": {
+        "numero": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Numero"
+        },
+        "vara": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vara"
+        },
+        "comarca": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comarca"
+        }
+      },
+      "title": "ProcessoJudicial",
+      "type": "object"
+    }
+  },
+  "description": "Resposta esperada do modelo após ler o markdown do Firecrawl.",
+  "properties": {
+    "url_leilao": {
+      "title": "Url Leilao",
+      "type": "string"
+    },
+    "url_foto_imovel": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "URL absoluta (https) da imagem principal do imóvel no edital, se constar no markdown (ex.: sintaxe ![…](url)); null se não houver",
+      "title": "Url Foto Imovel"
+    },
+    "endereco": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Endereco"
+    },
+    "cidade": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cidade"
+    },
+    "estado": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Estado"
+    },
+    "bairro": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Bairro"
+    },
+    "tipo_imovel": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tipo Imovel"
+    },
+    "conservacao": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Conservacao"
+    },
+    "tipo_casa": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tipo Casa"
+    },
+    "andar": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Andar"
+    },
+    "area_util": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Area Util"
+    },
+    "area_total": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Area Total"
+    },
+    "quartos": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Quartos"
+    },
+    "vagas": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Vagas"
+    },
+    "padrao_imovel": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Padrao Imovel"
+    },
+    "data_leilao_1_praca": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Data Leilao 1 Praca"
+    },
+    "valor_lance_1_praca": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valor Lance 1 Praca"
+    },
+    "data_leilao_2_praca": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Data Leilao 2 Praca"
+    },
+    "valor_lance_2_praca": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valor Lance 2 Praca"
+    },
+    "valor_arrematacao": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Lance atual ou mínimo destacado no site, se houver",
+      "title": "Valor Arrematacao"
+    },
+    "valor_avaliacao": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Valor de avaliação/perícia/venal do imóvel no edital quando constar explicitamente; não confundir com lance mínimo, 1ª/2ª praça ou valor de arrematação",
+      "title": "Valor Avaliacao"
+    },
+    "data_leilao": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Data Leilao"
+    },
+    "leilao_extra": {
+      "$ref": "#/$defs/LeilaoExtraJson"
+    }
+  },
+  "required": [
+    "url_leilao"
+  ],
+  "title": "ExtracaoEditalLLM",
+  "type": "object"
+}

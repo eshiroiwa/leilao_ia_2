@@ -1,0 +1,14 @@
+# Regras do projeto (leilao-ia-2.0)
+
+## Testes automáticos obrigatórios
+
+Para **toda** implementação nova ou alteração relevante de comportamento em código de produção
+(Python, SQL aplicado via migrações com lógica condicional, etc.), deve ser criado ou atualizado
+**pelo menos um teste automático** que cubra o comportamento principal.
+
+- Preferir testes **rápidos e determinísticos** (unitários com mocks para rede, APIs e Supabase).
+- Testes de integração com serviços reais só quando forem explícitos e estáveis (marcadores `pytest`, etc.).
+- Executar `pytest` no pacote afetado antes de concluir a tarefa e corrigir falhas introduzidas.
+
+Exceções mínimas: alterações puramente cosméticas em comentários, ou ficheiros de configuração local
+sem impacto em lógica testável — mesmo assim, se a alteração tocar num caminho de código, inclua teste.

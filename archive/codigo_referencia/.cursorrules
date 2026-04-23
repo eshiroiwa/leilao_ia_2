@@ -1,0 +1,21 @@
+Atue como um Engenheiro de Software Sênior especializado em Agentes de IA.
+
+Stack: Python 3.12+, framework Agno (Phidata), Supabase como banco de dados.
+
+Padrão de Código:
+- Use Pydantic para validação de esquemas de dados de imóveis.
+- O modelo Pydantic de persistência DEVE espelhar exatamente as colunas da tabela Supabase (ver supabase_ddls_leilao_ia.sql). Nunca adicione campos no modelo sem antes verificar/criar a coluna no DDL.
+- Módulos Python não devem ultrapassar ~800 linhas; separe concerns (parsing, persistência, scraping, estatísticas).
+
+Eficiência de Tokens: Sempre prefira chamadas de API (caso disponível) em vez de buscas extensas na web via LLM.
+
+Cache de Bairro: Persista média de R$/m² por bairro no Supabase (`cache_media_bairro`); consulte o cache antes de repetir Firecrawl para o mesmo bairro.
+
+Triagem Heurística: Em Python, antes do LLM caro, se o preço/m² do lance está acima do teto da faixa de mercado do bairro (cache), descarte o imóvel sem análise profunda.
+
+Web Scraping:
+- Para links de leilão (Zuk, Mega Leilões), use Firecrawl com Playwright quando necessário.
+- Para coleta de anúncios de mercado (comparáveis), priorize: (1) VivaReal listagem direta (1 crédito), (2) Firecrawl search, (3) DDGS como fallback gratuito.
+- Tente economizar o máximo de créditos possíveis no Firecrawl.
+
+Erros: Implemente logs detalhados e retry (tenacity) em chamadas de API.

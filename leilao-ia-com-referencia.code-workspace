@@ -1,0 +1,13 @@
+{
+  "folders": [
+    {
+      "name": "leilao-ia-novo (projeto atual)",
+      "path": "."
+    },
+    {
+      "name": "leilao-ia (referência)",
+      "path": "../leilao-ia"
+    }
+  ],
+  "settings": {}
+}

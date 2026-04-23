@@ -1,0 +1,17 @@
+agno>=2.5.0
+openai>=1.40.0
+pydantic>=2.0
+pandas>=2.0
+openpyxl>=3.1
+playwright>=1.40
+playwright-stealth>=2.0
+supabase>=2.3.0,<2.4.0
+python-dotenv>=1.0
+tenacity>=8.2
+# httpx vem pelo supabase 2.3.x (exige httpx>=0.24,<0.26); não fixar >=0.27 aqui.
+ddgs>=9.0
+firecrawl-py>=1.15
+streamlit>=1.36
+geopy>=2.4
+folium>=0.15
+streamlit-folium>=0.18.0

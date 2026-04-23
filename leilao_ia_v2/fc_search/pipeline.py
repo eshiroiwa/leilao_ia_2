@@ -1,0 +1,197 @@
+"""
+Orquestração: pesquisa Firecrawl → escolha de URLs → scrape (markdown) → parse → geocode → upsert.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from supabase import Client
+
+from .parser import dedupe_por_url, extrair_anuncios_do_markdown_pagina
+from .query_builder import montar_frase_busca_mercado
+from .search_client import executar_busca_web
+from .urls import extrair_urls_do_markdown, extrair_urls_da_busca, selecionar_urls_para_scrape
+from leilao_ia_v2.persistence import leilao_imoveis_repo
+from leilao_ia_v2.services import firecrawl_edital
+from leilao_ia_v2.services.anuncios_mercado_coleta import persistir_cards_anuncios_mercado
+from leilao_ia_v2.services.geocoding import geocodificar_anuncios_batch
+from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
+
+logger = logging.getLogger(__name__)
+
+
+def complementar_anuncios_firecrawl_search(
+    client: Client,
+    *,
+    leilao_imovel_id: str,
+    cidade: str,
+    estado_raw: str,
+    bairro: str,
+    tipo_imovel: str,
+    area_ref: float,
+    ignorar_cache_firecrawl: bool,
+    max_chamadas_api: int | None = None,
+) -> tuple[int, str, int]:
+    """
+    Complemento de ``anuncios_mercado`` via Firecrawl Search + scrape de 3–5 portais.
+
+    Usa os mesmos campos de geolocalização e persistência que o fluxo Viva Real.
+
+    Devolve ``(n_gravados, diagnostico_texto, n_chamadas_api_estimadas)`` — ``n_chamadas_api_estimadas``
+    soma 1 por ``search`` e 1 por cada ``scrape`` HTTP executado (alinhado ao painel de uso).
+
+    Se ``max_chamadas_api`` for um inteiro > 0, limita o total (search + scrapes); se já consumido pelo
+    search não couber nenhum scrape, as URLs de scrape são truncadas. Com ``<= 0``, não executa search.
+    ``None`` = sem limite adicional além de ``FC_SEARCH_MAX_SCRAPE_URLS``.
+    """
+    linhas: list[str] = []
+
+    def _diag() -> str:
+        return "\n".join(linhas).strip()
+
+    lid = str(leilao_imovel_id or "").strip()
+    if not lid:
+        linhas.append("erro: leilao_imovel_id vazio")
+        return 0, _diag(), 0
+
+    row = leilao_imoveis_repo.buscar_por_id(lid, client)
+    if not isinstance(row, dict):
+        logger.warning("Firecrawl Search complemento: leilão %s não encontrado", lid)
+        linhas.append(f"erro: leilão não encontrado no Supabase (id={lid})")
+        return 0, _diag(), 0
+
+    query = montar_frase_busca_mercado(row, tipo_imovel)
+    if not query or len(query) < 8:
+        logger.warning("Firecrawl Search complemento: frase de busca vazia demais")
+        linhas.append(f"erro: frase_busca inválida ou curta demais (len={len(query or '')})")
+        return 0, _diag(), 0
+
+    if max_chamadas_api is not None and int(max_chamadas_api) <= 0:
+        linhas.append("orçamento: max_chamadas_api<=0 — complemento Firecrawl Search não executado.")
+        return 0, _diag(), 0
+
+    n_chamadas_api = 0
+    try:
+        web, n_search = executar_busca_web(query)
+        n_chamadas_api += int(n_search or 0)
+    except Exception:
+        logger.exception("Firecrawl Search: falha na pesquisa")
+        linhas.append("search: exceção na pesquisa (ver log com stack trace)")
+        return 0, _diag(), 0
+
+    n_web = len(web) if isinstance(web, list) else 0
+    linhas.append(f"search: frase_busca_chars={len(query)} resultados_web={n_web}")
+    if isinstance(web, list) and web and isinstance(web[0], dict):
+        linhas.append(f"search: chaves_1o_item={sorted(web[0].keys())}")
+
+    urls: list[str] = extrair_urls_da_busca(web)
+    # URLs embutidas em títulos/descrições (quando a API devolve texto rico)
+    for it in web or []:
+        if isinstance(it, dict):
+            meta = it.get("metadata") if isinstance(it.get("metadata"), dict) else {}
+            md = str(it.get("markdown") or "")
+            if len(md) > 8000:
+                md = md[:8000]
+            blob = (
+                f"{it.get('title') or ''} {it.get('description') or ''} "
+                f"{meta.get('title') or ''} {meta.get('description') or ''} {md}"
+            )
+            urls.extend(extrair_urls_do_markdown(blob))
+    urls = list(dict.fromkeys(urls))
+
+    max_scrape = int(os.getenv("FC_SEARCH_MAX_SCRAPE_URLS", "5") or "5")
+    alvo = selecionar_urls_para_scrape(urls, max_urls=max_scrape)
+    if max_chamadas_api is not None:
+        restante = int(max_chamadas_api) - int(n_chamadas_api)
+        if restante < 0:
+            restante = 0
+        if len(alvo) > restante:
+            linhas.append(
+                f"orçamento: URLs de scrape reduzidas de {len(alvo)} para {restante} "
+                f"(teto max_chamadas_api={int(max_chamadas_api)} após search)."
+            )
+            alvo = alvo[:restante]
+    linhas.append(f"urls: candidatas_portais={len(urls)} para_scrape={len(alvo)}")
+    if urls[:12]:
+        linhas.append("urls: candidatas (até 12):")
+        for u in urls[:12]:
+            linhas.append(f"  - {u}")
+    if not alvo:
+        logger.info("Firecrawl Search complemento: nenhuma URL de portal aceite (query=%r)", query[:120])
+        linhas.append("motivo: nenhuma URL de portal aceite após filtro (hosts permitidos).")
+        linhas.append(f"firecrawl_api_calls_estimadas={n_chamadas_api}")
+        return 0, _diag(), n_chamadas_api
+
+    uf_sigla = estado_livre_para_sigla_uf(estado_raw) or str(estado_raw or "").strip()[:2].upper()
+    estado_parser = str(estado_raw or row.get("estado") or "").strip() or uf_sigla
+    cidade_ref = (cidade or str(row.get("cidade") or "")).strip()
+    bairro_ref = (bairro or str(row.get("bairro") or "")).strip()
+
+    agregados: list[dict[str, Any]] = []
+    for u in alvo:
+        n_chamadas_api += 1
+        try:
+            md, meta = firecrawl_edital.scrape_url_markdown(u, ignorar_cache=ignorar_cache_firecrawl)
+        except Exception as ex:
+            logger.info("Firecrawl Search complemento: scrape falhou url=%s", u[:120], exc_info=True)
+            linhas.append(f"scrape: FALHA url={u[:160]} err={type(ex).__name__}: {str(ex)[:200]}")
+            continue
+        nmd = len(md or "")
+        cards = extrair_anuncios_do_markdown_pagina(
+            md,
+            url_pagina=u,
+            cidade_ref=cidade_ref,
+            estado_ref=estado_parser,
+            bairro_ref=bairro_ref,
+        )
+        fonte = str((meta or {}).get("fonte") or "")
+        linhas.append(
+            f"scrape: ok url={u[:160]} markdown_chars={nmd} cards_extraidos={len(cards)} fonte={fonte}"
+        )
+        agregados.extend(cards)
+
+    agregados = dedupe_por_url(agregados)
+    if not agregados:
+        logger.info("Firecrawl Search complemento: nenhum card extraído após %s páginas", len(alvo))
+        linhas.append(f"parse: 0 cards após dedupe (páginas_scrapeadas={len(alvo)})")
+        linhas.append(f"firecrawl_api_calls_estimadas={n_chamadas_api}")
+        return 0, _diag(), n_chamadas_api
+
+    geocodificar_anuncios_batch(
+        agregados,
+        cidade=cidade_ref,
+        estado=uf_sigla,
+        bairro_fallback=bairro_ref,
+        permitir_fallback_centro_cidade=False,
+    )
+
+    url_listagem_meta = f"firecrawl_search:{query[:400]}"
+    tipo_fb = (tipo_imovel or str(row.get("tipo_imovel") or "apartamento")).strip().lower()
+    salvos = persistir_cards_anuncios_mercado(
+        client,
+        agregados,
+        cidade=cidade_ref,
+        estado_raw=str(row.get("estado") or estado_raw or ""),
+        bairro=bairro_ref,
+        leilao_imovel_id=lid,
+        url_listagem=url_listagem_meta,
+        tipo_imovel_fallback=tipo_fb,
+        origem_metadados="firecrawl_search_complemento",
+        leilao_row=row,
+    )
+    if salvos:
+        logger.info(
+            "Firecrawl Search complemento: %s anúncios gravados; frase=%r urls=%s",
+            salvos,
+            query[:200],
+            alvo,
+        )
+        linhas.append(f"persistencia: anuncios_gravados_upsert={salvos}")
+    else:
+        linhas.append("persistencia: upsert devolveu 0 (ver regras do repo / linhas rejeitadas)")
+    linhas.append(f"firecrawl_api_calls_estimadas={n_chamadas_api}")
+    logger.info("Firecrawl Search diagnóstico (resumo):\n%s", _diag())
+    return salvos, _diag(), n_chamadas_api
