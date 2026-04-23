@@ -54,7 +54,6 @@ from leilao_ia_v2.pipeline.ingestao_edital import executar_ingestao_edital
 from leilao_ia_v2.schemas.operacao_simulacao import (
     ModoPagamentoSimulacao,
     ModoReforma,
-    ModoRoiDesejado,
     ModoValorVenda,
     OperacaoSimulacaoDocumento,
     SimulacaoOperacaoInputs,
@@ -90,13 +89,16 @@ from leilao_ia_v2.ui.simulacao_estado import (
     construir_inputs_de_sessao,
     derramar_inputs_no_session,
     simop_ensure_tempo_venda_global,
+    simop_gravar_snapshot_draft,
     simop_hidratou_chave,
     simop_key,
     simop_key_cmp_painel,
     simop_key_mpag,
     simop_key_tempo_venda_global,
     simop_key_ui_nicho_prazo_fin,
+    simop_limpar_snapshot_draft,
     simop_m_lab_to_tag,
+    simop_restaurar_draft_de_snapshot,
 )
 
 _SIMOP_MPAG_LABS = ("À vista", "Parcelado (judicial)", "Financiado (bancário)")
@@ -132,6 +134,8 @@ def _simop_mpag_valor_default_para_label(v: object) -> str:
         return "Financiado (bancário)"
     return "À vista"
 from leilao_ia_v2.schemas.relatorio_mercado_contexto import parse_relatorio_mercado_contexto_json
+from leilao_ia_v2.ui.dashboard_inicio import _roi_bruto_de_row
+from leilao_ia_v2.services.roi_pos_cache_leilao import metricas_pos_cache_de_leilao_row
 from leilao_ia_v2.services.simulacao_operacao import (
     REFORMA_RS_M2,
     calcular_simulacao,
@@ -385,18 +389,7 @@ def _render_cards_extracao(
         )
     elif not tem_foto:
         st.caption("Nenhum campo preenchido para exibir em cards.")
-    try:
-        doc0 = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
-        doc_sim = calcular_simulacao(
-            row_leilao=row,
-            inp=doc0.inputs,
-            caches_ordenados=caches,
-            ads_por_id=ads_map,
-        )
-        o_sim = doc_sim.outputs
-    except Exception:
-        logger.exception("calcular_simulacao (cards indicadores na análise)")
-        o_sim = None
+    o_sim = _outputs_indicadores_operacao_ou_nada(row, caches, ads_map)
     if o_sim is not None:
         st.markdown(
             '<div class="sim-card-head">Indicadores da operação (simulação)</div>',
@@ -405,10 +398,16 @@ def _render_cards_extracao(
         st.html(
             f'<div class="sim-res-col-scroll sim-card-html">{_html_sim_venda_lucros_tres_cards(o_sim)}</div>'
         )
-        st.caption(
-            "Mesmos critérios da aba Simulação: parâmetros gravados em `operacao_simulacao_json` "
-            "ou valores padrão até você gravar uma simulação."
-        )
+        if _row_tem_simulacao_gravada(row):
+            st.caption(
+                "Com base na **simulação gravada** (parâmetros em `operacao_simulacao_json` / `simulacoes_modalidades_json` "
+                "e caches atuais), como na aba Simulação."
+            )
+        else:
+            st.caption(
+                "Projeção **pós-cache** (sem simulação gravada): 6% corretagem s/ venda, leiloeiro/ITBI/registro alinhados ao agente, "
+                "lucro líquido = lucro bruto − 15% IR (PF) sobre o lucro bruto positivo."
+            )
     extra = row.get("leilao_extra_json")
     if isinstance(extra, dict) and _leilao_extra_tem_conteudo(extra):
         st.markdown(
@@ -778,21 +777,37 @@ def _render_painel_cache_mercado(
 def _simop_hidratar_modalidades(
     iid: str, row: dict[str, Any], legado: dict[str, Any] | None
 ) -> None:
-    """Uma vez por imóvel: preenche chaves de sessão de vista/prazo/financiado a partir do banco/legado."""
+    """
+    Sincroniza a sessão com o banco na 1.ª carga do leilão; em seguida preenche só chaves
+    ainda inexistentes (p.ex. após trocar de aba, widgets ausentes noutros modos de navegação).
+    Ao mudar o leilão ativo, força hidratação completa de novo.
+    """
+    iid = str(iid or "").strip()
     hk = simop_hidratou_chave(iid)
-    if st.session_state.get(hk):
-        return
+    # Marca o leilão atual (cada iid tem o seu ``hk``; não redefinir ``hk`` ao trocar de imóvel
+    # — senão ao voltar a um leilão re-hidratámos do banco e apagamos o rascunho de sessão).
+    st.session_state["simop_leilao_ativo_iid"] = iid
+
     bundle = parse_simulacoes_modalidades_json(
         row.get("simulacoes_modalidades_json") if row else None,
         legado_operacao=legado,
     )
+    if not st.session_state.get(hk):
+        for tag in TAGS:
+            doc_t: OperacaoSimulacaoDocumento = getattr(bundle, tag)
+            derramar_inputs_no_session(iid, tag, doc_t.inputs, preencher_somente_omisso=False)
+        t_raw = bundle.vista.inputs.tempo_estimado_venda_meses
+        t_glob = float(t_raw) if t_raw is not None else 12.0
+        st.session_state[simop_key_tempo_venda_global(iid)] = t_glob
+        st.session_state[hk] = True
     for tag in TAGS:
         doc_t: OperacaoSimulacaoDocumento = getattr(bundle, tag)
-        derramar_inputs_no_session(iid, tag, doc_t.inputs)
-    t_raw = bundle.vista.inputs.tempo_estimado_venda_meses
-    t_glob = float(t_raw) if t_raw is not None else 12.0
-    st.session_state[simop_key_tempo_venda_global(iid)] = t_glob
-    st.session_state[hk] = True
+        derramar_inputs_no_session(iid, tag, doc_t.inputs, preencher_somente_omisso=True)
+    t_raw2 = bundle.vista.inputs.tempo_estimado_venda_meses
+    t_glob2 = float(t_raw2) if t_raw2 is not None else 12.0
+    tv = simop_key_tempo_venda_global(iid)
+    if tv not in st.session_state:
+        st.session_state[tv] = t_glob2
 
 
 def _ref_mod_brl_da_sessao(
@@ -1165,6 +1180,65 @@ def _row_tem_simulacao_gravada(row: dict[str, Any] | None) -> bool:
     if not oj or not isinstance(oj, dict):
         return False
     return bool(oj.get("outputs") or oj.get("inputs"))
+
+
+def _outputs_indicadores_operacao_ou_nada(
+    row: dict[str, Any], caches: list[dict[str, Any]], ads_map: dict[str, Any]
+) -> SimulacaoOperacaoOutputs | None:
+    """
+    Com simulação gravada: ``calcular_simulacao`` (parâmetros do utilizador + caches).
+    Sem simulação: colunas pós-cache / recomputo a partir de ``valor_mercado_estimado`` (6% corretagem, IR 15% s/ lucro bruto).
+    """
+    if _row_tem_simulacao_gravada(row):
+        try:
+            doc0 = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
+            doc_sim = calcular_simulacao(
+                row_leilao=row,
+                inp=doc0.inputs,
+                caches_ordenados=caches,
+                ads_por_id=ads_map,
+            )
+            return doc_sim.outputs
+        except Exception:
+            logger.exception("calcular_simulacao (indicadores operação / Leilão)")
+            return None
+    try:
+        vm = float(row.get("valor_mercado_estimado") or 0.0)
+    except (TypeError, ValueError):
+        vm = 0.0
+    if row.get("lucro_bruto_projetado") is not None or row.get("lucro_liquido_projetado") is not None:
+        try:
+            if vm <= 0:
+                return None
+            lb = row.get("lucro_bruto_projetado")
+            ll = row.get("lucro_liquido_projetado")
+            rbo = row.get("roi_projetado")
+            rlo = row.get("roi_liquido_projetado")
+            return SimulacaoOperacaoOutputs(
+                valor_venda_estimado=vm,
+                lucro_bruto=float(lb) if lb is not None else 0.0,
+                lucro_liquido=float(ll) if ll is not None else 0.0,
+                roi_bruto=float(rbo) if rbo is not None else None,
+                roi_liquido=float(rlo) if rlo is not None else None,
+            )
+        except (TypeError, ValueError):
+            return None
+    m = metricas_pos_cache_de_leilao_row(row)
+    if not m or m.get("lucro_bruto_projetado") is None:
+        return None
+    try:
+        vm2 = float(row.get("valor_mercado_estimado") or 0.0)
+    except (TypeError, ValueError):
+        vm2 = 0.0
+    if vm2 <= 0:
+        return None
+    return SimulacaoOperacaoOutputs(
+        valor_venda_estimado=vm2,
+        lucro_bruto=float(m.get("lucro_bruto_projetado") or 0.0),
+        lucro_liquido=float(m.get("lucro_liquido_projetado") or 0.0),
+        roi_bruto=m.get("roi_projetado"),
+        roi_liquido=m.get("roi_liquido_projetado"),
+    )
 
 
 def _def_lance_para_tag(
@@ -1602,6 +1676,7 @@ def _render_simulacao_operacao(
     with _form_ctx:
         doc0 = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
         inp0 = doc0.inputs
+        simop_restaurar_draft_de_snapshot(iid)
         _simop_hidratar_modalidades(iid, row, row.get("operacao_simulacao_json"))
         mpk = simop_key_mpag(iid)
         if mpk not in st.session_state:
@@ -1670,10 +1745,14 @@ def _render_simulacao_operacao(
         ref_ui_keys = [a for a, _ in _SIMOP_REFUI_SPECS]
         ref_ui_labels = [b for _, b in _SIMOP_REFUI_SPECS]
         rk0, rm0 = _reforma_ui_defaults(inp0_tag)
-        try:
-            ref_ui_ix = ref_ui_keys.index(rk0)
-        except ValueError:
-            ref_ui_ix = 0
+        _rfb = str(st.session_state.get(_sk("refui_lbl") or "") or "")
+        if _rfb in ref_ui_labels:
+            ref_ui_ix = ref_ui_labels.index(_rfb)
+        else:
+            try:
+                ref_ui_ix = ref_ui_keys.index(rk0)
+            except ValueError:
+                ref_ui_ix = 0
 
         cache_sel = _simop_auto_cache_id(caches, inp0_tag)
         vmanual_preview = float(
@@ -1701,6 +1780,12 @@ def _render_simulacao_operacao(
             )
         except ValueError:
             mi = 0
+        _mk_mv = _sk("modo_val")
+        _ix_modo: int
+        if _mk_mv in st.session_state and str(st.session_state.get(_mk_mv) or "") in modo_order:
+            _ix_modo = modo_order.index(str(st.session_state.get(_mk_mv)))
+        else:
+            _ix_modo = min(mi, len(modo_order) - 1)
         r_sim_top = st.columns([1.35, 0.7], gap="small")
         with r_sim_top[0]:
             number_compact(
@@ -1806,7 +1891,6 @@ def _render_simulacao_operacao(
                     unsafe_allow_html=True,
                 )
                 # Streamlit: session com membro Enum + options=list[str] → coerção falha (Enum vs str).
-                _mk_mv = _sk("modo_val")
                 if _mk_mv in st.session_state and isinstance(st.session_state[_mk_mv], enum.Enum):
                     st.session_state[_mk_mv] = st.session_state[_mk_mv].value
                 if _mk_mv in st.session_state:
@@ -1818,7 +1902,7 @@ def _render_simulacao_operacao(
                 modo_sel = st.selectbox(
                     "Fonte",
                     options=modo_order,
-                    index=min(mi, len(modo_order) - 1),
+                    index=_ix_modo,
                     format_func=lambda k: label_map.get(k, k),
                     key=_mk_mv,
                     width=W_SELECT,
@@ -1833,7 +1917,6 @@ def _render_simulacao_operacao(
                         "Venda R$ (manual)",
                         w=W_BRL_MED,
                         min_value=0.0,
-                        value=float(inp0_tag.valor_venda_manual or 0),
                         step=25_000.0,
                         key=_sk("vmanual"),
                     )
@@ -1848,7 +1931,6 @@ def _render_simulacao_operacao(
                     tipo_raw = st.segmented_control(
                         "Pessoa",
                         options=["PF", "PJ"],
-                        default="PJ" if inp0_tag.tipo_pessoa == "PJ" else "PF",
                         key=_sk("tipo"),
                     )
                 tipo = _seg_sim_single(tipo_raw, "PF")
@@ -1859,7 +1941,6 @@ def _render_simulacao_operacao(
                             w=W_PCT,
                             min_value=0.0,
                             max_value=100.0,
-                            value=float(inp0_tag.ir_aliquota_pf_pct),
                             step=0.5,
                             format="%.2f",
                             key=_sk("ir_pf"),
@@ -1870,7 +1951,6 @@ def _render_simulacao_operacao(
                             w=W_PCT,
                             min_value=0.0,
                             max_value=100.0,
-                            value=float(inp0_tag.ir_aliquota_pj_pct),
                             step=0.1,
                             format="%.2f",
                             key=_sk("ir_pj"),
@@ -1887,7 +1967,6 @@ def _render_simulacao_operacao(
                         "Condom. (R$)",
                         w=W_BRL,
                         min_value=0.0,
-                        value=float(inp0_tag.condominio_atrasado_brl),
                         step=250.0,
                         key=_sk("cond"),
                     )
@@ -1896,7 +1975,6 @@ def _render_simulacao_operacao(
                         "IPTU (R$)",
                         w=W_BRL,
                         min_value=0.0,
-                        value=float(inp0_tag.iptu_atrasado_brl),
                         step=250.0,
                         key=_sk("iptu"),
                     )
@@ -1905,7 +1983,6 @@ def _render_simulacao_operacao(
                         "Desoc. (R$)",
                         w=W_BRL,
                         min_value=0.0,
-                        value=float(inp0_tag.desocupacao_brl),
                         step=250.0,
                         key=_sk("des"),
                     )
@@ -1914,7 +1991,6 @@ def _render_simulacao_operacao(
                         "Outros (R$)",
                         w=W_BRL,
                         min_value=0.0,
-                        value=float(inp0_tag.outros_custos_brl),
                         step=250.0,
                         key=_sk("out"),
                     )
@@ -1926,18 +2002,21 @@ def _render_simulacao_operacao(
                     width="stretch",
                 )
                 ref_ui_key = ref_ui_keys[ref_ui_labels.index(ref_pick)]
-                ref_manual_val = 0.0
-                if ref_ui_key == "manual":
-                    ref_manual_val = float(
-                        number_compact(
-                            "R$ reforma (livre)",
-                            w=W_BRL_MED,
-                            min_value=0.0,
-                            value=float(rm0 or inp0_tag.reforma_brl or 0),
-                            step=5_000.0,
-                            key=_sk("refmanual"),
-                        )
+                # Sempre instanciar o number_input com a mesma key: se o widget for condicional
+                # (só com "R$ livre"), o Streamlit retira a chave da sessão noutros modos e o
+                # rascunho/hidratação deixam de alinhar com a edição do valor livre.
+                _ref_manual_activa = ref_ui_key == "manual"
+                ref_manual_val = float(
+                    number_compact(
+                        "R$ reforma (livre)",
+                        w=W_BRL_MED,
+                        min_value=0.0,
+                        step=5_000.0,
+                        key=_sk("refmanual"),
+                        disabled=not _ref_manual_activa,
                     )
+                    or 0.0
+                )
                 ref_mod, reforma_brl_inp = _reforma_modo_valor_de_ui(ref_ui_key, ref_manual_val)
                 area_sim = _area_m2_row_sim(row)
                 ref_pv_brl, ref_pv_tag = _preview_brl_reforma(area_sim, ref_mod, ref_manual_val)
@@ -2014,7 +2093,6 @@ def _render_simulacao_operacao(
                         "Lance (R$)",
                         w=W_BRL_MED,
                         min_value=0.0,
-                        value=float(st.session_state.get(lk, def_lance)),
                         step=5_000.0,
                         key=lk,
                     )
@@ -2049,7 +2127,6 @@ def _render_simulacao_operacao(
                         w=W_PCT,
                         min_value=0.0,
                         max_value=100.0,
-                        value=float(inp0_tag.comissao_leiloeiro_pct_sobre_arrematacao),
                         step=0.25,
                         format="%.2f",
                         key=_sk("cleipct"),
@@ -2060,7 +2137,6 @@ def _render_simulacao_operacao(
                         w=W_PCT,
                         min_value=0.0,
                         max_value=100.0,
-                        value=float(inp0_tag.itbi_pct_sobre_arrematacao),
                         step=0.25,
                         format="%.2f",
                         key=_sk("itbipct"),
@@ -2072,7 +2148,6 @@ def _render_simulacao_operacao(
                             "Reg. R$",
                             w=W_BRL,
                             min_value=0.0,
-                            value=float(inp0_tag.registro_brl),
                             step=250.0,
                             key=_sk("regfix"),
                             help="Legado: gravar de novo usa %.",
@@ -2083,7 +2158,6 @@ def _render_simulacao_operacao(
                             w=W_PCT,
                             min_value=0.0,
                             max_value=100.0,
-                            value=float(inp0_tag.registro_pct_sobre_arrematacao or 3.5),
                             step=0.1,
                             format="%.2f",
                             key=_sk("regpct"),
@@ -2098,7 +2172,7 @@ def _render_simulacao_operacao(
                     reg_pct = float(inp0_tag.registro_pct_sobre_arrematacao or 0)
                 else:
                     reg_brl_inp = 0.0
-                    reg_pct = float(st.session_state.get(_sk("regpct"), inp0_tag.registro_pct_sobre_arrematacao or 3.5))
+                    reg_pct = float(st.session_state.get(_sk("regpct"), inp0_tag.registro_pct_sobre_arrematacao or 2.0))
                 clei_pv = _preview_brl_leiloeiro(lance, clei_pct, 0.0)
                 itbi_pv = _preview_brl_itbi(lance, itbi_pct, 0.0)
                 reg_pv = _preview_brl_itbi(lance, reg_pct, reg_brl_inp)
@@ -2124,7 +2198,6 @@ def _render_simulacao_operacao(
                         "Corret. fixo (R$)",
                         w=W_BRL,
                         min_value=0.0,
-                        value=float(inp0_tag.comissao_imobiliaria_brl),
                         step=500.0,
                         help="Se > 0, ignora o percentual.",
                         key=_sk("cimob"),
@@ -2135,7 +2208,6 @@ def _render_simulacao_operacao(
                         w=W_PCT,
                         min_value=0.0,
                         max_value=100.0,
-                        value=float(inp0_tag.comissao_imobiliaria_pct_sobre_venda),
                         step=0.1,
                         format="%.2f",
                         key=_sk("cimobpct"),
@@ -2153,21 +2225,18 @@ def _render_simulacao_operacao(
                         unsafe_allow_html=True,
                     )
 
-        _roi_ui_default = float(inp0_tag.roi_desejado_pct or 0) or 50.0
         with st.container(border=True):
             st.markdown(
                 '<div class="sim-card-head">Sensibilidade (lance máx.)</div>',
                 unsafe_allow_html=True,
             )
             r4 = st.columns([1.1, 1.2], gap="small")
-            roi_seg_ix = 1 if inp0_tag.roi_desejado_modo == ModoRoiDesejado.LIQUIDO else 0
             with r4[0]:
                 number_compact(
                     "ROI desejado (%)",
                     w=W_PCT,
                     min_value=0.0,
                     max_value=200.0,
-                    value=_roi_ui_default,
                     step=1.0,
                     format="%.2f",
                     help="0% desliga o cálculo de lance máximo (bissecção).",
@@ -2177,7 +2246,6 @@ def _render_simulacao_operacao(
                 st.segmented_control(
                     "Base ROI",
                     options=["Bruto", "Líquido"],
-                    default=["Bruto", "Líquido"][roi_seg_ix],
                     key=_sk("roi_seg"),
                 )
 
@@ -2235,6 +2303,7 @@ def _render_simulacao_operacao(
                         if isinstance(atual, dict):
                             st.session_state["ultimo_extracao"] = atual
                         st.success("Simulação **à vista** e slot do bundle gravados (`operacao_simulacao_json` + `simulacoes_modalidades_json`).")
+                        simop_limpar_snapshot_draft(iid)
                     except Exception as e:
                         logger.exception("Gravar operacao_simulacao_json")
                         st.error(
@@ -2270,6 +2339,7 @@ def _render_simulacao_operacao(
                         if isinstance(atual, dict):
                             st.session_state["ultimo_extracao"] = atual
                         st.success("Três simulações gravadas; legado = **à vista** (como o painel principal).")
+                        simop_limpar_snapshot_draft(iid)
                     except Exception as e:
                         logger.exception("Gravar 3 simulacoes")
                         st.error(
@@ -2362,6 +2432,7 @@ def _render_simulacao_operacao(
                 "out": o_cmp.model_dump(mode="json") if o_cmp is not None else None,
             }
             _render_analise_mercado_abaixo_painel(row)
+        simop_gravar_snapshot_draft(iid)
 
     if results_column is not None:
         with results_column:
@@ -2575,12 +2646,23 @@ def _row_resumo_leilao_para_tabela_exibicao(r: dict[str, Any]) -> dict[str, Any]
     pd_ = _proxima_data_leilao_row(r)
     _end = (str(r.get("endereco") or "").strip() or "—")[:220]
     _url = (str(r.get("url_leilao") or "").strip() or "—")
+    _rbf = _roi_bruto_de_row(r)
+    _cel_roi = _fmt_pct_de_frac(_rbf, dec=1) if _rbf is not None else "—"
+    _vmerc = r.get("valor_mercado_estimado")
+    _cel_vmerc = (
+        _fmt_valor_campo("valor_mercado_estimado", _vmerc) if _vmerc is not None else "—"
+    )
+    _lmax = r.get("lance_maximo_recomendado")
+    _cel_lmax = _fmt_valor_campo("lance_maximo", _lmax) if _lmax is not None else "—"
     return {
         "id": str(r.get("id") or ""),
         "Próxima": _fmt_data_br(pd_),
         "1ª praça": _fmt_data_br(_as_date_only(r.get("data_leilao_1_praca"))),
         "2ª praça": _fmt_data_br(_as_date_only(r.get("data_leilao_2_praca"))),
         "Lance / ref.": _fmt_valor_referencia_edital_resumo(r),
+        "Venda est. (cache)": _cel_vmerc,
+        "ROI (bruto)": _cel_roi,
+        "Lance máx. 50%": _cel_lmax,
         "UF": str(r.get("estado") or "").strip()[:2] or "—",
         "Cidade": str(r.get("cidade") or "") or "—",
         "Bairro": str(r.get("bairro") or "") or "—",
@@ -3491,7 +3573,14 @@ def _render_painel_tabela_leiloes_topo() -> None:
         _r_edit = str(st.session_state.get("dash_pick_leilao") or "")
         r0_solo = next((x for x in rows_f if str(x.get("id")) == _r_edit), None)
         if r0_solo is not None and _r_edit:
-            dis_cols: tuple[str, ...] = ("id", "Próxima", "Lance / ref.")
+            dis_cols: tuple[str, ...] = (
+                "id",
+                "Próxima",
+                "Lance / ref.",
+                "Venda est. (cache)",
+                "ROI (bruto)",
+                "Lance máx. 50%",
+            )
             df_1 = pd.DataFrame([_row_resumo_leilao_para_tabela_exibicao(r0_solo)])
             _ed_solo = f"leiloes_solo_{_r_edit}"
             edited1 = st.data_editor(
@@ -3507,6 +3596,11 @@ def _render_painel_tabela_leiloes_topo() -> None:
                     "1ª praça": st.column_config.TextColumn("1ª praça", width="small"),
                     "2ª praça": st.column_config.TextColumn("2ª praça", width="small"),
                     "Lance / ref.": st.column_config.TextColumn("Lance / ref.", width="small", disabled=True),
+                    "Venda est. (cache)": st.column_config.TextColumn(
+                        "Venda est. (cache)", width="small", disabled=True
+                    ),
+                    "ROI (bruto)": st.column_config.TextColumn("ROI (bruto)", width="small", disabled=True),
+                    "Lance máx. 50%": st.column_config.TextColumn("Lance máx. 50%", width="small", disabled=True),
                     "UF": st.column_config.TextColumn("UF", max_chars=2, width="small"),
                     "Cidade": st.column_config.TextColumn("Cidade", width="medium"),
                     "Bairro": st.column_config.TextColumn("Bairro", width="small"),

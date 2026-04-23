@@ -2,8 +2,12 @@
 Chaves de sessão por modalidade (vista / prazo / financiado) e hidratação a partir de ``SimulacaoOperacaoInputs``.
 
 **Campos comuns** (lance, tributos, reforma, venda, IR, corretagem, etc.) vivem sempre em ``simop_key(iid, "vista", …)`` —
-um único conjunto de widgets evita divergência entre modalidades. Parâmetros específicos de **parcelado** (``pr_ent``,
-``pr_n``, ``pr_jm``) permanecem em chaves ``prazo``; de **financiamento** (``fin_*``) em ``financiado``.
+um único conjunto de widgets evita divergência entre modalidades. ``derramar_inputs_no_session(..., preencher_somente_omisso=True)``
+preenche só chaves ainda inexistente(s). Quando a aba do Simulador deixa de ser executada, o Streamlit pode apagar
+essas chaves: ``simop_gravar_snapshot_draft`` / ``simop_restaurar_draft_de_snapshot`` guardam e repõem o rascunho
+por leilão (``iid``).
+Parâmetros específicos de **parcelado** (``pr_ent``, ``pr_n``, ``pr_jm``) permanecem em chaves ``prazo``; de
+**financiamento** (``fin_*``) em ``financiado``.
 
 O cálculo ativo (qual ``modo_pagamento``) vem de ``simop_key_mpag``; ``construir_inputs_de_sessao`` lê o comum em ``vista``
 e o específico nas tags de prazo / financiado.
@@ -11,7 +15,8 @@ e o específico nas tags de prazo / financiado.
 
 from __future__ import annotations
 
-from typing import Literal
+import copy
+from typing import Any, Literal
 
 import streamlit as st
 
@@ -96,6 +101,90 @@ def simop_hidratou_chave(iid: str) -> str:
     return f"simop_hidratou_{_suf(iid)}"
 
 
+SIMOP_DRAFT_SNAPSHOT_BAG = "simop_draft_key_snapshots_v1"
+
+
+def _simop_chave_candidata_draft(iid: str, k: str) -> bool:
+    """Inclui chaves ``simop_*`` deste leilão (sufixo), exceto a bandeira de hidratação e botões.
+
+    ``st.button`` (ex.: Gravar) não podem ser escritos em ``st.session_state`` — ver
+    ``StreamlitValueAssignmentNotAllowedError``.
+    """
+    suf = _suf(iid)
+    ks = str(k)
+    if not ks.startswith("simop_") or not ks.endswith(suf):
+        return False
+    if ks.startswith("simop_hidratou_"):
+        return False
+    if ks == simop_key(iid, "vista", "save"):
+        return False
+    if ks.startswith("simop_save3_"):
+        return False
+    return True
+
+
+def simop_listar_chaves_draft_por_iid(iid: str) -> list[str]:
+    return [k for k in st.session_state.keys() if _simop_chave_candidata_draft(iid, k)]
+
+
+def simop_gravar_snapshot_draft(iid: str) -> None:
+    """
+    Grava o rascunho atual deste leilão (todos os ``simop_*`` com sufixo do ``iid``).
+    Necessário porque, ao trocar de aba, o Streamlit pode não reexecutar os widgets
+    e as chaves somem; na volta aplicamos o snapshot (ver ``simop_restaurar_draft_de_snapshot``).
+    """
+    iid = str(iid or "").strip()
+    if not iid:
+        return
+    _raw_bag = st.session_state.get(SIMOP_DRAFT_SNAPSHOT_BAG)
+    bag: dict[str, Any] = _raw_bag if isinstance(_raw_bag, dict) else {}
+    snap: dict[str, Any] = {}
+    for k in simop_listar_chaves_draft_por_iid(iid):
+        try:
+            snap[k] = copy.deepcopy(st.session_state.get(k))
+        except Exception:
+            snap[k] = st.session_state.get(k)
+    bag[iid] = snap
+    st.session_state[SIMOP_DRAFT_SNAPSHOT_BAG] = bag
+
+
+def simop_restaurar_draft_de_snapshot(iid: str) -> None:
+    """
+    Repõe chaves **em falta** a partir do último snapshot (fim do run anterior).
+
+    Deve correr **antes** da hidratação a partir do banco (``_simop_hidratar_modalidades``): assim, ao voltar
+    de outra aba o rascunho repõe o que o Streamlit apagou; no mesmo run em que o utilizador
+    editou, o valor já vem em ``st.session_state`` e **não** é sobrescrito (evita voltar
+    ao valor por defeito). A hidratação a partir do banco preenche só o que continuar em falta.
+    """
+    iid = str(iid or "").strip()
+    if not iid:
+        return
+    bag = st.session_state.get(SIMOP_DRAFT_SNAPSHOT_BAG)
+    if not isinstance(bag, dict):
+        return
+    snap = bag.get(iid)
+    if not isinstance(snap, dict) or not snap:
+        return
+    for k, v in snap.items():
+        if not _simop_chave_candidata_draft(iid, k):
+            continue
+        if k in st.session_state:
+            continue
+        st.session_state[k] = v
+
+
+def simop_limpar_snapshot_draft(iid: str) -> None:
+    """Após persistir a simulação no banco, evita reaproximar um rascunho antigo à sessão."""
+    iid = str(iid or "").strip()
+    if not iid:
+        return
+    bag = st.session_state.get(SIMOP_DRAFT_SNAPSHOT_BAG)
+    if isinstance(bag, dict) and iid in bag:
+        del bag[iid]
+        st.session_state[SIMOP_DRAFT_SNAPSHOT_BAG] = bag
+
+
 def _key_para_ref_label(rmod: str) -> str:
     m = {
         "none": "Sem reforma",
@@ -116,59 +205,70 @@ def derramar_inputs_no_session(
     iid: str,
     tag: SimopTag,
     inp: SimulacaoOperacaoInputs,
+    *,
+    preencher_somente_omisso: bool = False,
 ) -> None:
-    """Volca ``inputs`` no ``session_state`` com chaves da modalidade (sobrescreve)."""
+    """
+    Volca ``inputs`` no ``session_state`` com chaves da modalidade.
+    Com ``preencher_somente_omisso=True``, só cria a chave se ainda não existir
+    (rascunho segue ao trocar de aba; troca de leilão = nova hidratação completa).
+    """
     d = inp.model_dump(mode="python", exclude_unset=False)
     ss = st.session_state
     k = lambda c: simop_key(iid, tag, c)  # noqa: E731
-    ss[k("lance")] = float(d.get("lance_brl") or 0)
-    ss[k("lance_2a")] = bool(d.get("usar_lance_segunda_praca") or False)
     kv = lambda c: simop_key(iid, "vista", c)  # noqa: E731
-    ss[kv("descav")] = bool(d.get("desconto_pagamento_avista") or False)
-    ss[kv("descav_pct")] = float(d.get("desconto_pagamento_avista_pct") or 0.0)
-    # t_venda é global: não gravar por tag (ver simop_key_tempo_venda_global + hidratação).
-    ss[k("pr_ent")] = float(d.get("prazo_entrada_pct") or 30.0)
-    ss[k("pr_n")] = int(d.get("prazo_num_parcelas") or 30)
-    ss[k("pr_jm")] = float(d.get("prazo_juros_mensal_pct") or 0.0)
-    ss[k("fin_ent")] = float(d.get("fin_entrada_pct") or 20.0)
-    ss[k("fin_n")] = int(d.get("fin_prazo_meses") or 360)
-    ss[k("fin_tx")] = float(d.get("fin_taxa_juros_anual_pct") or 0.0)
+
+    def _w(key: str, val: object) -> None:
+        if preencher_somente_omisso and key in ss:
+            return
+        ss[key] = val  # type: ignore[assignment]
+
+    _w(k("lance"), float(d.get("lance_brl") or 0))
+    _w(k("lance_2a"), bool(d.get("usar_lance_segunda_praca") or False))
+    _w(kv("descav"), bool(d.get("desconto_pagamento_avista") or False))
+    _w(kv("descav_pct"), float(d.get("desconto_pagamento_avista_pct") or 0.0))
+    # t_venda é global: ver simop_key_tempo_venda_global + hidratação.
+    _w(k("pr_ent"), float(d.get("prazo_entrada_pct") or 30.0))
+    _w(k("pr_n"), int(d.get("prazo_num_parcelas") or 30))
+    _w(k("pr_jm"), float(d.get("prazo_juros_mensal_pct") or 0.0))
+    _w(k("fin_ent"), float(d.get("fin_entrada_pct") or 20.0))
+    _w(k("fin_n"), int(d.get("fin_prazo_meses") or 360))
+    _w(k("fin_tx"), float(d.get("fin_taxa_juros_anual_pct") or 0.0))
     fs = str(d.get("fin_sistema") or "SAC").upper()
-    ss[k("fin_sys")] = fs if fs in ("SAC", "PRICE") else "SAC"
+    _w(k("fin_sys"), fs if fs in ("SAC", "PRICE") else "SAC")
     mvv = d.get("modo_valor_venda")
-    # str,Enum: isinstance(membro, str) é True — guardar sempre .value para widgets que usam list[str].
     if isinstance(mvv, ModoValorVenda):
         mv_str = mvv.value
     elif isinstance(mvv, str):
         mv_str = mvv
     else:
         mv_str = str(getattr(mvv, "value", mvv) or ModoValorVenda.CACHE_VALOR_MEDIO_VENDA.value)
-    ss[k("modo_val")] = mv_str
-    ss[k("vmanual")] = float(d.get("valor_venda_manual") or 0)
-    ss[k("tipo")] = "PJ" if d.get("tipo_pessoa") == "PJ" else "PF"
-    ss[k("ir_pf")] = float(d.get("ir_aliquota_pf_pct") or 0)
-    ss[k("ir_pj")] = float(d.get("ir_aliquota_pj_pct") or 0)
-    ss[k("cleipct")] = float(d.get("comissao_leiloeiro_pct_sobre_arrematacao") or 0)
-    ss[k("itbipct")] = float(d.get("itbi_pct_sobre_arrematacao") or 0)
+    _w(k("modo_val"), mv_str)
+    _w(k("vmanual"), float(d.get("valor_venda_manual") or 0))
+    _w(k("tipo"), "PJ" if d.get("tipo_pessoa") == "PJ" else "PF")
+    _w(k("ir_pf"), float(d.get("ir_aliquota_pf_pct") or 0))
+    _w(k("ir_pj"), float(d.get("ir_aliquota_pj_pct") or 0))
+    _w(k("cleipct"), float(d.get("comissao_leiloeiro_pct_sobre_arrematacao") or 0))
+    _w(k("itbipct"), float(d.get("itbi_pct_sobre_arrematacao") or 0))
     if float(d.get("registro_brl") or 0) > 0:
-        ss[k("regfix")] = float(d.get("registro_brl") or 0)
+        _w(k("regfix"), float(d.get("registro_brl") or 0))
     else:
-        ss[k("regpct")] = float(d.get("registro_pct_sobre_arrematacao") or 0.0)
-    ss[k("cond")] = float(d.get("condominio_atrasado_brl") or 0)
-    ss[k("iptu")] = float(d.get("iptu_atrasado_brl") or 0)
-    ss[k("des")] = float(d.get("desocupacao_brl") or 0)
-    ss[k("out")] = float(d.get("outros_custos_brl") or 0)
+        _w(k("regpct"), float(d.get("registro_pct_sobre_arrematacao") or 0.0))
+    _w(k("cond"), float(d.get("condominio_atrasado_brl") or 0))
+    _w(k("iptu"), float(d.get("iptu_atrasado_brl") or 0))
+    _w(k("des"), float(d.get("desocupacao_brl") or 0))
+    _w(k("out"), float(d.get("outros_custos_brl") or 0))
     rm = d.get("reforma_modo")
     rmod = str(rm) if isinstance(rm, str) else getattr(rm, "value", str(rm or "basica"))
-    ss[k("refui_lbl")] = _key_para_ref_label(rmod)
-    ss[k("refmanual")] = float(d.get("reforma_brl") or 0)
-    ss[k("cimob")] = float(d.get("comissao_imobiliaria_brl") or 0)
-    ss[k("cimobpct")] = float(d.get("comissao_imobiliaria_pct_sobre_venda") or 0)
+    _w(k("refui_lbl"), _key_para_ref_label(rmod))
+    _w(k("refmanual"), float(d.get("reforma_brl") or 0))
+    _w(k("cimob"), float(d.get("comissao_imobiliaria_brl") or 0))
+    _w(k("cimobpct"), float(d.get("comissao_imobiliaria_pct_sobre_venda") or 0))
     rd = d.get("roi_desejado_pct")
-    ss[k("roi_w")] = float(rd) if rd is not None else 50.0
+    _w(k("roi_w"), float(rd) if rd is not None else 50.0)
     rdm = d.get("roi_desejado_modo")
     rms = rdm if isinstance(rdm, str) else getattr(rdm, "value", "bruto")
-    ss[k("roi_seg")] = "Líquido" if "liqu" in str(rms).lower() else "Bruto"
+    _w(k("roi_seg"), "Líquido" if "liqu" in str(rms).lower() else "Bruto")
 
 
 def construir_inputs_de_sessao(
@@ -215,7 +315,7 @@ def construir_inputs_de_sessao(
     else:
         reg_brl_inp = 0.0
         reg_pct = float(
-            k("regpct") if k("regpct") is not None else (inp0.registro_pct_sobre_arrematacao or 3.5)
+            k("regpct") if k("regpct") is not None else (inp0.registro_pct_sobre_arrematacao or 2.0)
         )
 
     cond = float(k("cond") if k("cond") is not None else inp0.condominio_atrasado_brl)

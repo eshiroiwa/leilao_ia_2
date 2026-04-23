@@ -1321,6 +1321,7 @@ def resolver_cache_media_pos_ingestao(
             log_ok.append("--- Terrenos ---")
             log_ok.append(diag_terrenos)
     log_diag_final = "\n".join(log_ok)
+    _tentar_gravar_roi_pos_cache(client, lid)
     return ResultadoCriacaoCacheLeilao(
         True,
         msg,
@@ -1506,6 +1507,7 @@ def criar_caches_media_para_leilao(
         log_ok.append("--- Terrenos ---")
         log_ok.append(diag_terrenos)
 
+    _tentar_gravar_roi_pos_cache(client, lid)
     return ResultadoCriacaoCacheLeilao(
         True,
         f"Criado(s) {len(caches)} cache(s).",
@@ -1514,6 +1516,19 @@ def criar_caches_media_para_leilao(
         firecrawl_chamadas_api=n_fc_cache,
         log_diagnostico="\n".join(log_ok),
     )
+
+
+def _tentar_gravar_roi_pos_cache(client: Client, leilao_imovel_id: str) -> None:
+    try:
+        from leilao_ia_v2.services.roi_pos_cache_leilao import estimar_e_gravar_roi_pos_cache
+
+        r = estimar_e_gravar_roi_pos_cache(client, leilao_imovel_id)
+        if r.ok:
+            logger.info("ROI pós-cache: %s leilao=%s", r.motivo, str(leilao_imovel_id)[:12])
+        else:
+            logger.info("ROI pós-cache: ignorado (%s) leilao=%s", r.motivo, str(leilao_imovel_id)[:12])
+    except Exception:
+        logger.exception("ROI pós-cache falhou (leilao_id=%s)", str(leilao_imovel_id)[:12])
 
 
 def recalcular_caches_mercado_para_leilao(

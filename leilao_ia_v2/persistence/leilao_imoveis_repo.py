@@ -39,7 +39,11 @@ def listar_resumo_recentes(
         .select(
             "id,url_leilao,cidade,estado,bairro,endereco,tipo_imovel,latitude,longitude,"
             "edital_coletado_em,data_leilao_1_praca,data_leilao_2_praca,data_leilao,"
-            "valor_lance_1_praca,valor_lance_2_praca,valor_arrematacao,leilao_extra_json"
+            "valor_lance_1_praca,valor_lance_2_praca,valor_arrematacao,leilao_extra_json,"
+            "operacao_simulacao_json,simulacoes_modalidades_json,"
+            "valor_mercado_estimado,custo_reforma_estimado,roi_projetado,lance_maximo_recomendado,"
+            "valor_maximo_regiao_estimado,valor_minimo_regiao_estimado,"
+            "lucro_bruto_projetado,lucro_liquido_projetado,roi_liquido_projetado"
         )
         .order("edital_coletado_em", desc=True)
         .limit(lim)
@@ -65,7 +69,8 @@ def listar_para_dashboard(
             "data_leilao_1_praca,data_leilao_2_praca,data_leilao,edital_coletado_em,"
             "url_foto_imovel,"
             "operacao_simulacao_json,simulacoes_modalidades_json,relatorio_mercado_contexto_json,"
-            "cache_media_bairro_ids,leilao_extra_json"
+            "cache_media_bairro_ids,leilao_extra_json,"
+            "roi_projetado,valor_mercado_estimado,lucro_liquido_projetado"
         )
         .order("edital_coletado_em", desc=True)
         .limit(lim)

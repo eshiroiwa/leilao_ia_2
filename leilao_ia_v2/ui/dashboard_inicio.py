@@ -315,6 +315,13 @@ def _lucro_liquido_de_row(row: dict[str, Any]) -> float | None:
             return float(v.outputs.lucro_liquido)
     except Exception:
         pass
+    if not _tem_simulacao(row):
+        try:
+            ll = row.get("lucro_liquido_projetado")
+            if ll is not None and float(ll) == float(ll):
+                return float(ll)
+        except (TypeError, ValueError):
+            pass
     return None
 
 
@@ -354,6 +361,13 @@ def _roi_bruto_de_row(row: dict[str, Any]) -> float | None:
             return float(v.outputs.roi_bruto)
     except Exception:
         pass
+    if not _tem_simulacao(row):
+        try:
+            rv = row.get("roi_projetado")
+            if rv is not None and float(rv) == float(rv):
+                return float(rv)
+        except (TypeError, ValueError):
+            pass
     return None
 
 

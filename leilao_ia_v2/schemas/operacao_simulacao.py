@@ -101,7 +101,7 @@ class SimulacaoOperacaoInputs(BaseModel):
     itbi_pct_sobre_arrematacao: float = Field(3.0, ge=0, le=100)
     itbi_brl: float = Field(0, ge=0, description="Legado: se > 0, substitui o % (UI usa só percentual).")
 
-    registro_pct_sobre_arrematacao: float = Field(3.5, ge=0, le=100)
+    registro_pct_sobre_arrematacao: float = Field(2.0, ge=0, le=100)
     registro_brl: float = Field(0, ge=0, description="Se > 0, substitui o % sobre o lance (legado).")
     condominio_atrasado_brl: float = Field(0, ge=0)
     iptu_atrasado_brl: float = Field(0, ge=0)
@@ -109,7 +109,7 @@ class SimulacaoOperacaoInputs(BaseModel):
     reforma_modo: ModoReforma = ModoReforma.BASICA
     reforma_brl: float = Field(0, ge=0, description="Usado quando reforma_modo = manual.")
 
-    desocupacao_brl: float = Field(10_000.0, ge=0)
+    desocupacao_brl: float = Field(0, ge=0)
     outros_custos_brl: float = Field(0, ge=0)
 
     comissao_imobiliaria_brl: float = Field(0, ge=0)
