@@ -65,7 +65,13 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
 )
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
 from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS as _PAGE_CSS
-from leilao_ia_v2.ui.dashboard_comparacao_modais import build_painel_simulacao_resumo_html
+from leilao_ia_v2.ui.dashboard_comparacao_modais import (
+    PAINEL_SIMULACAO_SCOPED_ONLY,
+    build_painel_simulacao_resumo_html,
+    html_grupo_detalhe_painel,
+    html_linha_detalhe_painel,
+    html_linha_detalhe_painel_link,
+)
 from leilao_ia_v2.ui.simulacao_estado import (
     TAGS,
     construir_inputs_de_sessao,
@@ -281,30 +287,32 @@ def _fmt_valor_campo(key: str, val: Any) -> str:
     return str(val)
 
 
-def _html_card_campo_extracao(row: dict[str, Any], label: str, key: str) -> str | None:
-    """Um card mini ou None se o campo não deve ser exibido."""
-    raw = row.get(key)
-    if _raw_extracao_ocultar(raw):
+def _html_painel_extraidos_lista_painel_fin(row: dict[str, Any]) -> str | None:
+    """
+    Campos de extração no mesmo padrão do *Detalhamento* do painel financeiro (sp-sim-line).
+    Ordem: ``_CAMPOS_EXTRACAO``.
+    """
+    linhas: list[str] = []
+    for label, key in _CAMPOS_EXTRACAO:
+        raw = row.get(key)
+        if _raw_extracao_ocultar(raw):
+            continue
+        if key == "url_leilao":
+            url_s = str(raw).strip()
+            if not url_s:
+                continue
+            linhas.append(html_linha_detalhe_painel_link(label, url_s, link_text="abrir edital"))
+            continue
+        disp = _fmt_valor_campo(key, raw)
+        if not str(disp).strip() or disp == "—":
+            continue
+        linhas.append(html_linha_detalhe_painel(label, str(disp)))
+    if not linhas:
         return None
-    esc_l = html.escape(label)
-    if key == "url_leilao":
-        url_s = str(raw).strip()
-        if not url_s:
-            return None
-        uq = html.escape(url_s, quote=True)
-        return (
-            f'<div class="leilao-card leilao-card-mini"><div class="leilao-card-label">{esc_l}</div>'
-            f'<div class="leilao-card-value">'
-            f'<a href="{uq}" target="_blank" rel="noopener noreferrer">Link</a>'
-            f"</div></div>"
-        )
-    disp = _fmt_valor_campo(key, raw)
-    if disp == "—" or not str(disp).strip():
-        return None
-    esc_v = html.escape(disp)
+    bloco = html_grupo_detalhe_painel("Dados do edital", linhas)
     return (
-        f'<div class="leilao-card leilao-card-mini"><div class="leilao-card-label">{esc_l}</div>'
-        f'<div class="leilao-card-value">{esc_v}</div></div>'
+        f'<div class="dc-root sp-sim-financeiro leilao-extr-detalhe" lang="pt-BR">'
+        f'<div class="sp-sim-detail-list">{bloco}</div></div>'
     )
 
 
@@ -315,18 +323,25 @@ def _url_foto_imovel_valida(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _render_foto_imovel_acima_endereco(row: dict[str, Any]) -> None:
-    """Exibe a imagem do imóvel quando há URL; fica acima do card de endereço."""
+def _html_foto_imovel_extracao(row: dict[str, Any]) -> str:
+    """HTML da fotografia do edital (sem wrapper de painel)."""
     url_foto = _url_foto_imovel_valida(row)
     if not url_foto:
-        return
+        return ""
     uq = html.escape(url_foto, quote=True)
-    st.markdown(
+    return (
         f'<div class="leilao-extracao-foto-wrap">'
         f'<img src="{uq}" alt="Foto do imóvel" loading="lazy" referrerpolicy="no-referrer" />'
-        f"</div>",
-        unsafe_allow_html=True,
+        f"</div>"
     )
+
+
+def _render_foto_imovel_acima_endereco(row: dict[str, Any]) -> None:
+    """Exibe a imagem do imóvel quando há URL; fica acima do card de endereço."""
+    h = _html_foto_imovel_extracao(row)
+    if not h:
+        return
+    st.markdown(h, unsafe_allow_html=True)
     st.caption("Foto do imóvel (edital)")
 
 
@@ -339,29 +354,21 @@ def _render_cards_extracao(
     if caches is None or ads_map is None:
         caches, ads_map = _carregar_caches_e_anuncios_ui(row)
     tem_foto = _url_foto_imovel_valida(row) is not None
-    _render_foto_imovel_acima_endereco(row)
-    blocos: list[str] = []
-    addr = _html_card_campo_extracao(row, "Endereço", "endereco")
-    if addr:
-        blocos.append(f'<div class="leilao-grid-mini leilao-grid-address-only">{addr}</div>')
+    foto_h = _html_foto_imovel_extracao(row)
+    painel_lista = _html_painel_extraidos_lista_painel_fin(row)
 
-    partes_meio: list[str] = []
-    for label, key in _CAMPOS_EXTRACAO:
-        if key in ("endereco", "url_leilao"):
-            continue
-        h = _html_card_campo_extracao(row, label, key)
-        if h:
-            partes_meio.append(h)
-    link_h = _html_card_campo_extracao(row, "URL do leilão", "url_leilao")
-    if link_h:
-        partes_meio.append(link_h)
-    if partes_meio:
-        blocos.append(f'<div class="leilao-grid-mini">{"".join(partes_meio)}</div>')
+    partes_topo: list[str] = []
+    if foto_h:
+        partes_topo.append(foto_h)
+        partes_topo.append('<p class="leilao-foto-edital-cap">Foto do imóvel (edital)</p>')
+    if painel_lista:
+        partes_topo.append(painel_lista)
 
-    if blocos:
-        st.markdown(
-            f'<div class="leilao-extracao-cards-stack">{"".join(blocos)}</div>',
-            unsafe_allow_html=True,
+    if partes_topo:
+        st.html(
+            '<div class="sim-res-col-scroll sim-card-html leilao-extracao-panel-host">'
+            f'{"".join(partes_topo)}'
+            "</div>"
         )
     elif not tem_foto:
         st.caption("Nenhum campo preenchido para exibir em cards.")
@@ -378,23 +385,27 @@ def _render_cards_extracao(
         logger.exception("calcular_simulacao (cards indicadores na análise)")
         o_sim = None
     if o_sim is not None:
-        with st.container(border=True):
-            st.markdown(
-                '<div class="sim-card-head">Indicadores da operação (simulação)</div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f'<div class="sim-card-html">{_html_sim_venda_lucros_tres_cards(o_sim)}</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Mesmos critérios da aba Simulação: parâmetros gravados em `operacao_simulacao_json` "
-                "ou valores padrão até você gravar uma simulação."
-            )
+        st.markdown(
+            '<div class="sim-card-head">Indicadores da operação (simulação)</div>',
+            unsafe_allow_html=True,
+        )
+        st.html(
+            f'<div class="sim-res-col-scroll sim-card-html">{_html_sim_venda_lucros_tres_cards(o_sim)}</div>'
+        )
+        st.caption(
+            "Mesmos critérios da aba Simulação: parâmetros gravados em `operacao_simulacao_json` "
+            "ou valores padrão até você gravar uma simulação."
+        )
     extra = row.get("leilao_extra_json")
     if isinstance(extra, dict) and _leilao_extra_tem_conteudo(extra):
-        with st.expander("Dados adicionais", expanded=False):
-            st.text(_leilao_extra_como_texto(extra))
+        st.markdown(
+            '<div class="sim-card-head">Dados adicionais</div>',
+            unsafe_allow_html=True,
+        )
+        _tx = html.escape(_leilao_extra_como_texto(extra).strip())
+        st.html(
+            f'<div class="sim-res-col-scroll sim-card-html"><pre class="leilao-extra-pre">{_tx}</pre></div>'
+        )
 
 
 def _ids_cache_media_do_row(row: dict[str, Any]) -> list[str]:
@@ -633,18 +644,18 @@ def _render_painel_cache_mercado(
     ads_map: dict[str, dict[str, Any]],
 ) -> None:
     if not caches:
-        st.markdown(
+        st.html(
+            '<div class="sim-res-col-scroll sim-card-html leilao-cache-mercado-in">'
             '<p class="leilao-cache-empty">Nenhum cache de mercado vinculado a este imóvel '
             "(<code>cache_media_bairro_ids</code> vazio). Após criar o cache pela ferramenta "
-            "de análise, os comparáveis aparecerão aqui.</p>",
-            unsafe_allow_html=True,
+            "de análise, os comparáveis aparecerão aqui.</p></div>"
         )
         return
 
     blocos: list[str] = []
     for c in caches:
-        nome = html.escape(str(c.get("nome_cache") or "Cache de mercado").strip() or "Cache")
-        tipo_seg = html.escape(str(c.get("tipo_imovel") or "—"))
+        titulo_painel = str(c.get("nome_cache") or "Cache de mercado").strip() or "Cache"
+        tipo_seg = str(c.get("tipo_imovel") or "—")
         raw_meta = c.get("metadados_json")
         if isinstance(raw_meta, dict):
             md_c: dict = raw_meta
@@ -655,10 +666,12 @@ def _render_painel_cache_mercado(
                 md_c = {}
         else:
             md_c = {}
-        if md_c.get("modo_cache") == "terrenos" or md_c.get("apenas_referencia") is True or md_c.get("uso_simulacao") is False:
-            papel_html = ' <span style="color:#fb923c;font-weight:600;">[referência]</span>'
-        else:
-            papel_html = ' <span style="color:#4ade80;font-weight:600;">[simulação]</span>'
+        is_referencia = (
+            md_c.get("modo_cache") == "terrenos"
+            or md_c.get("apenas_referencia") is True
+            or md_c.get("uso_simulacao") is False
+        )
+        uso_txt = "Referência" if is_referencia else "Simulação"
         n_db = c.get("n_amostras")
         ann_ids = _parse_csv_uuids_ids_anuncios(c.get("anuncios_ids"))
         ads_seg = [ads_map[i] for i in ann_ids if i in ads_map]
@@ -684,14 +697,25 @@ def _render_painel_cache_mercado(
             s_med = _fmt_valor_campo("valor_venda", c.get("valor_medio_venda"))
             s_max = _fmt_valor_campo("valor_venda", c.get("maior_valor_venda"))
 
-        kpi_row = (
-            f'<div class="leilao-cache-kpi-row">'
-            f'<div class="leilao-cache-kpi"><div class="lbl">Média m²</div><div class="val">{m_m2}</div></div>'
-            f'<div class="leilao-cache-kpi"><div class="lbl">Mediana m²</div><div class="val">{md_m2}</div></div>'
-            f'<div class="leilao-cache-kpi"><div class="lbl">Menor valor</div><div class="val">{s_min}</div></div>'
-            f'<div class="leilao-cache-kpi"><div class="lbl">Valor médio</div><div class="val">{s_med}</div></div>'
-            f'<div class="leilao-cache-kpi"><div class="lbl">Maior valor</div><div class="val">{s_max}</div></div>'
-            f"</div>"
+        linhas_painel: list[str] = [
+            html_linha_detalhe_painel("Uso", uso_txt),
+            html_linha_detalhe_painel("Tipo de imóvel", tipo_seg),
+        ]
+        if n_db is not None:
+            linhas_painel.append(html_linha_detalhe_painel("Amostras (registro)", str(n_db)))
+        linhas_painel.extend(
+            [
+                html_linha_detalhe_painel("Média m²", m_m2),
+                html_linha_detalhe_painel("Mediana m²", md_m2),
+                html_linha_detalhe_painel("Menor valor", s_min),
+                html_linha_detalhe_painel("Valor médio", s_med),
+                html_linha_detalhe_painel("Maior valor", s_max),
+            ]
+        )
+        bloco_painel = html_grupo_detalhe_painel(titulo_painel, linhas_painel)
+        painel_fin = (
+            '<div class="dc-root sp-sim-financeiro leilao-cache-painel-fin" lang="pt-BR">'
+            f'<div class="sp-sim-detail-list">{bloco_painel}</div></div>'
         )
 
         rows_html: list[str] = []
@@ -724,18 +748,18 @@ def _render_painel_cache_mercado(
                 '<tr><td colspan="5" style="color:#94a3b8">Nenhum anúncio resolvido no banco para os IDs deste cache.</td></tr>'
             )
 
-        cap_n = ""
-        if n_db is not None:
-            cap_n = html.escape(f" · n={n_db} (registro)")
         blocos.append(
             f'<div class="leilao-cache-segment">'
-            f"<div><strong>{nome}</strong>{papel_html} · <span style=\"color:#94a3b8\">{tipo_seg}</span>{cap_n}</div>"
-            f"{kpi_row}"
+            f"{painel_fin}"
             f'<div class="leilao-cache-table-wrap"><table class="leilao-cache-table">{"".join(rows_html)}</table></div>'
             f"</div>"
         )
 
-    st.markdown("".join(blocos), unsafe_allow_html=True)
+    st.html(
+        '<div class="sim-res-col-scroll sim-card-html leilao-cache-mercado-in">'
+        f'{"".join(blocos)}'
+        "</div>"
+    )
 
 
 def _simop_hidratar_modalidades(
@@ -4917,17 +4941,19 @@ def _render_conteudo_principal() -> None:
         with st.expander(titulo_cards, expanded=False):
             c_extr, c_cache = st.columns((1, 1), gap="medium")
             with c_extr:
-                st.markdown(
-                    '<p class="leilao-cache-col-title">Imóvel (extração do edital)</p>',
-                    unsafe_allow_html=True,
-                )
-                _render_cards_extracao(row_ex, caches=caches_ui, ads_map=ads_map_ui)
+                with st.container(border=True):
+                    st.markdown(
+                        '<p class="sim-cmp-painel-tit">Imóvel (extração do edital)</p>',
+                        unsafe_allow_html=True,
+                    )
+                    _render_cards_extracao(row_ex, caches=caches_ui, ads_map=ads_map_ui)
             with c_cache:
-                st.markdown(
-                    '<p class="leilao-cache-col-title">Cache de mercado usado</p>',
-                    unsafe_allow_html=True,
-                )
-                _render_painel_cache_mercado(caches_ui, ads_map_ui)
+                with st.container(border=True):
+                    st.markdown(
+                        '<p class="sim-cmp-painel-tit">Cache de mercado usado</p>',
+                        unsafe_allow_html=True,
+                    )
+                    _render_painel_cache_mercado(caches_ui, ads_map_ui)
         with st.expander("Mapa interativo", expanded=False):
             _render_mapa_folium_row(row_ex, comparaveis=comparaveis_mapa)
 
@@ -4942,7 +4968,11 @@ def main() -> None:
     load_dotenv(_REPO_ROOT / ".env")
     _init_session()
     _aplicar_modo_pendente_antes_dos_widgets()
-    st.markdown(_PAGE_CSS, unsafe_allow_html=True)
+    st.markdown(
+        _PAGE_CSS
+        + f"<style>\n{PAINEL_SIMULACAO_SCOPED_ONLY}\n</style>",
+        unsafe_allow_html=True,
+    )
 
     _render_sidebar_app()
     _render_conteudo_principal()

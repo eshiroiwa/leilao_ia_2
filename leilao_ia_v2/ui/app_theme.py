@@ -217,6 +217,38 @@ section[data-testid="stSidebar"] [data-testid="stButton"] > button[kind="primary
   gap: 0.5rem;
   margin-bottom: 0.65rem;
 }
+/* Aba Leilão: alinhado ao painel financeiro (sim-res / sim-card) */
+.leilao-extracao-panel-host { margin-top: 0.05rem; }
+.leilao-foto-edital-cap {
+  font-size: 0.58rem;
+  color: rgba(148, 163, 184, 0.9);
+  margin: 0.2rem 0 0.45rem 0;
+  line-height: 1.2;
+}
+.leilao-extra-pre {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #e8edf5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  max-height: min(50vh, 28rem);
+  overflow: auto;
+}
+.leilao-cache-mercado-in { margin-top: 0.05rem; }
+/* KPIs do cache: mesmo bloco sp-sim-line que o detalhamento financeiro */
+.leilao-cache-painel-fin {
+  margin-bottom: 0.55rem;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line-val a.leilao-ext-detalhe-a {
+  color: #6ee7b7;
+  font-weight: 600;
+  text-decoration: none;
+}
+.dc-root.sp-sim-financeiro .sp-sim-line-val a.leilao-ext-detalhe-a:hover {
+  text-decoration: underline;
+}
 .leilao-grid-mini {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));

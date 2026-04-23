@@ -109,6 +109,34 @@ def _sec_grupo_painel(titulo: str, linhas: list[str]) -> str:
     )
 
 
+def html_grupo_detalhe_painel(titulo: str, linhas: list[str]) -> str:
+    """Título de secção + linhas, mesmo visual do bloco *Detalhamento* do painel financeiro na Simulação."""
+    return _sec_grupo_painel(titulo, [ln for ln in linhas if ln])
+
+
+def html_linha_detalhe_painel(
+    label: str, value: str, *, muted: bool = False, sub: str | None = None
+) -> str:
+    """Rótulo ··· valor (ou sublinha), igual às linhas de detalhe da simulação."""
+    return _row_detalhe_painel(label, value, muted=muted, sub=sub)
+
+
+def html_linha_detalhe_painel_link(
+    label: str, href: str, link_text: str = "abrir edital"
+) -> str:
+    """Linha cujo valor é um link, mesmo layout ``sp-sim-line`` do painel."""
+    uq = html.escape(href.strip(), quote=True)
+    lt = html.escape(link_text)
+    return (
+        f'<div class="sp-sim-line">'
+        f'<span class="sp-sim-line-lbl">{html.escape(label)}</span>'
+        f'<span class="sp-sim-line-dots" aria-hidden="true"></span>'
+        f'<span class="sp-sim-line-val">'
+        f'<a class="leilao-ext-detalhe-a" href="{uq}" target="_blank" rel="noopener noreferrer">{lt}</a>'
+        f"</span></div>"
+    )
+
+
 def _row_subtotal_painel(label: str, value: str, *, sub: str | None = None) -> str:
     sub_html = (
         f'<div class="sp-sim-line-sub sp-sim-line-sub--sum">{html.escape(sub)}</div>'
