@@ -65,7 +65,10 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
 )
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
 from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS as _PAGE_CSS
-from leilao_ia_v2.ui.dashboard_comparacao_modais import build_dashboard_comparacao_html
+from leilao_ia_v2.ui.dashboard_comparacao_modais import (
+    build_dashboard_comparacao_html,
+    build_painel_simulacao_resumo_html,
+)
 from leilao_ia_v2.ui.simulacao_estado import (
     TAGS,
     construir_inputs_de_sessao,
@@ -1294,14 +1297,7 @@ def _render_aba_simulacao() -> None:
 
     tab_s, tab_c = st.tabs(["Simulação", "Comparar"])
     with tab_s:
-        col_form, col_res = st.columns(2, gap="medium")
-        _render_simulacao_operacao(
-            row_ex,
-            caches_ui,
-            ads_map_ui,
-            form_column=col_form,
-            results_column=col_res,
-        )
+        _render_simulacao_operacao(row_ex, caches_ui, ads_map_ui)
     with tab_c:
         _render_aba_comparacoes(row_ex, caches_ui, ads_map_ui)
 
@@ -1594,8 +1590,9 @@ def _render_simulacao_operacao(
 ) -> None:
     """Simulação de custos, venda estimada (cache), IR editável, lucro/ROI — persiste em ``operacao_simulacao_json``.
 
-    Com ``form_column`` / ``results_column`` (colunas Streamlit), o formulário fica à esquerda e os
-    resultados à direita; com ambos ``None``, tudo permanece em fluxo único (empilhado).
+    Formulário em fluxo único; o painel financeiro (estilo **Comparar**) aparece abaixo dos campos
+    e da área de persistência. ``form_column`` / ``results_column`` permanecem por compatibilidade
+    (ambos ``None`` na aba Simulação).
     """
     iid = str(row.get("id") or "").strip()
     if not iid:
@@ -1603,34 +1600,22 @@ def _render_simulacao_operacao(
 
     _form_ctx = form_column if form_column is not None else contextlib.nullcontext()
 
-    def _pinta_saida_sim(o_local: SimulacaoOperacaoOutputs | None, *, aside: bool) -> None:
+    def _pinta_saida_sim(o_local: SimulacaoOperacaoOutputs | None) -> None:
         if not o_local:
-            if aside:
-                st.caption("Ajuste os parâmetros à esquerda para ver o resultado.")
+            st.caption("Ajuste os parâmetros acima para ver o painel financeiro.")
             return
-        if aside and o_local:
-            with st.container(border=True):
-                _cards = _html_simulacao_resultado_cards(o_local)
-                st.markdown(
-                    '<div class="sim-card-head">Painel financeiro</div>'
-                    f'<div class="sim-res-col-scroll sim-card-html">{_cards}</div>',
-                    unsafe_allow_html=True,
-                )
-                if o_local.lance_maximo_roi_notas:
-                    for n in o_local.lance_maximo_roi_notas:
-                        st.caption(n)
-                if o_local.notas:
-                    for n in o_local.notas:
-                        st.caption(n)
-        elif o_local and not aside:
-            st.markdown('<p class="sim-op-h">Resultado</p>', unsafe_allow_html=True)
-            st.markdown(_html_simulacao_resultado_cards(o_local), unsafe_allow_html=True)
-            if o_local.lance_maximo_roi_notas:
-                for n in o_local.lance_maximo_roi_notas:
-                    st.caption(n)
-            if o_local.notas:
-                for n in o_local.notas:
-                    st.caption(n)
+        with st.container(border=True):
+            # st.html: evita o parser Markdown, que trata linhas com recuo (4+ espaços) como código
+            # e mostrava o detalhamento do painel como texto bruto.
+            st.html(
+                f'<div class="sim-res-col-scroll sim-card-html">{build_painel_simulacao_resumo_html(o_local)}</div>'
+            )
+        if o_local.lance_maximo_roi_notas:
+            for n in o_local.lance_maximo_roi_notas:
+                st.caption(n)
+        if o_local.notas:
+            for n in o_local.notas:
+                st.caption(n)
 
     with _form_ctx:
         doc0 = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
@@ -2220,9 +2205,8 @@ def _render_simulacao_operacao(
         except Exception:
             logger.debug("Snapshot relatório simulação", exc_info=True)
         if results_column is None:
-            _pinta_saida_sim(o, aside=False)
+            _pinta_saida_sim(o)
             _render_analise_mercado_abaixo_painel(row)
-
         with st.container(border=True):
             st.markdown('<div class="sim-card-head">Persistência</div>', unsafe_allow_html=True)
             _tip_btn_persist = "primary" if _row_tem_simulacao_gravada(row) else "secondary"
@@ -2301,7 +2285,7 @@ def _render_simulacao_operacao(
 
     if results_column is not None:
         with results_column:
-            _pinta_saida_sim(o, aside=True)
+            _pinta_saida_sim(o)
             _render_analise_mercado_abaixo_painel(row)
 
 

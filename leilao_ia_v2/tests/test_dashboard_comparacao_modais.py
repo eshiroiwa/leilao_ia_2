@@ -5,7 +5,11 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
     SimulacaoOperacaoOutputs,
 )
 from leilao_ia_v2.services.simulacao_operacao import calcular_simulacao
-from leilao_ia_v2.ui.dashboard_comparacao_modais import build_dashboard_comparacao_html, _encargos_operacionais
+from leilao_ia_v2.ui.dashboard_comparacao_modais import (
+    _encargos_operacionais,
+    build_dashboard_comparacao_html,
+    build_painel_simulacao_resumo_html,
+)
 
 
 def test_encargos_operacionais_soma_encargos():
@@ -61,3 +65,36 @@ def test_build_dashboard_comparacao_html():
     )
     assert "dc-grid" in html
     assert "Comparar modalidades" in html
+
+
+def test_build_painel_simulacao_resumo_html():
+    row = {"id": "x", "area_util": 100.0}
+    cache = {"id": "c1", "preco_m2_medio": 5000.0, "anuncios_ids": ""}
+    doc = calcular_simulacao(
+        row_leilao=row,
+        inp=SimulacaoOperacaoInputs(
+            modo_pagamento=ModoPagamentoSimulacao.VISTA,
+            modo_valor_venda=ModoValorVenda.CACHE_PRECO_M2_X_AREA,
+            cache_media_bairro_id="c1",
+            lance_brl=200_000.0,
+            comissao_leiloeiro_pct_sobre_arrematacao=0.0,
+            itbi_pct_sobre_arrematacao=0.0,
+            registro_pct_sobre_arrematacao=0.0,
+            reforma_modo="manual",
+            reforma_brl=0.0,
+            comissao_imobiliaria_pct_sobre_venda=0.0,
+            ir_aliquota_pf_pct=0.0,
+        ),
+        caches_ordenados=[cache],
+        ads_por_id={},
+    )
+    assert doc.outputs is not None
+    html = build_painel_simulacao_resumo_html(doc.outputs)
+    assert "sp-sim-financeiro" in html
+    assert "Painel financeiro" in html
+    assert "Lance máximo recomendado" in html
+    assert "Lucro bruto" in html
+    assert "Lucro líquido" in html
+    assert "sp-sim-line-dots" in html
+    assert "desembolso inicial" in html.lower()
+    assert "Subtotal" in html

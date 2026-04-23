@@ -541,6 +541,11 @@ def _resultado_por_modo_e_tempo(
     cimob = m.comissao_imob
     v_liq = venda - cimob
     c_comum = _custo_comum_fora_lance_m(m, inp)
+    cond0 = float(inp.condominio_atrasado_brl or 0)
+    iptu0 = float(inp.iptu_atrasado_brl or 0)
+    desoc0 = float(inp.desocupacao_brl or 0)
+    outros0 = float(inp.outros_custos_brl or 0)
+    sub_imovel_obra = round(cond0 + iptu0 + m.reforma + desoc0 + outros0, 2)
     pmt = 0.0
     saldo_q = 0.0
     juros_ate = 0.0
@@ -548,9 +553,17 @@ def _resultado_por_modo_e_tempo(
     n_eff = 0
     L = max(0.0, float(lance) or 0.0)
     explic: list[str] = []
+    desembolso_ini = 0.0
+    sub_grupo_arrem = 0.0
+    tot_prest_saida = 0.0
+    n_prest_contrato = 0
     if modo == ModoPagamentoSimulacao.VISTA:
         n_eff = 0
+        n_prest_contrato = 0
         c_inv = m.subtotal
+        desembolso_ini = round(m.lance_pago, 2)
+        sub_grupo_arrem = round(m.lance_pago + m.clei + m.itbi + m.registro, 2)
+        tot_prest_saida = 0.0
         lucro_b = v_liq - c_inv
         ir_val, base_ir, ir_usou = _ir_sobre_cenario_lucro(lucro_b, venda, cimob, inp)
         lucro_l = lucro_b - ir_val
@@ -563,11 +576,15 @@ def _resultado_por_modo_e_tempo(
         n = max(1, min(60, int(getattr(inp, "prazo_num_parcelas", 30) or 30)))
         i_m = max(0.0, float(getattr(inp, "prazo_juros_mensal_pct", 1.0) or 0.0)) / 100.0
         n_eff = n
+        n_prest_contrato = n
         E = round(L * (e_pct / 100.0), 2)
+        desembolso_ini = E
+        sub_grupo_arrem = round(E + m.clei + m.itbi + m.registro, 2)
         P0 = max(0.0, L - E)
         kpay = int(min(k, n))
         pmt = pmt_price(P0, i_m, n)
         tot_prest = total_parcelas_price_acumuladas(P0, i_m, n, kpay)
+        tot_prest_saida = round(tot_prest, 2)
         saldo_q = round(saldo_devedor_price_apos_t_parcelas(P0, i_m, n, kpay), 2)
         juros_ate = juros_acumulados_price_ate_t(P0, i_m, n, kpay)
         c_inv = round(E + c_comum + tot_prest, 2)
@@ -583,10 +600,13 @@ def _resultado_por_modo_e_tempo(
         e_pct = max(5.0, min(50.0, float(getattr(inp, "fin_entrada_pct", 20.0) or 0.0)))
         n = max(12, min(480, int(getattr(inp, "fin_prazo_meses", 360) or 360)))
         n_eff = n
+        n_prest_contrato = n
         i_ano = float(getattr(inp, "fin_taxa_juros_anual_pct", 14.0) or 0.0)
         i_m = taxa_mensal_de_anual(i_ano)
         sistema = str(getattr(inp, "fin_sistema", "SAC") or "SAC").upper()
         E = round(L * (e_pct / 100.0), 2)
+        desembolso_ini = E
+        sub_grupo_arrem = round(E + m.clei + m.itbi + m.registro, 2)
         P0 = max(0.0, L - E)
         kpay = int(min(k, n))
         if sistema == "SAC":
@@ -600,6 +620,7 @@ def _resultado_por_modo_e_tempo(
             tot_prest = total_parcelas_price_acumuladas(P0, i_m, n, kpay)
             juros_ate = juros_acumulados_price_ate_t(P0, i_m, n, kpay)
             saldo_q = round(saldo_devedor_price_apos_t_parcelas(P0, i_m, n, kpay), 2)
+        tot_prest_saida = round(tot_prest, 2)
         c_inv = round(E + c_comum + tot_prest, 2)
         lucro_b = v_liq - saldo_q - c_inv
         ir_val, base_ir, ir_usou = _ir_sobre_cenario_lucro(lucro_b, venda, cimob, inp)
@@ -629,6 +650,11 @@ def _resultado_por_modo_e_tempo(
         "k": k,
         "n": n_eff,
         "explic": explic,
+        "desembolso_inicial": desembolso_ini,
+        "subtotal_grupo_arrematacao": sub_grupo_arrem,
+        "subtotal_imovel_obra": sub_imovel_obra,
+        "tot_prest_ate_t": tot_prest_saida,
+        "n_prest_contrato": n_prest_contrato,
     }
 
 
@@ -747,6 +773,11 @@ def calcular_simulacao(
         saldo_divida_quitacao_na_venda=round(float(rt.get("saldo_quit") or 0.0), 2),
         total_juros_ate_momento_venda=round(float(rt.get("juros_ate") or 0.0), 2),
         pmt_mensal_resolvido=round(float(rt.get("pmt") or 0.0), 2),
+        desembolso_inicial_lance_ou_entrada_brl=round(float(rt.get("desembolso_inicial") or 0.0), 2),
+        subtotal_grupo_arrematacao_brl=round(float(rt.get("subtotal_grupo_arrematacao") or 0.0), 2),
+        subtotal_grupo_imovel_obra_brl=round(float(rt.get("subtotal_imovel_obra") or 0.0), 2),
+        total_parcelas_acumuladas_ate_t_brl=round(float(rt.get("tot_prest_ate_t") or 0.0), 2),
+        num_prestacoes_contrato_resolvido=int(rt.get("n_prest_contrato") or 0),
         roi_bruto_anualizado=round(roi_b_a, 6) if roi_b_a is not None else None,
         roi_liquido_anualizado=round(roi_l_a, 6) if roi_l_a is not None else None,
     )

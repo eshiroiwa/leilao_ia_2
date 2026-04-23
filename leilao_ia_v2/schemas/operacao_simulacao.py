@@ -203,6 +203,16 @@ class SimulacaoOperacaoOutputs(BaseModel):
             "A taxa anual informada é convertida em taxa mensal composta."
         ),
     )
+    #: À vista: lance pago (pós-desconto). Parcelado/financiado: entrada sobre o lance nominal.
+    desembolso_inicial_lance_ou_entrada_brl: float = 0.0
+    #: Lance/entrada + comissão leiloeiro + ITBI + registro (1.ª onda de caixa da arrematação).
+    subtotal_grupo_arrematacao_brl: float = 0.0
+    #: Condomínio, IPTU, reforma, desocupação, outros (sem tributos do lance).
+    subtotal_grupo_imovel_obra_brl: float = 0.0
+    #: Soma das prestações até T (0 à vista). Alinha com o fluxo do cenário prazo/fin.
+    total_parcelas_acumuladas_ate_t_brl: float = 0.0
+    #: Nº de prestações no contrato (parcelas judiciais ou prazo do financiamento); 0 à vista.
+    num_prestacoes_contrato_resolvido: int = 0
     roi_bruto_anualizado: Optional[float] = None
     roi_liquido_anualizado: Optional[float] = None
 
