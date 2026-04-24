@@ -4599,7 +4599,7 @@ def _render_sidebar_app() -> None:
 
 
 def _dash_txt_card_resumo_local(x: Any) -> str:
-    """Texto do botão nas oportunidades: estado, cidade, bairro e tipo (ex.: apartamento, casa)."""
+    """Texto curto de localização/tipologia para cards do painel."""
     uf = (getattr(x, "estado", None) or "").strip() or "—"
     cid = (getattr(x, "cidade", None) or "").strip() or "—"
     bai = (getattr(x, "bairro", None) or "").strip() or "—"
@@ -4607,8 +4607,65 @@ def _dash_txt_card_resumo_local(x: Any) -> str:
     return f"{uf}  ·  {cid}\n{bai}  ·  {tip}"
 
 
-def _dash_linha_oportunidade_com_foto(x: Any, *, texto_botao: str, st_key: str, modo_aba: str) -> None:
-    """Uma linha de oportunidade: miniatura (``url_foto_imovel``) + botão de navegação."""
+def _dash_fmt_brl(v: Any) -> str:
+    try:
+        vv = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if vv != vv:
+        return "—"
+    return _fmt_valor_campo("valor_venda", vv)
+
+
+def _dash_fmt_pct_frac(v: Any) -> str:
+    try:
+        vv = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if vv != vv:
+        return "—"
+    return f"{vv * 100:.1f}%"
+
+
+def _dash_status_card(x: Any) -> tuple[str, str]:
+    rb = getattr(x, "roi_bruto", None)
+    ll = getattr(x, "lucro_liq", None)
+    if rb is not None and float(rb) >= 0.5:
+        return "ROI >= 50%", "ok"
+    if ll is not None and float(ll) >= 500_000.0:
+        return "Lucro >= 500k", "ok"
+    if rb is not None and float(rb) >= 0.4:
+        return "ROI forte", "warn"
+    return "Em análise", "muted"
+
+
+def _dash_html_metricas_decisao(x: Any) -> str:
+    rb = _dash_fmt_pct_frac(getattr(x, "roi_bruto", None))
+    ll = _dash_fmt_brl(getattr(x, "lucro_liq", None))
+    data_txt = "Sem data"
+    d0 = getattr(x, "prox_data", None)
+    if d0 is not None:
+        data_txt = d0.strftime("%d/%m/%Y")
+    st_txt, st_cls = _dash_status_card(x)
+    endereco = html.escape((getattr(x, "endereco", None) or "Endereço não informado").strip()[:96])
+    praca = html.escape((getattr(x, "praca_label", None) or "Praça").strip() or "Praça")
+    resumo = html.escape(_dash_txt_card_resumo_local(x).replace("\n", " · "))
+    return (
+        '<div class="dash-op-card-body">'
+        f'<div class="dash-op-top"><span class="dash-op-pill {st_cls}">{html.escape(st_txt)}</span>'
+        f'<span class="dash-op-date">{praca} · {data_txt}</span></div>'
+        f'<div class="dash-op-title">{resumo}</div>'
+        f'<div class="dash-op-end">{endereco}</div>'
+        '<div class="sim-fin-sec"><div class="sim-res-grid">'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">ROI bruto</div><div class="sim-res-val {st_cls}">{rb}</div></div>'
+        f'<div class="sim-res-card sim-res-card--accent"><div class="sim-res-lbl">Lucro líquido</div><div class="sim-res-val">{ll}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Status</div><div class="sim-res-val {st_cls}">{html.escape(st_txt)}</div></div>'
+        "</div></div></div>"
+    )
+
+
+def _dash_linha_oportunidade_com_foto(x: Any, *, st_key: str, modo_aba: str, acao_txt: str) -> None:
+    """Card de oportunidade com miniatura + métricas no estilo da aba Simulação."""
     c_img, c_txt = st.columns([0.2, 0.8], gap="small")
     with c_img:
         u = getattr(x, "url_foto_imovel", None)
@@ -4627,7 +4684,8 @@ def _dash_linha_oportunidade_com_foto(x: Any, *, texto_botao: str, st_key: str, 
                 unsafe_allow_html=True,
             )
     with c_txt:
-        if st.button(texto_botao, key=st_key, use_container_width=True, type="secondary"):
+        st.markdown(_dash_html_metricas_decisao(x), unsafe_allow_html=True)
+        if st.button(acao_txt, key=st_key, use_container_width=True, type="secondary"):
             _abrir_leilao_e_mudar_aba(x.id, modo_aba)
 
 
@@ -4745,6 +4803,8 @@ def _render_painel_inicial() -> None:
     from leilao_ia_v2.ui.dashboard_inicio import (
         agregar_listas_por_dia,
         CSS_STREAMLIT_PAINEL_INICIO,
+        filtrar_rows_dashboard,
+        gerar_relatorio_html_prioridade_maxima_lote,
         processar_rows_dashboard,
     )
 
@@ -4762,28 +4822,141 @@ def _render_painel_inicial() -> None:
         st.session_state.pop("_dash_rows", None)
         st.session_state.pop("_dash_dia_filtro", None)
         st.session_state.pop("_dash_cal_ym", None)
+        st.session_state.pop("_dash_filtros_rapidos", None)
         st.rerun()
 
     rows = st.session_state.get("_dash_rows")
     if rows is None:
         try:
             with st.spinner("Carregando leilões…"):
-                rows = leilao_imoveis_repo.listar_para_dashboard(cli, limite=400)
+                rows = leilao_imoveis_repo.listar_para_dashboard(cli, limite=1500)
             st.session_state["_dash_rows"] = rows
         except Exception as e:
             st.error(f"Falha ao listar: {e}")
             return
 
-    d = processar_rows_dashboard(rows)
     st.session_state.setdefault("_dash_dia_filtro", None)
+
+    filtros_validos = ("priorizados", "prox7", "sem_sim", "sem_mercado", "sem_cache")
+    if "_dash_filtros_rapidos" not in st.session_state:
+        qpf = st.query_params.get("dash_filtros", "")
+        if isinstance(qpf, list):
+            qpf = ",".join(str(x) for x in qpf)
+        lst = [s.strip().lower() for s in str(qpf or "").split(",") if s.strip()]
+        st.session_state["_dash_filtros_rapidos"] = [f for f in lst if f in filtros_validos]
+    filtros_ativos = list(st.session_state.get("_dash_filtros_rapidos") or [])
+
+    d_total = processar_rows_dashboard(rows)
+    rows_filtrados = filtrar_rows_dashboard(rows, filtros_ativos)
+    d = processar_rows_dashboard(rows_filtrados)
     if "_dash_cal_ym" not in st.session_state:
         st.session_state["_dash_cal_ym"] = (d.agora.year, d.agora.month)
 
     st.markdown(CSS_DASH, unsafe_allow_html=True)
     st.markdown(CSS_STREAMLIT_PAINEL_INICIO, unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="db-muted sm" style="margin:0.2rem 0 0.55rem 0.2rem">Base analisada: <strong>{len(rows_filtrados)}</strong>'
+        f" de <strong>{len(rows)}</strong> imóveis · filtros ativos: <strong>{max(0, len(filtros_ativos))}</strong>.</p>",
+        unsafe_allow_html=True,
+    )
+
+    cols_f = st.columns(7, gap="small")
+    filtros = [
+        ("priorizados", f"Radar ROI/Lucro ({d_total.priorizados})"),
+        ("prox7", f"Próx. 7 dias ({d_total.prox_7d})"),
+        ("sem_sim", f"Sem simulação ({d_total.sem_sim})"),
+        ("sem_mercado", f"Sem mercado ({d_total.sem_mercado})"),
+        ("sem_cache", f"Sem cache ({d_total.sem_cache})"),
+    ]
+    for i, (fid, lbl) in enumerate(filtros):
+        if i >= len(cols_f):
+            break
+        with cols_f[i]:
+            is_sel = fid in filtros_ativos
+            if st.button(
+                lbl,
+                key=f"dash_filtro_{fid}",
+                use_container_width=True,
+                type="primary" if is_sel else "secondary",
+            ):
+                nova = [f for f in filtros_ativos if f != fid] if is_sel else (filtros_ativos + [fid])
+                st.session_state["_dash_filtros_rapidos"] = nova
+                st.query_params["dash_filtros"] = ",".join(nova)
+                st.session_state.pop("_dash_dia_filtro", None)
+                st.rerun()
+    with cols_f[-1]:
+        if st.button("Limpar filtros", key="dash_filtro_limpar", use_container_width=True, type="tertiary"):
+            st.session_state["_dash_filtros_rapidos"] = []
+            st.query_params["dash_filtros"] = ""
+            st.session_state.pop("_dash_dia_filtro", None)
+            st.rerun()
+
     st.markdown(d.to_html_kpis_sozinho(), unsafe_allow_html=True)
-    col_cal, col_lmb = st.columns(2, gap="large")
-    with col_cal:
+
+    filtro_iso = st.session_state.get("_dash_dia_filtro")
+    if filtro_iso:
+        d_alvo = date.fromisoformat(str(filtro_iso))
+        prox_s, top_s, pnd_s = agregar_listas_por_dia(rows_filtrados, d_alvo)
+    else:
+        prox_s, top_s, pnd_s = d.proximos, d.top_lucro, d.pendentes
+
+    def _is_prioritario_card(x: Any) -> bool:
+        try:
+            if x.roi_bruto is not None and float(x.roi_bruto) >= 0.5:
+                return True
+        except (TypeError, ValueError):
+            pass
+        try:
+            if x.lucro_liq is not None and float(x.lucro_liq) >= 500_000.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        return False
+
+    if filtro_iso:
+        prior_s = [x for x in (prox_s + top_s + pnd_s) if _is_prioritario_card(x)]
+        uniq: dict[str, Any] = {}
+        for x in prior_s:
+            if x.id not in uniq:
+                uniq[x.id] = x
+        prior_s = list(uniq.values())[:10]
+    else:
+        prior_s = list(d.priorizados_lista)[:10]
+
+    st.markdown(
+        '<h2 class="dc-h2" style="font-size:1.16rem; margin:0.5rem 0 0.6rem 0">Radar de decisão</h2>',
+        unsafe_allow_html=True,
+    )
+
+    col_main, col_side = st.columns([1.45, 0.95], gap="large")
+    with col_main:
+        with st.container(border=True):
+            st.markdown(
+                '<span class="dc-badge" style="display:block;margin:0.1rem 0 0.35rem 0.05rem">'
+                "Prioridade máxima — ROI >= 50% ou lucro >= R$ 500 mil</span>",
+                unsafe_allow_html=True,
+            )
+            if prior_s:
+                html_rel_lote = gerar_relatorio_html_prioridade_maxima_lote(prior_s[:6])
+                st.download_button(
+                    "Gerar relatório HTML consolidado",
+                    key="dbc_pri_rel_lote",
+                    data=html_rel_lote.encode("utf-8"),
+                    file_name="relatorio_prioridade_maxima.html",
+                    mime="text/html",
+                    use_container_width=True,
+                    type="secondary",
+                )
+                for i, x in enumerate(prior_s[:6]):
+                    _dash_linha_oportunidade_com_foto(
+                        x,
+                        st_key=f"dbc_pri_{i}_{x.id}",
+                        modo_aba="simulacao",
+                        acao_txt="Abrir simulação completa",
+                    )
+            else:
+                st.info("Sem oportunidades no corte prioritário atual. Revise os próximos leilões e ajuste os filtros.")
+    with col_side:
         with st.container(border=True):
             st.markdown(
                 '<span class="dc-badge" style="display:block;margin:0.1rem 0 0.5rem 0.05rem">'
@@ -4791,18 +4964,10 @@ def _render_painel_inicial() -> None:
                 unsafe_allow_html=True,
             )
             _render_calendario_interativo_dash(d)
-    with col_lmb:
         st.markdown(d.to_html_lembretes_secao(), unsafe_allow_html=True)
 
-    filtro_iso = st.session_state.get("_dash_dia_filtro")
-    if filtro_iso:
-        d_alvo = date.fromisoformat(str(filtro_iso))
-        prox_s, top_s, pnd_s = agregar_listas_por_dia(rows, d_alvo)
-    else:
-        prox_s, top_s, pnd_s = d.proximos, d.top_lucro, d.pendentes
-
     st.markdown(
-        '<h2 class="dc-h2" style="font-size:1.12rem; margin:0.5rem 0 0.6rem 0">Oportunidades</h2>',
+        '<h2 class="dc-h2" style="font-size:1.08rem; margin:0.55rem 0 0.55rem 0">Execução tática</h2>',
         unsafe_allow_html=True,
     )
     a1, a2, a3 = st.columns(3, gap="large")
@@ -4810,42 +4975,42 @@ def _render_painel_inicial() -> None:
         with st.container(border=True):
             st.markdown(
                 '<span class="dc-badge" style="display:block;margin:0.1rem 0 0.4rem 0.05rem">'
-                "Próximos leilões</span>",
+                "Agenda — próximos leilões</span>",
                 unsafe_allow_html=True,
             )
             for i, x in enumerate(prox_s[:8]):
                 _dash_linha_oportunidade_com_foto(
                     x,
-                    texto_botao=_dash_txt_card_resumo_local(x),
                     st_key=f"dbc_prox_{i}_{x.id}",
                     modo_aba="ingestao",
+                    acao_txt="Abrir detalhes do leilão",
                 )
     with a2:
         with st.container(border=True):
             st.markdown(
                 '<span class="dc-badge" style="display:block;margin:0.1rem 0 0.4rem 0.05rem">'
-                "Maior lucro líquido (simulado)</span>",
+                "Maior lucro líquido projetado</span>",
                 unsafe_allow_html=True,
             )
             for i, x in enumerate(top_s[:8]):
                 _dash_linha_oportunidade_com_foto(
                     x,
-                    texto_botao=_dash_txt_card_resumo_local(x),
                     st_key=f"dbc_luc_{i}_{x.id}",
                     modo_aba="simulacao",
+                    acao_txt="Abrir e validar números",
                 )
     with a3:
         with st.container(border=True):
             st.markdown(
-                '<span class="dc-badge" style="display:block;margin:0.1rem 0 0.4rem 0.05rem">Pendências</span>',
+                '<span class="dc-badge" style="display:block;margin:0.1rem 0 0.4rem 0.05rem">Pendências críticas</span>',
                 unsafe_allow_html=True,
             )
             for i, x in enumerate(pnd_s[:8]):
                 _dash_linha_oportunidade_com_foto(
                     x,
-                    texto_botao=_dash_txt_card_resumo_local(x),
                     st_key=f"dbc_pnd_{i}_{x.id}",
                     modo_aba="simulacao",
+                    acao_txt="Abrir e concluir pendências",
                 )
     st.divider()
 

@@ -2,9 +2,9 @@
 Painel inicial (dashboard): agrega leilões do Supabase para decisão rápida.
 Sem tabelas novas: usa colunas existentes (datas, JSONs de simulação/relatório).
 
-Oportunidades (próximos 7 dias, top lucro, próximos leilões, calendário): com simulação gravada,
-só entram imóveis com ROI bruto > 40 %; sem simulação entram todos. Pendências e KPI «sem simulação»
-continuam a considerar todos os registos carregados.
+Prioridade estratégica:
+- destacar leilões com maior proximidade de praça e alto potencial.
+- "alto potencial" = ROI >= 50% ou lucro líquido >= R$ 500 mil.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ _TZ_SP = ZoneInfo("America/Sao_Paulo")
 
 # Oportunidades no painel inicial: com simulação gravada, só entra com ROI bruto > 40 %; sem simulação entra sempre.
 _ROI_BRUTO_MIN_OPORTUNIDADES = 0.4
+_ROI_PRIORIDADE = 0.5
+_LUCRO_PRIORIDADE = 500_000.0
 
 
 @dataclass
@@ -44,6 +46,7 @@ class _RowOut:
     tem_mercado_llm: bool
     tem_cache: bool
     praca_label: str
+    score_prioridade: float
     url_foto_imovel: str | None = None
 
 
@@ -52,8 +55,14 @@ class DashboardDados:
     agora: date
     total: int
     prox_7d: int
+    priorizados: int
+    priorizados_prox_7d: int
     sem_sim: int
     sem_mercado: int
+    sem_cache: int
+    ticket_medio_lucro_priorizados: float | None
+    roi_medio_priorizados: float | None
+    priorizados_lista: list[_RowOut] = field(default_factory=list)
     top_lucro: list[_RowOut] = field(default_factory=list)
     proximos: list[_RowOut] = field(default_factory=list)
     pendentes: list[_RowOut] = field(default_factory=list)
@@ -62,12 +71,23 @@ class DashboardDados:
     calendario: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
     def _kpi_html(self) -> str:
+        roi_med = f"{(self.roi_medio_priorizados or 0.0) * 100:.1f} %" if self.roi_medio_priorizados is not None else "—"
+        lucro_med = (
+            f"R$ {self.ticket_medio_lucro_priorizados:,.0f}".replace(",", ".")
+            if self.ticket_medio_lucro_priorizados is not None
+            else "—"
+        )
         return f"""
 <div class="db-kpis">
   <div class="db-kpi"><span class="db-kpi-v">{self.total}</span><span class="db-kpi-l">leilões carregados</span></div>
-  <div class="db-kpi db-kpi-accent"><span class="db-kpi-v">{self.prox_7d}</span><span class="db-kpi-l">em 7 dias</span></div>
+  <div class="db-kpi db-kpi-accent"><span class="db-kpi-v">{self.priorizados}</span><span class="db-kpi-l">alto potencial (ROI >= 50% ou lucro >= 500k)</span></div>
+  <div class="db-kpi db-kpi-accent"><span class="db-kpi-v">{self.priorizados_prox_7d}</span><span class="db-kpi-l">alto potencial em 7 dias</span></div>
+  <div class="db-kpi"><span class="db-kpi-v">{self.prox_7d}</span><span class="db-kpi-l">leilões em 7 dias</span></div>
+  <div class="db-kpi"><span class="db-kpi-v">{roi_med}</span><span class="db-kpi-l">ROI médio do radar prioritário</span></div>
+  <div class="db-kpi"><span class="db-kpi-v">{lucro_med}</span><span class="db-kpi-l">lucro médio do radar prioritário</span></div>
   <div class="db-kpi db-kpi-warn"><span class="db-kpi-v">{self.sem_sim}</span><span class="db-kpi-l">sem simulação gravada</span></div>
-  <div class="db-kpi"><span class="db-kpi-v">{self.sem_mercado}</span><span class="db-kpi-l">sem análise de mercado (LLM)</span></div>
+  <div class="db-kpi db-kpi-warn"><span class="db-kpi-v">{self.sem_mercado}</span><span class="db-kpi-l">sem análise de mercado</span></div>
+  <div class="db-kpi db-kpi-warn"><span class="db-kpi-v">{self.sem_cache}</span><span class="db-kpi-l">sem cache de bairro</span></div>
 </div>"""
 
     def _lembretes_html(self) -> str:
@@ -245,6 +265,55 @@ section[data-testid="stMain"] .dash-op-thumb-ph {
   box-sizing: border-box;
 }
 section[data-testid="stMain"] .dash-op-thumb-wrap { line-height: 0; margin: 0.1rem 0 0.35rem 0; }
+section[data-testid="stMain"] .dash-op-card-body {
+  border-radius: 12px;
+  padding: 0.1rem 0.2rem 0.35rem;
+}
+section[data-testid="stMain"] .dash-op-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.4rem;
+}
+section[data-testid="stMain"] .dash-op-pill {
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+section[data-testid="stMain"] .dash-op-pill.ok {
+  color: #0d2f24;
+  background: linear-gradient(130deg, #6ee7b7 0%, #34d399 100%);
+}
+section[data-testid="stMain"] .dash-op-pill.warn {
+  color: #422006;
+  background: linear-gradient(130deg, #fde68a 0%, #fbbf24 100%);
+}
+section[data-testid="stMain"] .dash-op-pill.muted {
+  color: #cbd5e1;
+  background: rgba(148, 163, 184, 0.16);
+}
+section[data-testid="stMain"] .dash-op-date {
+  font-size: 0.71rem;
+  color: #93c5fd;
+  font-weight: 600;
+}
+section[data-testid="stMain"] .dash-op-title {
+  color: #f1f5f9;
+  font-size: 0.87rem;
+  font-weight: 650;
+  margin-bottom: 0.22rem;
+}
+section[data-testid="stMain"] .dash-op-end {
+  color: #94a3b8;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  margin-bottom: 0.38rem;
+}
 </style>
 """
 
@@ -371,6 +440,35 @@ def _elegivel_oportunidades_roi(o: _RowOut) -> bool:
     return rb is not None and rb > _ROI_BRUTO_MIN_OPORTUNIDADES
 
 
+def _e_prioritario(o: _RowOut) -> bool:
+    rb = o.roi_bruto
+    ll = o.lucro_liq
+    return (rb is not None and rb >= _ROI_PRIORIDADE) or (ll is not None and ll >= _LUCRO_PRIORIDADE)
+
+
+def _score_prioridade(o: _RowOut, *, hoje: date) -> float:
+    score = 0.0
+    rb = o.roi_bruto
+    ll = o.lucro_liq
+    if rb is not None:
+        score += min(max(float(rb), 0.0), 1.5) * 120.0
+    if ll is not None:
+        score += min(max(float(ll), 0.0) / 100_000.0, 25.0) * 7.0
+    if o.prox_data:
+        dias = (o.prox_data - hoje).days
+        if dias >= 0:
+            score += max(0.0, (60.0 - float(dias)) * 2.4)
+        else:
+            score -= min(25.0, abs(float(dias)) * 0.6)
+    if _e_prioritario(o):
+        score += 120.0
+    if not o.tem_simulacao:
+        score -= 10.0
+    if not o.tem_mercado_llm:
+        score -= 8.0
+    return round(score, 2)
+
+
 def _row_to_out(r: dict[str, Any], *, hoje: date) -> _RowOut:
     iid = str(r.get("id") or "")
     d, pl = _proxima_data_e_praca(r, hoje=hoje)
@@ -391,6 +489,7 @@ def _row_to_out(r: dict[str, Any], *, hoje: date) -> _RowOut:
         tem_mercado_llm=_tem_mercado_llm(r),
         tem_cache=ncache > 0,
         praca_label=pl,
+        score_prioridade=0.0,
         url_foto_imovel=_url_foto_imovel_row(r),
     )
 
@@ -398,6 +497,8 @@ def _row_to_out(r: dict[str, Any], *, hoje: date) -> _RowOut:
 def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
     hoje = datetime.now(_TZ_SP).date()
     outs = [_row_to_out(r, hoje=hoje) for r in rows if r.get("id")]
+    for i, o in enumerate(outs):
+        outs[i].score_prioridade = _score_prioridade(o, hoje=hoje)
     op = [x for x in outs if _elegivel_oportunidades_roi(x)]
     sem_sim = [x for x in outs if not x.tem_simulacao]
     sem_merc = [x for x in outs if not x.tem_mercado_llm]
@@ -406,16 +507,30 @@ def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
     fim = hoje + timedelta(days=7)
     prox_7 = [x for x in com_data if x.prox_data is not None and hoje <= x.prox_data <= fim]
 
+    priorizados = [x for x in op if _e_prioritario(x)]
+    priorizados_ordenados = sorted(
+        [x for x in priorizados if x.prox_data and x.prox_data >= hoje],
+        key=lambda z: (z.prox_data or hoje, -float(z.score_prioridade), -float(z.roi_bruto or 0.0)),
+    )[:10]
+    priorizados_sem_data = sorted(
+        [x for x in priorizados if not x.prox_data],
+        key=lambda z: (-float(z.score_prioridade), -float(z.roi_bruto or 0.0)),
+    )[:4]
+    priorizados_lista = (priorizados_ordenados + priorizados_sem_data)[:10]
+
     top_l = sorted(
-        [x for x in op if x.lucro_liq is not None], key=lambda z: (z.lucro_liq or 0.0), reverse=True
+        [x for x in op if x.lucro_liq is not None],
+        key=lambda z: (z.lucro_liq or 0.0, z.score_prioridade),
+        reverse=True,
     )[:6]
     proximos = sorted(
         [x for x in com_data if x.prox_data and x.prox_data >= hoje and "(passada)" not in (x.praca_label or "")],
-        key=lambda z: (z.prox_data or hoje, z.cidade),
+        key=lambda z: (z.prox_data or hoje, -z.score_prioridade, z.cidade),
     )[:8]
-    pendentes = [x for x in outs if (not x.tem_simulacao or not x.tem_mercado_llm) and x.prox_data and x.prox_data >= hoje][
-        :8
-    ]
+    pendentes = sorted(
+        [x for x in outs if (not x.tem_simulacao or not x.tem_mercado_llm) and x.prox_data and x.prox_data >= hoje],
+        key=lambda z: (z.prox_data or hoje, -z.score_prioridade),
+    )[:8]
     if not pendentes:
         pendentes = [x for x in sem_sim if x.prox_data and x.prox_data >= hoje][:8]
     if not pendentes:
@@ -424,6 +539,10 @@ def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
     lembretes: list[str] = []
     if prox_7:
         lembretes.append(f"**{len(prox_7)}** leilão(ões) com data nos próximos 7 dias — revisar lance e simulação.")
+    if priorizados:
+        lembretes.append(
+            f"**{len(priorizados)}** oportunidade(s) com **ROI >= 50%** ou **lucro >= R$ 500 mil**."
+        )
     if sem_sim and len(sem_sim) >= 1:
         lembretes.append(f"**{len(sem_sim)}** registo(s) ainda **sem simulação gravada** (risco de decisão no escuro).")
     if sem_merc:
@@ -447,8 +566,24 @@ def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
         agora=hoje,
         total=len(outs),
         prox_7d=len(prox_7),
+        priorizados=len(priorizados),
+        priorizados_prox_7d=len([x for x in priorizados if x.prox_data and hoje <= x.prox_data <= fim]),
         sem_sim=len(sem_sim),
         sem_mercado=len(sem_merc),
+        sem_cache=len(cache_sem),
+        ticket_medio_lucro_priorizados=(
+            sum(float(x.lucro_liq or 0.0) for x in priorizados if x.lucro_liq is not None)
+            / max(1, len([x for x in priorizados if x.lucro_liq is not None]))
+            if any(x.lucro_liq is not None for x in priorizados)
+            else None
+        ),
+        roi_medio_priorizados=(
+            sum(float(x.roi_bruto or 0.0) for x in priorizados if x.roi_bruto is not None)
+            / max(1, len([x for x in priorizados if x.roi_bruto is not None]))
+            if any(x.roi_bruto is not None for x in priorizados)
+            else None
+        ),
+        priorizados_lista=priorizados_lista,
         top_lucro=top_l,
         proximos=proximos,
         pendentes=pendentes,
@@ -471,6 +606,7 @@ def agregar_listas_por_dia(
         if not r.get("id"):
             continue
         o = _row_to_out(r, hoje=hoje)
+        o.score_prioridade = _score_prioridade(o, hoje=hoje)
         if o.prox_data == dia:
             outs_dia.append(o)
     if not outs_dia:
@@ -478,17 +614,217 @@ def agregar_listas_por_dia(
     op_dia = [x for x in outs_dia if _elegivel_oportunidades_roi(x)]
     com_data = [x for x in op_dia if x.prox_data is not None]
     top_l = sorted(
-        [x for x in op_dia if x.lucro_liq is not None], key=lambda z: (z.lucro_liq or 0.0), reverse=True
+        [x for x in op_dia if x.lucro_liq is not None],
+        key=lambda z: (z.lucro_liq or 0.0, z.score_prioridade),
+        reverse=True,
     )[:8]
     proximos = sorted(
-        com_data, key=lambda z: (z.cidade, z.bairro),
+        com_data, key=lambda z: (-z.score_prioridade, z.cidade, z.bairro),
     )[:8]
-    pendentes = [x for x in outs_dia if (not x.tem_simulacao or not x.tem_mercado_llm)][:8]
+    pendentes = sorted(
+        [x for x in outs_dia if (not x.tem_simulacao or not x.tem_mercado_llm)],
+        key=lambda z: (-z.score_prioridade, z.cidade),
+    )[:8]
     if not pendentes:
         pendentes = [x for x in outs_dia if not x.tem_simulacao][:8]
     if not pendentes:
         pendentes = outs_dia[:8]
     return proximos, top_l, pendentes
+
+
+def _normalizar_filtros_dashboard(filtro: str | list[str] | tuple[str, ...]) -> list[str]:
+    if isinstance(filtro, str):
+        base = [f.strip().lower() for f in filtro.split(",") if f.strip()]
+    else:
+        base = [str(f).strip().lower() for f in filtro if str(f).strip()]
+    validos = {"priorizados", "prox7", "sem_sim", "sem_mercado", "sem_cache"}
+    out: list[str] = []
+    for f in base:
+        if f in validos and f not in out:
+            out.append(f)
+    return out
+
+
+def filtrar_rows_dashboard(
+    rows: list[dict[str, Any]],
+    filtro: str | list[str] | tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """
+    Filtro rápido para o painel principal.
+    Valores válidos de filtro: priorizados | prox7 | sem_sim | sem_mercado | sem_cache.
+    Aceita string única, CSV (``"priorizados,prox7"``) ou lista/tupla.
+    Quando há múltiplos filtros, aplica regra AND.
+    """
+    filtros = _normalizar_filtros_dashboard(filtro)
+    if not filtros:
+        return rows
+    hoje = datetime.now(_TZ_SP).date()
+    fim = hoje + timedelta(days=7)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if not r.get("id"):
+            continue
+        o = _row_to_out(r, hoje=hoje)
+        ok = True
+        for f in filtros:
+            if f == "priorizados" and not _e_prioritario(o):
+                ok = False
+                break
+            if f == "prox7" and not (o.prox_data and hoje <= o.prox_data <= fim):
+                ok = False
+                break
+            if f == "sem_sim" and o.tem_simulacao:
+                ok = False
+                break
+            if f == "sem_mercado" and o.tem_mercado_llm:
+                ok = False
+                break
+            if f == "sem_cache" and o.tem_cache:
+                ok = False
+                break
+        if ok:
+            out.append(r)
+    return out
+
+
+def _fmt_brl_rel(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _fmt_pct_rel(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{float(v) * 100:.1f}%"
+
+
+def gerar_relatorio_html_prioridade_maxima(o: _RowOut) -> str:
+    data_txt = o.prox_data.strftime("%d/%m/%Y") if o.prox_data else "Sem data"
+    status = "ROI >= 50%" if (o.roi_bruto is not None and o.roi_bruto >= _ROI_PRIORIDADE) else (
+        "Lucro >= 500k" if (o.lucro_liq is not None and o.lucro_liq >= _LUCRO_PRIORIDADE) else "Em análise"
+    )
+    local = f"{o.estado} · {o.cidade} · {o.bairro} · {o.tipo_imovel}"
+    link = html.escape(o.url or "", quote=True)
+    link_html = (
+        f'<a href="{link}" target="_blank" rel="noopener noreferrer">{html.escape(o.url)}</a>'
+        if link
+        else "URL não informada"
+    )
+    return f"""<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Relatório - Prioridade Máxima</title>
+  <style>
+    body {{ font-family: Inter, Segoe UI, Arial, sans-serif; background:#0b1220; color:#e2e8f0; margin:0; padding:24px; }}
+    .wrap {{ max-width: 880px; margin:0 auto; }}
+    .card {{ background: linear-gradient(165deg,#0f172a 0%, #111827 100%); border:1px solid #243244; border-radius:14px; padding:16px; }}
+    .h {{ font-size:1.2rem; font-weight:700; margin:0 0 12px 0; }}
+    .meta {{ color:#93c5fd; font-size:0.9rem; margin-bottom:8px; }}
+    .status {{ display:inline-block; border-radius:999px; padding:4px 10px; font-weight:700; background:#34d399; color:#052e2b; margin-bottom:10px; }}
+    .grid {{ display:grid; grid-template-columns:repeat(3,minmax(140px,1fr)); gap:10px; margin-top:10px; }}
+    .k {{ border:1px solid #1f2b3d; border-radius:10px; padding:10px; background:#0b1322; }}
+    .kl {{ font-size:0.75rem; color:#94a3b8; text-transform:uppercase; letter-spacing:.04em; }}
+    .kv {{ font-size:1rem; font-weight:700; margin-top:6px; }}
+    a {{ color:#5eead4; word-break: break-all; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1 class="h">Relatório de Prioridade Máxima</h1>
+      <div class="status">{html.escape(status)}</div>
+      <div class="meta">{html.escape(o.praca_label or "Praça")} · {html.escape(data_txt)}</div>
+      <div><strong>Imóvel:</strong> {html.escape(local)}</div>
+      <div><strong>Endereço:</strong> {html.escape(o.endereco or "Endereço não informado")}</div>
+      <div class="grid">
+        <div class="k"><div class="kl">ROI bruto</div><div class="kv">{_fmt_pct_rel(o.roi_bruto)}</div></div>
+        <div class="k"><div class="kl">Lucro líquido</div><div class="kv">{_fmt_brl_rel(o.lucro_liq)}</div></div>
+        <div class="k"><div class="kl">Score prioridade</div><div class="kv">{o.score_prioridade:.2f}</div></div>
+      </div>
+      <div style="margin-top:14px"><strong>Link do leilão:</strong><br/>{link_html}</div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def gerar_relatorio_html_prioridade_maxima_lote(rows: list[_RowOut]) -> str:
+    itens: list[str] = []
+    for o in rows:
+        data_txt = o.prox_data.strftime("%d/%m/%Y") if o.prox_data else "Sem data"
+        status = "ROI >= 50%" if (o.roi_bruto is not None and o.roi_bruto >= _ROI_PRIORIDADE) else (
+            "Lucro >= 500k" if (o.lucro_liq is not None and o.lucro_liq >= _LUCRO_PRIORIDADE) else "Em análise"
+        )
+        local = f"{o.estado} · {o.cidade} · {o.bairro} · {o.tipo_imovel}"
+        link = html.escape(o.url or "", quote=True)
+        link_html = (
+            f'<a href="{link}" target="_blank" rel="noopener noreferrer">{html.escape(o.url)}</a>'
+            if link
+            else "URL não informada"
+        )
+        foto = html.escape(o.url_foto_imovel or "", quote=True)
+        foto_html = (
+            f'<img src="{foto}" alt="Foto do imóvel" loading="lazy" referrerpolicy="no-referrer" class="foto" />'
+            if foto
+            else '<div class="foto-ph">Sem foto</div>'
+        )
+        itens.append(
+            '<article class="item">'
+            f'<div class="meta">{html.escape(o.praca_label or "Praça")} · {html.escape(data_txt)} · Score {o.score_prioridade:.2f}</div>'
+            f'<div class="status">{html.escape(status)}</div>'
+            f'<div class="foto-wrap">{foto_html}</div>'
+            f'<div><strong>Imóvel:</strong> {html.escape(local)}</div>'
+            f'<div><strong>Endereço:</strong> {html.escape(o.endereco or "Endereço não informado")}</div>'
+            '<div class="grid">'
+            f'<div class="k"><div class="kl">ROI bruto</div><div class="kv">{_fmt_pct_rel(o.roi_bruto)}</div></div>'
+            f'<div class="k"><div class="kl">Lucro líquido</div><div class="kv">{_fmt_brl_rel(o.lucro_liq)}</div></div>'
+            f'<div class="k"><div class="kl">Status</div><div class="kv">{html.escape(status)}</div></div>'
+            "</div>"
+            f'<div style="margin-top:10px"><strong>Link do leilão:</strong><br/>{link_html}</div>'
+            "</article>"
+        )
+    corpo = "".join(itens) if itens else '<p class="vazio">Nenhum imóvel prioritário no filtro atual.</p>'
+    return f"""<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Relatório Consolidado - Prioridade Máxima</title>
+  <style>
+    body {{ font-family: Inter, Segoe UI, Arial, sans-serif; background:#0b1220; color:#e2e8f0; margin:0; padding:24px; }}
+    .wrap {{ max-width: 980px; margin:0 auto; }}
+    .top {{ margin-bottom:14px; }}
+    .h {{ font-size:1.25rem; font-weight:700; margin:0; }}
+    .sub {{ color:#94a3b8; margin-top:6px; }}
+    .item {{ background: linear-gradient(165deg,#0f172a 0%, #111827 100%); border:1px solid #243244; border-radius:14px; padding:14px; margin:0 0 12px 0; }}
+    .meta {{ color:#93c5fd; font-size:0.88rem; margin-bottom:8px; }}
+    .status {{ display:inline-block; border-radius:999px; padding:4px 10px; font-weight:700; background:#34d399; color:#052e2b; margin-bottom:10px; }}
+    .foto-wrap {{ margin: 0 0 10px 0; }}
+    .foto {{ width: 100%; max-width: 360px; height: 200px; object-fit: cover; border-radius: 10px; border:1px solid #243244; display:block; }}
+    .foto-ph {{ width: 100%; max-width: 360px; height: 200px; border-radius:10px; border:1px dashed #334155; display:flex; align-items:center; justify-content:center; color:#94a3b8; background:#0b1322; }}
+    .grid {{ display:grid; grid-template-columns:repeat(3,minmax(140px,1fr)); gap:10px; margin-top:10px; }}
+    .k {{ border:1px solid #1f2b3d; border-radius:10px; padding:10px; background:#0b1322; }}
+    .kl {{ font-size:0.75rem; color:#94a3b8; text-transform:uppercase; letter-spacing:.04em; }}
+    .kv {{ font-size:1rem; font-weight:700; margin-top:6px; }}
+    .vazio {{ color:#94a3b8; }}
+    a {{ color:#5eead4; word-break: break-all; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <h1 class="h">Relatório Consolidado - Prioridade Máxima</h1>
+      <div class="sub">Total de imóveis no relatório: {len(rows)}</div>
+    </header>
+    {corpo}
+  </div>
+</body>
+</html>
+"""
 
 
 CSS_DASHBOARD_INICIO = """
