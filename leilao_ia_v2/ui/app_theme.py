@@ -95,6 +95,20 @@ section[data-testid="stSidebar"] h3 {
   margin: 0 0 0.2rem 0 !important;
   line-height: 1.25 !important;
 }
+.lnav-card-title {
+  margin: 0 0 0.35rem 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #9fb2c8;
+}
+.lnav-card-subtitle {
+  margin: -0.12rem 0 0.35rem 0;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: #8ca1bb;
+}
 .lnav-brand-wrap { margin: 0 0 0.25rem 0; }
 .lnav-brand-t {
   font-size: 1.08rem; font-weight: 750; letter-spacing: -0.02em; margin: 0 0 0.1rem 0; line-height: 1.2;
@@ -113,6 +127,35 @@ p.lnav-sec {
   color: hsl(215 14% 58%);
   margin: 0.35rem 0 0.4rem 0;
   font-weight: 600;
+}
+section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+  background: linear-gradient(160deg, rgba(20, 28, 44, 0.75) 0%, rgba(12, 18, 32, 0.62) 100%) !important;
+  border-radius: 14px !important;
+  border: 1px solid rgba(110, 231, 183, 0.15) !important;
+  box-shadow: 0 10px 28px -18px rgba(0, 0, 0, 0.65) !important;
+  padding: 0.3rem 0.45rem 0.4rem !important;
+  margin-bottom: 0.42rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] details {
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(8, 12, 24, 0.3);
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+  font-size: 0.76rem !important;
+  color: #c9d5e5 !important;
+  font-weight: 600 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary:hover {
+  color: #e2ebf7 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+  border-radius: 10px !important;
+  border: 1px dashed rgba(110, 231, 183, 0.3) !important;
+  background: linear-gradient(180deg, rgba(20, 28, 44, 0.6) 0%, rgba(12, 18, 32, 0.45) 100%) !important;
+}
+section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] > div {
+  font-size: 0.7rem !important;
 }
 section[data-testid="stSidebar"] [data-testid="stButton"] > button {
   min-height: 2.45rem;
@@ -135,6 +178,24 @@ section[data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
 section[data-testid="stSidebar"] [data-testid="stButton"] > button[kind="primary"] {
   border-color: rgba(45, 212, 191, 0.42) !important;
   box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.12), 0 10px 28px -12px rgba(0,0,0,.6) !important;
+  background: linear-gradient(160deg, rgba(16, 185, 129, 0.26) 0%, rgba(20, 83, 45, 0.34) 100%) !important;
+  color: #ecfdf5 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stButton"] > button p {
+  font-size: 0.76rem !important;
+  font-weight: 620 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stColumn"] [data-testid="stButton"] > button {
+  min-height: 3.2rem !important;
+  justify-content: center !important;
+  text-align: center !important;
+  border-radius: 16px !important;
+  padding: 0.45rem 0.45rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stColumn"] [data-testid="stButton"] > button p {
+  width: 100%;
+  text-align: center !important;
+  line-height: 1.25 !important;
 }
 /* Formulários na sidebar: mesma densidade de labels e inputs que a stMain */
 section[data-testid="stSidebar"] [data-testid="stNumberInput"] [data-testid="stWidgetLabel"] p,

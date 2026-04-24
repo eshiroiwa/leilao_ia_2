@@ -20,6 +20,7 @@ from leilao_ia_v2.exceptions import (
 )
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
 from leilao_ia_v2.pipeline.ingestao_edital import executar_ingestao_edital
+from leilao_ia_v2.pipeline.ingestao_lote_csv import processar_lote_csv_leiloes, resultado_lote_csv_para_dict
 from leilao_ia_v2.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
@@ -111,4 +112,46 @@ def tool_ingestir_leilao_por_url(
         )
     except Exception as e:
         logger.exception("tool_ingestir_leilao_por_url")
+        return json.dumps({"ok": False, "erro": str(e)}, ensure_ascii=False)
+
+
+@tool(show_result=True)
+def tool_processar_leiloes_csv(
+    caminho_csv: str,
+    ignorar_cache_firecrawl: bool = False,
+    max_itens: int = 0,
+    max_chamadas_api_firecrawl_por_item: int = 15,
+) -> str:
+    """
+    Processa lote CSV de leiloes (com colunas variaveis, desde que tenha URL).
+
+    Fase 1: usa dados do arquivo para gravar/atualizar leilao, montar cache e calcular ROI pos-cache.
+    Nao faz scrape/LLM do edital nesta etapa.
+    """
+    cli = get_supabase_client()
+    try:
+        limite = int(max_itens or 0)
+    except (TypeError, ValueError):
+        limite = 0
+    if limite <= 0:
+        limite = None  # type: ignore[assignment]
+    try:
+        max_fc_item = int(max_chamadas_api_firecrawl_por_item or 0)
+    except (TypeError, ValueError):
+        max_fc_item = 15
+    if max_fc_item <= 0:
+        max_fc_item = 0
+
+    try:
+        r = processar_lote_csv_leiloes(
+            caminho_csv,
+            cli,
+            ignorar_cache_firecrawl=ignorar_cache_firecrawl,
+            max_itens=limite,
+            max_chamadas_api_firecrawl_por_item=max_fc_item,
+        )
+        out: dict[str, Any] = {"ok": True, **resultado_lote_csv_para_dict(r)}
+        return json.dumps(out, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.exception("tool_processar_leiloes_csv")
         return json.dumps({"ok": False, "erro": str(e)}, ensure_ascii=False)

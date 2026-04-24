@@ -345,7 +345,50 @@ def _tentar_geocodificar_sem_coordenadas(
     cidade: str,
     estado_sigla: str,
     bairro_fb: str,
+    bairro_alvo: str = "",
 ) -> int:
+    def _rank_bairro(a: dict[str, Any]) -> tuple[int, int]:
+        """Prioriza anúncios sem geo do mesmo bairro-alvo."""
+        b_alvo = _bairro_normalizado_para_match(bairro_alvo or bairro_fb)
+        b_an = _bairro_normalizado_para_match(a.get("bairro"))
+        if b_alvo and b_an and b_alvo == b_an:
+            return (0, 0)
+        if b_an:
+            return (1, 0)
+        return (2, 0)
+
+    def _centroide_bairro(cidade_v: str, uf_v: str, bairro_v: str) -> Optional[tuple[float, float]]:
+        bq = str(bairro_v or "").strip()
+        if not bq:
+            return None
+        try:
+            resp = (
+                client.table("anuncios_mercado")
+                .select("latitude,longitude")
+                .eq("estado", str(uf_v or "").strip()[:2].upper())
+                .ilike("cidade", f"%{str(cidade_v or '').strip()}%")
+                .ilike("bairro", f"%{bq}%")
+                .limit(400)
+                .execute()
+            )
+        except Exception:
+            logger.debug("fallback centroide bairro falhou na query", exc_info=True)
+            return None
+        rows = list(getattr(resp, "data", None) or [])
+        lats: list[float] = []
+        lons: list[float] = []
+        for r in rows:
+            try:
+                la = float(r.get("latitude"))
+                lo = float(r.get("longitude"))
+            except (TypeError, ValueError):
+                continue
+            lats.append(la)
+            lons.append(lo)
+        if not lats:
+            return None
+        return (sum(lats) / len(lats), sum(lons) / len(lons))
+
     sem: list[dict[str, Any]] = []
     for r in candidatos:
         la, lo = coords_de_anuncio(r)
@@ -353,6 +396,7 @@ def _tentar_geocodificar_sem_coordenadas(
             sem.append(r)
     if not sem:
         return 0
+    sem.sort(key=_rank_bairro)
     batch: list[dict[str, Any]] = []
     for r in sem[:MAX_ANUNCIOS_GEOCODE]:
         batch.append(
@@ -387,6 +431,24 @@ def _tentar_geocodificar_sem_coordenadas(
                 atualizados += 1
             except Exception:
                 logger.debug("Update geo anúncio %s falhou", aid, exc_info=True)
+        elif aid:
+            # Último recurso: centroide do bairro (menos preciso que rua, mas melhor que sem coordenadas).
+            c_b = _centroide_bairro(
+                str(r.get("cidade") or cidade),
+                str(r.get("estado") or estado_sigla),
+                str(r.get("bairro") or bairro_fb),
+            )
+            if c_b is not None:
+                try:
+                    anuncios_mercado_repo.atualizar_geolocalizacao(
+                        client,
+                        str(aid),
+                        float(c_b[0]),
+                        float(c_b[1]),
+                    )
+                    atualizados += 1
+                except Exception:
+                    logger.debug("Update geo anúncio por centroide bairro %s falhou", aid, exc_info=True)
     return atualizados
 
 
@@ -720,6 +782,75 @@ def _cache_row_principal_para_tipo(row: dict[str, Any], tipo_l: str) -> bool:
     return str(row.get("tipo_imovel") or "").strip().lower() == tipo_l.strip().lower()
 
 
+def _bairro_normalizado_para_match(v: Any) -> str:
+    s = slug_vivareal(str(v or "").strip())
+    return "" if s in ("", "-") else s
+
+
+def _contar_amostras_mesmo_bairro(amostras: list[dict[str, Any]], bairro_referencia: str) -> int:
+    b_ref = _bairro_normalizado_para_match(bairro_referencia)
+    if not b_ref:
+        return 0
+    n = 0
+    for a in amostras:
+        if _bairro_normalizado_para_match(a.get("bairro")) == b_ref:
+            n += 1
+    return n
+
+
+def _ordenar_amostras_priorizando_mesmo_bairro(
+    amostras: list[dict[str, Any]],
+    bairro_referencia: str,
+) -> list[dict[str, Any]]:
+    b_ref = _bairro_normalizado_para_match(bairro_referencia)
+    if not b_ref:
+        return list(amostras)
+    mesmos: list[dict[str, Any]] = []
+    outros: list[dict[str, Any]] = []
+    for a in amostras:
+        if _bairro_normalizado_para_match(a.get("bairro")) == b_ref:
+            mesmos.append(a)
+        else:
+            outros.append(a)
+    return mesmos + outros
+
+
+def _ordenar_candidatos_priorizando_mesmo_bairro(
+    candidatos: list[dict[str, Any]],
+    bairro_leilao: str,
+) -> list[dict[str, Any]]:
+    """Mantém candidatos do mesmo bairro à frente; restante segue ordem original."""
+    b_ref = _bairro_normalizado_para_match(bairro_leilao)
+    if not b_ref:
+        return list(candidatos)
+    mesmos: list[dict[str, Any]] = []
+    outros: list[dict[str, Any]] = []
+    for c in candidatos:
+        b_c = _bairro_normalizado_para_match(c.get("bairro"))
+        if b_c and b_c == b_ref:
+            mesmos.append(c)
+        else:
+            outros.append(c)
+    return mesmos + outros
+
+
+def _diagnostico_reuso_bairro(cache_row: dict[str, Any], bairro_leilao: str) -> str:
+    """Classifica se o reuso foi no mesmo bairro ou fallback em bairro distinto."""
+    b_le = str(bairro_leilao or "").strip()
+    b_ca = str(cache_row.get("bairro") or "").strip()
+    n_le = _bairro_normalizado_para_match(b_le)
+    n_ca = _bairro_normalizado_para_match(b_ca)
+    if n_le and n_ca:
+        if n_le == n_ca:
+            return "mesmo_bairro"
+        return f"fallback_outro_bairro (leilao='{b_le or '-'}' cache='{b_ca or '-'}')"
+    if not n_le:
+        return "bairro_leilao_ausente"
+    if not n_ca:
+        return "bairro_cache_ausente"
+    return "bairro_indeterminado"
+
+
 def _amostras_reuso_validas(
     client: Client,
     cache_row: dict[str, Any],
@@ -731,6 +862,8 @@ def _amostras_reuso_validas(
     raio_km: float,
     aplicar_faixa_area_edital: bool = True,
     leilao: dict[str, Any] | None = None,
+    bairro_referencia: str = "",
+    min_amostras_mesmo_bairro: int = 0,
 ) -> Optional[list[dict[str, Any]]]:
     ids = _parse_csv_anuncio_ids(cache_row.get("anuncios_ids"))
     if not ids:
@@ -754,6 +887,10 @@ def _amostras_reuso_validas(
         aplicar_faixa_area_edital=aplicar_faixa_area_edital,
     )
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, None)
+    if int(min_amostras_mesmo_bairro or 0) > 0:
+        n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro_referencia)
+        if n_mesmo_bairro < int(min_amostras_mesmo_bairro):
+            return None
     if len(amostras) >= CACHE_MONTE_MIN_EXIGIDO:
         return amostras
     return None
@@ -791,6 +928,7 @@ def _montar_amostras_para_tipos(
     Com ``leilao``, remove anúncios de listagem do próprio lance (1ª/2ª praça + sinais).
     """
     min_n = get_busca_mercado_parametros().min_amostras_cache
+    min_mesmo_bairro = max(0, int(min_n))
     aplicar_faixa = not _tipos_somente_terreno_ou_lote(tipos)
     msg = ""
     tipos_txt = ",".join(str(t).strip() for t in tipos if str(t).strip()) or tipo_imovel_coleta
@@ -819,14 +957,21 @@ def _montar_amostras_para_tipos(
         candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
     )
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
+    n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
+    linhas.append(f"bairro_alvo: '{bairro or '-'}' | amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})")
 
-    if len(amostras) >= min_n:
+    if len(amostras) >= min_n and n_mesmo_bairro >= min_mesmo_bairro:
         linhas.append("Resultado: amostras suficientes só com dados já no BD (sem geocode nem Firecrawl).")
         return amostras, False, msg, "\n".join(linhas), 0
 
     if pode_geocode:
         _tentar_geocodificar_sem_coordenadas(
-            client, candidatos, cidade=cidade, estado_sigla=estado_sigla, bairro_fb=bairro
+            client,
+            candidatos,
+            cidade=cidade,
+            estado_sigla=estado_sigla,
+            bairro_fb=bairro,
+            bairro_alvo=bairro,
         )
         candidatos = anuncios_mercado_repo.listar_por_cidade_estado_tipos(
             client,
@@ -849,7 +994,11 @@ def _montar_amostras_para_tipos(
             candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
         )
         amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
-        if len(amostras) >= min_n:
+        n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
+        linhas.append(
+            f"após_geocode: amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})"
+        )
+        if len(amostras) >= min_n and n_mesmo_bairro >= min_mesmo_bairro:
             linhas.append("Resultado: amostras suficientes após geocode (sem Firecrawl).")
             return amostras, False, msg, "\n".join(linhas), 0
 
@@ -897,7 +1046,11 @@ def _montar_amostras_para_tipos(
             candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
         )
         amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
-        if len(amostras) >= min_n:
+        n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
+        linhas.append(
+            f"após_firecrawl: amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})"
+        )
+        if len(amostras) >= min_n and n_mesmo_bairro >= min_mesmo_bairro:
             linhas.append("Resultado: amostras suficientes após Firecrawl Search.")
             return amostras, True, msg, "\n".join(linhas), n_api_fc
 
@@ -905,11 +1058,16 @@ def _montar_amostras_para_tipos(
         linhas.append("Firecrawl Search: omitido (orçamento de chamadas API esgotado para esta rodada).")
 
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
+    n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
     if len(amostras) >= CACHE_MONTE_MIN_EXIGIDO:
         linhas.append(
             f"Resultado: {len(amostras)} amostra(s) após todas as etapas (mínimo configurado p/ coleta={min_n}; "
             "montagem de cache permitida com volume reduzido se <5 amostras no segmento)."
         )
+        if n_mesmo_bairro < min_mesmo_bairro:
+            linhas.append(
+                "Observação: sem amostras suficientes do bairro alvo; cache montado com fallback de bairros próximos."
+            )
         return amostras, False, "", "\n".join(linhas), n_api_fc
 
     msg = mensagem_com_dica_ajuste_busca(
@@ -937,9 +1095,13 @@ def _inserir_caches_residenciais_fatiados(
     if not amostras:
         return [], "Lista de amostras vazia."
     cap_p, cap_l = _caps_amostras_cache_mercado()
+    amostras_ordenadas = _ordenar_amostras_priorizando_mesmo_bairro(
+        amostras,
+        str(leilao.get("bairro") or ""),
+    )
     tc_o = normalizar_tipo_casa(leilao.get("tipo_casa"), tipo_l)
     tipo_casa_prim = str(tc_o) if tc_o else "-"
-    pri, secs = _fatias_amostras_cache(amostras, cap_p, cap_l)
+    pri, secs = _fatias_amostras_cache(amostras_ordenadas, cap_p, cap_l)
     out: list[dict[str, Any]] = []
 
     row_p = _montar_payload_cache(
@@ -1139,13 +1301,28 @@ def resolver_cache_media_pos_ingestao(
         estado_sigla=estado_sigla,
         cidade=cidade,
     )
+    candidatos_ordenados = _ordenar_candidatos_priorizando_mesmo_bairro(candidatos, bairro)
 
     principal_id: Optional[str] = None
     principal_row: Optional[dict[str, Any]] = None
-    for c in candidatos:
+    for c in candidatos_ordenados:
         if not _cache_row_principal_para_tipo(c, tipo_l):
             continue
-        if _amostras_reuso_validas(client, c, lat0, lon0, area_ref, [tipo_l], raio_km=raio, leilao=leilao) is not None:
+        if (
+            _amostras_reuso_validas(
+                client,
+                c,
+                lat0,
+                lon0,
+                area_ref,
+                [tipo_l],
+                raio_km=raio,
+                leilao=leilao,
+                bairro_referencia=bairro,
+                min_amostras_mesmo_bairro=min_n,
+            )
+            is not None
+        ):
             principal_id = str(c.get("id") or "").strip() or None
             principal_row = c
             break
@@ -1153,7 +1330,7 @@ def resolver_cache_media_pos_ingestao(
     terreno_id: Optional[str] = None
     terreno_row: Optional[dict[str, Any]] = None
     if tipo_l in _TIPOS_CASA_SOBRADO:
-        for c in candidatos:
+        for c in candidatos_ordenados:
             if not _cache_row_segmento_terreno(c):
                 continue
             if (
@@ -1167,6 +1344,8 @@ def resolver_cache_media_pos_ingestao(
                     raio_km=raio,
                     aplicar_faixa_area_edital=False,
                     leilao=leilao,
+                    bairro_referencia=bairro,
+                    min_amostras_mesmo_bairro=min_n,
                 )
                 is not None
             ):
@@ -1176,6 +1355,12 @@ def resolver_cache_media_pos_ingestao(
 
     reutil_principal = principal_id is not None
     reutil_terreno = terreno_id is not None
+    diag_reuso_principal = (
+        _diagnostico_reuso_bairro(principal_row, bairro) if isinstance(principal_row, dict) else ""
+    )
+    diag_reuso_terreno = (
+        _diagnostico_reuso_bairro(terreno_row, bairro) if isinstance(terreno_row, dict) else ""
+    )
 
     caches: list[dict[str, Any]] = []
     usou_fc = False
@@ -1328,13 +1513,17 @@ def resolver_cache_media_pos_ingestao(
     msg = f"Aplicado(s) {nseg} segmento(s) de cache ao imóvel."
     log_ok: list[str] = [ctx_base]
     if reutil_principal:
-        log_ok.append(f"Principal: reutilizado cache id={principal_id}")
+        log_ok.append(
+            f"Principal: reutilizado cache id={principal_id} | reuso_bairro={diag_reuso_principal or 'indefinido'}"
+        )
     elif diag_principal:
         log_ok.append("--- Principal (montado) ---")
         log_ok.append(diag_principal)
     if tipo_l in _TIPOS_CASA_SOBRADO:
         if reutil_terreno:
-            log_ok.append(f"Terrenos: reutilizado cache id={terreno_id}")
+            log_ok.append(
+                f"Terrenos: reutilizado cache id={terreno_id} | reuso_bairro={diag_reuso_terreno or 'indefinido'}"
+            )
         elif diag_terrenos.strip():
             log_ok.append("--- Terrenos ---")
             log_ok.append(diag_terrenos)

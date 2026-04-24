@@ -75,6 +75,46 @@ def test_metricas_pos_cache_de_leilao_row_respeita_terreno():
     assert mt["lucro_bruto_projetado"] > ma["lucro_bruto_projetado"]
 
 
+def test_metricas_pos_cache_de_leilao_row_prioriza_lance_2_praca():
+    row = {
+        "valor_mercado_estimado": 400_000.0,
+        "area_util": 50.0,
+        "valor_lance_1_praca": 200_000.0,
+        "valor_lance_2_praca": 150_000.0,
+        "url_leilao": "https://exemplo.com/leilao/1",
+    }
+    m = metricas_pos_cache_de_leilao_row(row)
+    assert m is not None
+    esperado = metricas_lucro_roi_pos_cache(
+        400_000.0,
+        150_000.0,
+        50.0,
+        aplica_5_leiloeiro=True,
+    )
+    assert m["lucro_bruto_projetado"] == esperado["lucro_bruto_projetado"]
+    assert m["roi_projetado"] == esperado["roi_projetado"]
+
+
+def test_metricas_pos_cache_de_leilao_row_usa_lance_1_quando_nao_tem_2_praca():
+    row = {
+        "valor_mercado_estimado": 400_000.0,
+        "area_util": 50.0,
+        "valor_lance_1_praca": 180_000.0,
+        "valor_lance_2_praca": None,
+        "url_leilao": "https://exemplo.com/leilao/1",
+    }
+    m = metricas_pos_cache_de_leilao_row(row)
+    assert m is not None
+    esperado = metricas_lucro_roi_pos_cache(
+        400_000.0,
+        180_000.0,
+        50.0,
+        aplica_5_leiloeiro=True,
+    )
+    assert m["lucro_bruto_projetado"] == esperado["lucro_bruto_projetado"]
+    assert m["roi_projetado"] == esperado["roi_projetado"]
+
+
 def test_roi_e_lance_max_com_leiloeiro():
     # V=1_000_000, L=400_000, 80m², com 5% leiloeiro; r = 2% registro; saída com 6% corretagem s/ venda
     roi, lmx = calcular_roi_e_lance_max(1_000_000.0, 400_000.0, 80.0, aplica_5=True)

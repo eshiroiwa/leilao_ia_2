@@ -185,13 +185,26 @@ def imovel_sem_reforma_pos_cache(row: dict[str, Any]) -> bool:
 
 
 def _lance_referencia_brl(row: dict[str, Any]) -> float:
-    for k in ("valor_lance_1_praca", "valor_lance_2_praca", "valor_arrematacao"):
-        try:
-            v = float(row.get(k) or 0.0)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            continue
+    try:
+        l1 = float(row.get("valor_lance_1_praca") or 0.0)
+    except (TypeError, ValueError):
+        l1 = 0.0
+    try:
+        l2 = float(row.get("valor_lance_2_praca") or 0.0)
+    except (TypeError, ValueError):
+        l2 = 0.0
+    if l1 > 0 and l2 > 0:
+        return l2
+    if l2 > 0:
+        return l2
+    if l1 > 0:
+        return l1
+    try:
+        va = float(row.get("valor_arrematacao") or 0.0)
+        if va > 0:
+            return va
+    except (TypeError, ValueError):
+        pass
     return 0.0
 
 

@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from leilao_ia_v2.agents.agente_ingestao_edital import tool_ingestir_leilao_por_url
+from leilao_ia_v2.agents.agente_ingestao_edital import (
+    tool_ingestir_leilao_por_url,
+    tool_processar_leiloes_csv,
+)
 
 
 def test_tool_retorna_json_sem_conteudo_edital():
@@ -31,3 +34,28 @@ def test_tool_retorna_json_duplicata():
             assert data.get("ok") is False
             assert data.get("id_existente") == "1"
             assert data.get("url_leilao") == "https://x"
+
+
+def test_tool_processar_csv_retorna_resumo_json():
+    with patch("leilao_ia_v2.agents.agente_ingestao_edital.get_supabase_client"):
+        with patch("leilao_ia_v2.agents.agente_ingestao_edital.processar_lote_csv_leiloes") as proc:
+            from leilao_ia_v2.pipeline.ingestao_lote_csv import (
+                LinhaLoteResultado,
+                ResultadoLoteCsv,
+            )
+
+            proc.return_value = ResultadoLoteCsv(
+                arquivo="/tmp/x.csv",
+                total_linhas_csv=3,
+                total_urls_validas=2,
+                processados=2,
+                ok=1,
+                erro=1,
+                ignorados=1,
+                resultados=[LinhaLoteResultado(linha=2, url="https://x", status="ok", leilao_id="id1")],
+            )
+            out = tool_processar_leiloes_csv.entrypoint("/tmp/x.csv")  # type: ignore[union-attr]
+            data = json.loads(out)
+            assert data.get("ok") is True
+            assert data.get("processados") == 2
+            assert data.get("ok_itens") == 1

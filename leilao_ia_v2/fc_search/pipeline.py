@@ -188,6 +188,7 @@ def complementar_anuncios_firecrawl_search(
         tipo_imovel_fallback=tipo_fb,
         origem_metadados="firecrawl_search_complemento",
         leilao_row=row,
+        exigir_geolocalizacao=True,
     )
     if salvos:
         logger.info(

@@ -15,11 +15,15 @@ Recursos:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import threading
 import time
 import unicodedata
+import urllib.parse
+import urllib.request
 from functools import lru_cache
 from typing import Optional
 
@@ -34,6 +38,7 @@ _MIN_INTERVAL_SEC = 1.1
 
 _geocoder = None
 _geocoder_lock = threading.Lock()
+_GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
 
 def _get_geocoder():
@@ -74,6 +79,46 @@ def _geocode_cached(query: str) -> Optional[tuple[float, float]]:
 
 
 @lru_cache(maxsize=4096)
+def _geocode_google_cached(query: str) -> Optional[tuple[float, float]]:
+    """Geocodificação texto livre via Google Maps Geocoding API."""
+    key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
+    if not key:
+        return None
+    params = urllib.parse.urlencode(
+        {
+            "address": query,
+            "key": key,
+            "language": "pt-BR",
+            "region": "br",
+        }
+    )
+    req = urllib.request.Request(
+        f"{_GOOGLE_GEOCODE_URL}?{params}",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        status = str(data.get("status") or "").strip().upper()
+        if status != "OK":
+            logger.debug("Google Geocoding status=%s para query texto livre", status)
+            return None
+        rs = list(data.get("results") or [])
+        if not rs:
+            return None
+        loc = ((rs[0].get("geometry") or {}).get("location") or {})
+        lat = loc.get("lat")
+        lng = loc.get("lng")
+        if lat is None or lng is None:
+            return None
+        return (float(lat), float(lng))
+    except Exception:
+        logger.debug("Google Geocoding falhou (texto livre)", exc_info=True)
+        return None
+
+
+@lru_cache(maxsize=4096)
 def _geocode_structured_cached(
     street: str, city: str, state: str,
 ) -> Optional[tuple[float, float]]:
@@ -94,6 +139,74 @@ def _geocode_structured_cached(
     except (GeocoderTimedOut, GeocoderUnavailable, GeocoderServiceError, ValueError, TypeError):
         logger.debug("Nominatim structured falhou: %s", q, exc_info=True)
     return None
+
+
+@lru_cache(maxsize=4096)
+def _geocode_google_structured_cached(
+    street: str,
+    city: str,
+    state: str,
+) -> Optional[tuple[float, float]]:
+    """Geocodificação estruturada via Google Maps Geocoding API."""
+    key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
+    if not key:
+        return None
+    parts = [p for p in [street.strip(), city.strip(), state.strip(), "Brasil"] if p]
+    if not parts:
+        return None
+    params = urllib.parse.urlencode(
+        {
+            "address": ", ".join(parts),
+            "components": "country:BR",
+            "key": key,
+            "language": "pt-BR",
+            "region": "br",
+        }
+    )
+    req = urllib.request.Request(
+        f"{_GOOGLE_GEOCODE_URL}?{params}",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        status = str(data.get("status") or "").strip().upper()
+        if status != "OK":
+            logger.debug("Google Geocoding status=%s para query estruturada", status)
+            return None
+        rs = list(data.get("results") or [])
+        if not rs:
+            return None
+        loc = ((rs[0].get("geometry") or {}).get("location") or {})
+        lat = loc.get("lat")
+        lng = loc.get("lng")
+        if lat is None or lng is None:
+            return None
+        return (float(lat), float(lng))
+    except Exception:
+        logger.debug("Google Geocoding falhou (estruturado)", exc_info=True)
+        return None
+
+
+def _geocode_by_provider(query: str) -> Optional[tuple[float, float]]:
+    provider = (os.getenv("GEOCODING_PROVIDER") or "nominatim").strip().lower()
+    if provider == "google":
+        r = _geocode_google_cached(query)
+        if r is not None:
+            return r
+        return _geocode_cached(query)
+    return _geocode_cached(query)
+
+
+def _geocode_structured_by_provider(street: str, city: str, state: str) -> Optional[tuple[float, float]]:
+    provider = (os.getenv("GEOCODING_PROVIDER") or "nominatim").strip().lower()
+    if provider == "google":
+        r = _geocode_google_structured_cached(street, city, state)
+        if r is not None:
+            return r
+        return _geocode_structured_cached(street, city, state)
+    return _geocode_structured_cached(street, city, state)
 
 
 _UF_PARA_NOME_ESTADO: dict[str, str] = {
@@ -177,10 +290,10 @@ def _geocodificar_tentativas_bairro_cidade(
         if (estado_nome or ufx)
         else f"{b}, bairro de {c}, Brasil",
     ):
-        result = _geocode_cached(q)
+        result = _geocode_by_provider(q)
         if result is not None:
             return result
-    return _geocode_structured_cached("", c + " " + b, estado_nome)
+    return _geocode_structured_by_provider("", c + " " + b, estado_nome)
 
 
 def _corrigir_coordenada_hub_sp_se_aplicavel(
@@ -242,7 +355,7 @@ def geocodificar_endereco(
             return result
 
     if logr and cid:
-        result = _geocode_structured_cached(logr, cid, estado_nome)
+        result = _geocode_structured_by_provider(logr, cid, estado_nome)
         if result is not None:
             result = _corrigir_coordenada_hub_sp_se_aplicavel(
                 result,
@@ -258,7 +371,7 @@ def geocodificar_endereco(
         if uf:
             freetext_parts.append(uf)
         freetext_parts.append("Brasil")
-        result = _geocode_cached(", ".join(freetext_parts))
+        result = _geocode_by_provider(", ".join(freetext_parts))
         if result is not None:
             result = _corrigir_coordenada_hub_sp_se_aplicavel(
                 result,
@@ -280,7 +393,7 @@ def geocodificar_endereco(
             if uf:
                 fallback_parts.append(uf)
             fallback_parts.append("Brasil")
-            result = _geocode_cached(", ".join(fallback_parts))
+            result = _geocode_by_provider(", ".join(fallback_parts))
             if result is not None:
                 return result
 
@@ -299,7 +412,7 @@ def geocodificar_texto_livre(endereco: str) -> Optional[tuple[float, float]]:
     low = q.lower()
     if "brasil" not in low and "brazil" not in low:
         q = f"{q}, Brasil"
-    return _geocode_cached(q)
+    return _geocode_by_provider(q)
 
 
 # ---------------------------------------------------------------------------

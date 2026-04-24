@@ -18,6 +18,9 @@ import html
 import json
 import statistics
 import sys
+import tempfile
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -51,6 +54,11 @@ from leilao_ia_v2.config.busca_mercado_parametros import (
     parametros_de_session_state,
 )
 from leilao_ia_v2.pipeline.ingestao_edital import executar_ingestao_edital
+from leilao_ia_v2.pipeline.ingestao_lote_csv import (
+    processar_lote_csv_leiloes,
+    resultado_lote_csv_para_dict,
+    resumir_csv_leiloes,
+)
 from leilao_ia_v2.schemas.operacao_simulacao import (
     ModoReforma,
     ModoValorVenda,
@@ -63,6 +71,7 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
 )
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
 from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS as _PAGE_CSS
+from leilao_ia_v2.ui.lote_jobs import escolher_job_referencia, progresso_job
 from leilao_ia_v2.ui.sim_form_compact import (
     W_BRL,
     W_BRL_MED,
@@ -127,11 +136,24 @@ from leilao_ia_v2.services.cache_media_leilao import (
     resolver_cache_media_pos_ingestao,
 )
 from leilao_ia_v2.services.geocoding import geocodificar_endereco, geocodificar_texto_livre
-from leilao_ia_v2.services.saldos_providers import buscar_saldo_firecrawl_cached, invalidar_cache_saldos
+from leilao_ia_v2.services.saldos_providers import (
+    buscar_gastos_google_maps_mes_cached,
+    buscar_saldo_firecrawl_cached,
+    invalidar_cache_saldos,
+    resumo_google_maps_para_ui,
+)
 from leilao_ia_v2.supabase_client import get_supabase_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+@st.cache_resource(show_spinner=False)
+def _ing_lote_runtime() -> dict[str, Any]:
+    """
+    Estado de jobs em background persistente entre reruns do Streamlit.
+    Sem isso, progresso/estado somem a cada rerun.
+    """
+    return {"lock": threading.Lock(), "jobs": {}}
 
 
 # Cards na área principal: sem lat/lon (mapa) e sem ultima_extracao_llm_modelo.
@@ -564,6 +586,72 @@ _MAPA_CORES_CACHE: tuple[tuple[str, str], ...] = (
     ("#b45309", "#fcd34d"),  # âmbar / ouro
     ("#3730a3", "#a5b4fc"),  # índigo / lavanda
 )
+
+
+_MAPA_MAX_PONTOS_COMPARAVEIS = 1200
+_MAPA_MAX_PONTOS_RESUMO = 1800
+
+
+def _agrupar_pontos_comparaveis_para_mapa(
+    pontos: list[tuple[float, float, str, str, str, str]],
+) -> list[tuple[float, float, str, str, str, str, int]]:
+    """
+    Agrupa comparáveis no mesmo ponto visual (lat/lon + cor), reduzindo sobrecarga do mapa.
+    Retorna: (lat, lon, tip, url, stroke, fill, qtd_no_ponto).
+    """
+    bucket: dict[tuple[float, float, str, str], dict[str, Any]] = {}
+    for fa, fo, tip, url, stroke, fill in pontos:
+        k = (round(float(fa), 6), round(float(fo), 6), str(stroke), str(fill))
+        row = bucket.get(k)
+        if row is None:
+            bucket[k] = {
+                "lat": float(fa),
+                "lon": float(fo),
+                "tip": str(tip),
+                "url": str(url),
+                "stroke": str(stroke),
+                "fill": str(fill),
+                "n": 1,
+            }
+            continue
+        row["n"] = int(row.get("n") or 0) + 1
+        if not str(row.get("url") or "").strip() and str(url or "").strip():
+            row["url"] = str(url)
+    out: list[tuple[float, float, str, str, str, str, int]] = []
+    for v in bucket.values():
+        out.append(
+            (
+                float(v["lat"]),
+                float(v["lon"]),
+                str(v["tip"]),
+                str(v["url"]),
+                str(v["stroke"]),
+                str(v["fill"]),
+                int(v["n"]),
+            )
+        )
+    return out
+
+
+def _agrupar_pontos_resumo_para_mapa(
+    pts: list[tuple[dict[str, Any], float, float]],
+) -> list[tuple[dict[str, Any], float, float, int]]:
+    """
+    Agrupa leilões por coordenada no mapa-resumo para reduzir número de marcadores.
+    Retorna: (row_exemplo, lat, lon, quantidade_no_ponto).
+    """
+    bucket: dict[tuple[float, float], dict[str, Any]] = {}
+    for r, fa, fo in pts:
+        k = (round(float(fa), 6), round(float(fo), 6))
+        row = bucket.get(k)
+        if row is None:
+            bucket[k] = {"row": r, "lat": float(fa), "lon": float(fo), "n": 1}
+            continue
+        row["n"] = int(row.get("n") or 0) + 1
+    out: list[tuple[dict[str, Any], float, float, int]] = []
+    for v in bucket.values():
+        out.append((dict(v["row"]), float(v["lat"]), float(v["lon"]), int(v["n"])))
+    return out
 
 
 def _build_comparaveis_mapa_por_cache(
@@ -2341,7 +2429,21 @@ def _render_mapa_folium_row(
         center = [comp_coords[0][0], comp_coords[0][1]]
         zoom0 = 14
 
-    m = folium.Map(location=center, zoom_start=zoom0, control_scale=True, tiles="OpenStreetMap")
+    comp_coords = _agrupar_pontos_comparaveis_para_mapa(comp_coords)
+    if len(comp_coords) > _MAPA_MAX_PONTOS_COMPARAVEIS:
+        st.caption(
+            f"Mapa otimizado: exibindo {_MAPA_MAX_PONTOS_COMPARAVEIS} de {len(comp_coords)} ponto(s) "
+            "para manter fluidez."
+        )
+        comp_coords = comp_coords[:_MAPA_MAX_PONTOS_COMPARAVEIS]
+
+    m = folium.Map(
+        location=center,
+        zoom_start=zoom0,
+        control_scale=True,
+        tiles="OpenStreetMap",
+        prefer_canvas=True,
+    )
 
     if any(a.get("_mapa_cache_index") is not None for a in comps):
         _render_legenda_cores_mapa_caches(comps)
@@ -2367,13 +2469,21 @@ def _render_mapa_folium_row(
             maxClusterRadius=50,
             spiderfyDistanceMultiplier=1.35,
             removeOutsideVisibleBounds=True,
+            chunkedLoading=True,
+            chunkInterval=180,
+            chunkDelay=30,
+            animate=False,
         ).add_to(m)
 
-    for fa, fo, tip, url, stroke, fill in comp_coords:
+    for fa, fo, tip, url, stroke, fill, n_ponto in comp_coords:
+        tip_full = tip if n_ponto <= 1 else f"{tip} · {n_ponto} anúncio(s) no ponto"
         if url:
             uqa = html.escape(url, quote=True)
+            lbl = "Abrir anúncio"
+            if n_ponto > 1:
+                lbl = f"Abrir 1º anúncio ({n_ponto} no ponto)"
             pop = folium.Popup(
-                f'<a href="{uqa}" target="_blank" rel="noopener noreferrer">Abrir anúncio</a>',
+                f'<a href="{uqa}" target="_blank" rel="noopener noreferrer">{lbl}</a>',
                 max_width=300,
             )
         else:
@@ -2387,7 +2497,7 @@ def _render_mapa_folium_row(
             fill_color=fill,
             fill_opacity=0.82,
             popup=pop,
-            tooltip=folium.Tooltip(html.escape(tip), sticky=True),
+            tooltip=folium.Tooltip(html.escape(tip_full), sticky=True),
         ).add_to(cluster_alvo)
 
     all_lats: list[float] = []
@@ -2395,7 +2505,7 @@ def _render_mapa_folium_row(
     if la is not None and lo is not None:
         all_lats.append(la)
         all_lons.append(lo)
-    for fa, fo, _, _, _, _ in comp_coords:
+    for fa, fo, _, _, _, _, _ in comp_coords:
         all_lats.append(fa)
         all_lons.append(fo)
     if len(all_lats) >= 2:
@@ -3490,10 +3600,23 @@ def _render_mapa_resumo_leiloes(rows: list[dict[str, Any]], selected_id: str | N
     sel = str(selected_id or "").strip()
     others = [(r, fa, fo) for r, fa, fo in pts if str(r.get("id") or "") != sel]
     selected_pts = [(r, fa, fo) for r, fa, fo in pts if str(r.get("id") or "") == sel]
+    grouped_others = _agrupar_pontos_resumo_para_mapa(others)
+    if len(grouped_others) > _MAPA_MAX_PONTOS_RESUMO:
+        st.caption(
+            f"Mapa otimizado: exibindo {_MAPA_MAX_PONTOS_RESUMO} de {len(grouped_others)} ponto(s) "
+            "de leilões para manter fluidez."
+        )
+        grouped_others = grouped_others[:_MAPA_MAX_PONTOS_RESUMO]
 
     center_lat = sum(p[1] for p in pts) / len(pts)
     center_lon = sum(p[2] for p in pts) / len(pts)
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=11, control_scale=True, tiles="OpenStreetMap")
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=11,
+        control_scale=True,
+        tiles="OpenStreetMap",
+        prefer_canvas=True,
+    )
 
     cluster = MarkerCluster(
         name="Leilões",
@@ -3505,15 +3628,21 @@ def _render_mapa_resumo_leiloes(rows: list[dict[str, Any]], selected_id: str | N
         maxClusterRadius=55,
         spiderfyDistanceMultiplier=1.35,
         removeOutsideVisibleBounds=True,
+        chunkedLoading=True,
+        chunkInterval=180,
+        chunkDelay=30,
+        animate=False,
     ).add_to(m)
 
-    for r, fa, fo in others:
+    for r, fa, fo, n_ponto in grouped_others:
         titulo = html.escape(_label_resumo_leilao_row(r)[:200])
         url_lei = str(r.get("url_leilao") or "").strip()
+        titulo_tip = titulo if n_ponto <= 1 else f"{titulo} · {n_ponto} leilões no ponto"
         if url_lei:
             uq = html.escape(url_lei, quote=True)
+            lbl = "Link leilão" if n_ponto <= 1 else f"Link 1º leilão ({n_ponto} no ponto)"
             pop = folium.Popup(
-                f"{titulo}<br/><a href=\"{uq}\" target=\"_blank\" rel=\"noopener noreferrer\">Link leilão</a>",
+                f"{titulo}<br/><a href=\"{uq}\" target=\"_blank\" rel=\"noopener noreferrer\">{lbl}</a>",
                 max_width=320,
             )
         else:
@@ -3527,7 +3656,7 @@ def _render_mapa_resumo_leiloes(rows: list[dict[str, Any]], selected_id: str | N
             fill_color="#0ea5e9",
             fill_opacity=0.8,
             popup=pop,
-            tooltip=folium.Tooltip(titulo, sticky=True),
+            tooltip=folium.Tooltip(titulo_tip, sticky=True),
         ).add_to(cluster)
 
     for r, fa, fo in selected_pts:
@@ -3594,7 +3723,7 @@ def _render_painel_leiloes_cadastrados_ingestao() -> None:
 
 
 _MODO_CHAVE = "assistente_modo"
-_MODOS_VALIDOS = frozenset({"inicio", "ingestao", "simulacao", "anuncios"})
+_MODOS_VALIDOS = frozenset({"inicio", "ingestao", "lotes", "simulacao", "anuncios"})
 # Navegação a partir de cards do painel: não pode atribuir a ``_MODO_CHAVE`` no mesmo run de
 # certos callbacks — definimos o pendente e aplicamos no início de ``main()``, antes dos widgets.
 _PENDING_MODO = "_pending_set_assistente_modo"
@@ -3709,6 +3838,8 @@ def _html_sidebar_metric_cards() -> str:
     tcs = int(st.session_state.get("tokens_completion_sessao", 0) or 0)
     fc_n = int(st.session_state.get("firecrawl_creditos_usados_sessao", 0) or 0)
     fc_txt = html.escape(buscar_saldo_firecrawl_cached())
+    gcp_raw = buscar_gastos_google_maps_mes_cached()
+    gcp = resumo_google_maps_para_ui(gcp_raw)
 
     def card(lbl: str, val: str, span2: bool = False) -> str:
         sp = " leilao-span2" if span2 else ""
@@ -3727,6 +3858,13 @@ def _html_sidebar_metric_cards() -> str:
     parts.append(card("Custo USD sessão", html.escape(_fmt_usd_sidebar(st.session_state.get("custo_usd_sessao", 0.0)))))
     parts.append(card("Firecrawl usados (sessão)", html.escape(str(fc_n))))
     parts.append(card("Saldo Firecrawl (API)", fc_txt, span2=True))
+    parts.append(card("Google Maps mês (BQ)", html.escape(gcp["total"])))
+    parts.append(card("Geocoding mês (BQ)", html.escape(gcp["geocoding"])))
+    parts.append(card("Address Validation mês (BQ)", html.escape(gcp["addr_validation"])))
+    parts.append(card("Places mês (BQ)", html.escape(gcp["places"])))
+    parts.append(card("Orçamento Google", html.escape(gcp["budget"])))
+    parts.append(card("Uso orçamento Google", html.escape(f'{gcp["budget_pct"]} · risco {gcp["risco"]}')))
+    parts.append(card("Google Billing status", html.escape(gcp["status"]), span2=True))
     parts.append("</div>")
     return "".join(parts)
 
@@ -4453,6 +4591,481 @@ def _executar_ingestao_url_sidebar() -> None:
     st.rerun()
 
 
+def _ing_lote_bg_get(job_id: str) -> dict[str, Any] | None:
+    if not job_id:
+        return None
+    rt = _ing_lote_runtime()
+    lock = rt["lock"]
+    jobs = rt["jobs"]
+    with lock:
+        j = jobs.get(job_id)
+        return dict(j) if isinstance(j, dict) else None
+
+
+def _ing_lote_bg_cancel(job_id: str) -> bool:
+    if not job_id:
+        return False
+    rt = _ing_lote_runtime()
+    lock = rt["lock"]
+    jobs = rt["jobs"]
+    with lock:
+        j = jobs.get(job_id)
+        if not isinstance(j, dict):
+            return False
+        if str(j.get("status") or "") != "running":
+            return False
+        j["cancel_requested"] = True
+        j["updated_at"] = time.time()
+        return True
+
+
+def _ing_lote_bg_list() -> list[dict[str, Any]]:
+    rt = _ing_lote_runtime()
+    lock = rt["lock"]
+    jobs = rt["jobs"]
+    with lock:
+        vals = [dict(v) for v in jobs.values() if isinstance(v, dict)]
+    vals.sort(key=lambda x: float(x.get("started_at") or 0.0), reverse=True)
+    return vals
+
+
+def _notificar_conclusao_lote(job: dict[str, Any] | None) -> None:
+    """Toast temporário quando um job termina (done/cancelled/error)."""
+    if not isinstance(job, dict):
+        return
+    jid = str(job.get("job_id") or "").strip()
+    if not jid:
+        return
+    status = str(job.get("status") or "").strip().lower()
+    if status not in {"done", "cancelled", "error"}:
+        return
+    done_jobs = st.session_state.setdefault("_ing_lote_jobs_notificados", [])
+    if not isinstance(done_jobs, list):
+        done_jobs = []
+    if jid in done_jobs:
+        return
+    toast_fn = getattr(st, "toast", None)
+    if callable(toast_fn):
+        if status == "done":
+            toast_fn(f"Lote {jid[:8]} concluído com sucesso.", icon="✅")
+        elif status == "cancelled":
+            toast_fn(f"Lote {jid[:8]} cancelado.", icon="⚠️")
+        else:
+            toast_fn(f"Lote {jid[:8]} finalizou com erro.", icon="❌")
+    done_jobs.append(jid)
+    st.session_state["_ing_lote_jobs_notificados"] = done_jobs[-60:]
+
+
+def _ing_lote_bg_start(
+    *,
+    arquivo_nome: str,
+    csv_bytes: bytes,
+    ignorar_cache_firecrawl: bool,
+    max_itens: int | None,
+    max_fc_item: int,
+) -> str:
+    job_id = str(uuid.uuid4())
+    rt = _ing_lote_runtime()
+    lock = rt["lock"]
+    jobs = rt["jobs"]
+    with lock:
+        jobs[job_id] = {
+            "job_id": job_id,
+            "arquivo_nome": arquivo_nome,
+            "status": "running",
+            "started_at": time.time(),
+            "updated_at": time.time(),
+            "processed": 0,
+            "total_est": 0,
+            "last_item_status": "",
+            "resultado": None,
+            "erro": "",
+            "cancel_requested": False,
+        }
+
+    def _worker() -> None:
+        suf = Path(arquivo_nome).suffix.lower() or ".csv"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suf) as tmp:
+            tmp.write(csv_bytes)
+            tmp_path = Path(tmp.name)
+        try:
+            cli = get_supabase_client()
+
+            def _hook(proc: int, total: int, item_status: str) -> None:
+                with lock:
+                    j = jobs.get(job_id)
+                    if isinstance(j, dict):
+                        j["processed"] = int(proc)
+                        j["total_est"] = int(total)
+                        j["last_item_status"] = str(item_status)
+                        j["updated_at"] = time.time()
+
+            def _should_stop() -> bool:
+                with lock:
+                    j = jobs.get(job_id)
+                    return bool(isinstance(j, dict) and j.get("cancel_requested"))
+
+            r = processar_lote_csv_leiloes(
+                tmp_path,
+                cli,
+                ignorar_cache_firecrawl=ignorar_cache_firecrawl,
+                max_itens=max_itens,
+                max_chamadas_api_firecrawl_por_item=max_fc_item,
+                progress_hook=_hook,
+                should_stop=_should_stop,
+            )
+            with lock:
+                j = jobs.get(job_id)
+                if isinstance(j, dict):
+                    j["status"] = "cancelled" if bool(r.cancelado) else "done"
+                    j["updated_at"] = time.time()
+                    j["finished_at"] = time.time()
+                    j["resultado"] = resultado_lote_csv_para_dict(r)
+        except Exception as e:
+            logger.exception("ingestao lote csv background job=%s", job_id[:8])
+            with lock:
+                j = jobs.get(job_id)
+                if isinstance(j, dict):
+                    j["status"] = "error"
+                    j["updated_at"] = time.time()
+                    j["finished_at"] = time.time()
+                    j["erro"] = str(e)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    th = threading.Thread(target=_worker, name=f"ing-lote-{job_id[:8]}", daemon=True)
+    th.start()
+    return job_id
+
+
+def _render_preview_csv_para_lote(csv_bytes: bytes, *, arquivo_nome: str) -> None:
+    """Mostra leitura prévia do CSV (linhas, URLs válidas e amostra)."""
+    suf = Path(arquivo_nome).suffix.lower() or ".csv"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suf) as tmp:
+        tmp.write(csv_bytes)
+        tmp_path = Path(tmp.name)
+    try:
+        resumo = resumir_csv_leiloes(tmp_path, preview_limite=3)
+        p1, p2, p3 = st.columns(3, gap="small")
+        p1.metric("Linhas detectadas", int(resumo.total_linhas_csv))
+        p2.metric("URLs válidas", int(resumo.total_urls_validas))
+        p3.metric("Sem URL", int(resumo.total_sem_url))
+        if resumo.total_urls_validas <= 0:
+            st.warning("Nenhuma URL válida detectada no arquivo. Verifique a coluna de link.")
+        if resumo.preview:
+            st.caption("Prévia de URLs detectadas")
+            dfp = pd.DataFrame(resumo.preview)
+            st.dataframe(
+                dfp,
+                width="stretch",
+                hide_index=True,
+                height=min(190, 90 + len(dfp) * 28),
+            )
+    except Exception as e:
+        logger.exception("preview csv lote")
+        st.error(f"Falha ao ler prévia do CSV: {e}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _render_bloco_ingestao_lote_csv() -> None:
+    st.markdown('<div class="sim-card-head">Ingestão em lote (CSV)</div>', unsafe_allow_html=True)
+    st.caption(
+        "Processa todas as URLs do arquivo usando dados da planilha para montar cache e ROI pós-cache "
+        "(sem scrape/LLM do edital nesta etapa)."
+    )
+    arq = st.file_uploader(
+        "Arquivo CSV de leilões",
+        type=["csv"],
+        key="ing_lote_csv_file",
+        help="O arquivo pode ter colunas variáveis; é obrigatório conter ao menos uma coluna/valor com URL.",
+    )
+    if arq is not None:
+        _render_preview_csv_para_lote(arq.getvalue(), arquivo_nome=str(arq.name))
+    c1, c2, c3, c4 = st.columns([0.9, 0.9, 1.1, 1.1], gap="small")
+    with c1:
+        max_itens = int(
+            st.number_input(
+                "Máx. itens",
+                min_value=0,
+                max_value=10000,
+                value=0,
+                step=50,
+                key="ing_lote_csv_max_itens",
+                help="0 = processar todos.",
+            )
+        )
+    with c2:
+        max_fc_item = int(
+            st.number_input(
+                "Máx. Firecrawl/item",
+                min_value=0,
+                max_value=50,
+                value=15,
+                step=1,
+                key="ing_lote_csv_max_fc_item",
+                help="Limite de chamadas Firecrawl por item no recálculo de mercado/cache.",
+            )
+        )
+    with c3:
+        st.caption(
+            f"Ignorar cache Firecrawl (sidebar): {'sim' if _ignorar_cache_firecrawl_sidebar() else 'não'}."
+        )
+    with c4:
+        run_bg = st.checkbox(
+            "Executar em background",
+            value=True,
+            key="ing_lote_csv_bg",
+            help="Não bloqueia a interface; acompanhe o status abaixo.",
+        )
+
+    if st.button("Processar lote CSV", type="primary", key="ing_lote_csv_run", use_container_width=True):
+        if not arq:
+            st.error("Selecione um arquivo CSV.")
+        else:
+            if run_bg:
+                try:
+                    job_id = _ing_lote_bg_start(
+                        arquivo_nome=str(arq.name),
+                        csv_bytes=arq.getvalue(),
+                        ignorar_cache_firecrawl=_ignorar_cache_firecrawl_sidebar(),
+                        max_itens=(max_itens if max_itens > 0 else None),
+                        max_fc_item=max_fc_item,
+                    )
+                    st.session_state["ing_lote_csv_job_id"] = job_id
+                    st.info(f"Lote iniciado em background (job {job_id[:8]}).")
+                except Exception as e:
+                    logger.exception("iniciar ingestao lote em background")
+                    st.error(f"Falha ao iniciar job em background: {e}")
+            else:
+                suf = Path(arq.name).suffix.lower() or ".csv"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suf) as tmp:
+                    tmp.write(arq.getvalue())
+                    tmp_path = Path(tmp.name)
+                try:
+                    cli = get_supabase_client()
+                    with st.spinner("Processando lote…"):
+                        r = processar_lote_csv_leiloes(
+                            tmp_path,
+                            cli,
+                            ignorar_cache_firecrawl=_ignorar_cache_firecrawl_sidebar(),
+                            max_itens=(max_itens if max_itens > 0 else None),
+                            max_chamadas_api_firecrawl_por_item=max_fc_item,
+                        )
+                    st.session_state["ing_lote_csv_resultado"] = resultado_lote_csv_para_dict(r)
+                    st.session_state.pop("_dash_rows", None)
+                    st.success(
+                        f"Lote concluído: ok={r.ok} | erro={r.erro} | ignorados={r.ignorados} | processados={r.processados}"
+                    )
+                except Exception as e:
+                    logger.exception("ingestao lote csv")
+                    st.error(f"Falha ao processar lote: {e}")
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+
+    job_id_atual = str(st.session_state.get("ing_lote_csv_job_id") or "").strip()
+    if job_id_atual:
+        j = _ing_lote_bg_get(job_id_atual)
+        if isinstance(j, dict):
+            st.markdown("**Job em background**")
+            s = str(j.get("status") or "")
+            proc = int(j.get("processed") or 0)
+            total_est = int(j.get("total_est") or 0)
+            if s == "running":
+                st.info(
+                    f"Job {job_id_atual[:8]} em execução: processados {proc}"
+                    + (f"/{total_est}" if total_est > 0 else "")
+                    + f" · último status: {str(j.get('last_item_status') or '—')}"
+                )
+                cjr1, cjr2, cjr3 = st.columns(3, gap="small")
+                with cjr1:
+                    if st.button("Atualizar status", key="ing_lote_bg_refresh", use_container_width=True, type="secondary"):
+                        st.rerun()
+                with cjr2:
+                    auto = st.checkbox("Autoatualizar (2s)", key="ing_lote_bg_auto", value=False)
+                    if auto:
+                        time.sleep(2.0)
+                        st.rerun()
+                with cjr3:
+                    if st.button("Cancelar job", key="ing_lote_bg_cancel", use_container_width=True, type="secondary"):
+                        if _ing_lote_bg_cancel(job_id_atual):
+                            st.warning("Cancelamento solicitado. Aguarde o próximo ciclo.")
+                        else:
+                            st.info("Job já finalizado ou inválido.")
+                        st.rerun()
+            elif s == "done":
+                rj = j.get("resultado")
+                if isinstance(rj, dict):
+                    st.session_state["ing_lote_csv_resultado"] = rj
+                    st.session_state.pop("_dash_rows", None)
+                    st.success(f"Job {job_id_atual[:8]} concluído.")
+            elif s == "cancelled":
+                rj = j.get("resultado")
+                if isinstance(rj, dict):
+                    st.session_state["ing_lote_csv_resultado"] = rj
+                    st.session_state.pop("_dash_rows", None)
+                st.warning(f"Job {job_id_atual[:8]} cancelado.")
+            elif s == "error":
+                st.error(f"Job {job_id_atual[:8]} falhou: {j.get('erro')}")
+
+    hist = _ing_lote_bg_list()[:12]
+    if hist:
+        st.markdown("**Histórico de jobs (recentes)**")
+        dfr = pd.DataFrame(
+            [
+                {
+                    "job": str(h.get("job_id") or "")[:8],
+                    "arquivo": str(h.get("arquivo_nome") or "")[:48],
+                    "status": str(h.get("status") or ""),
+                    "processados": int(h.get("processed") or 0),
+                    "total_est": int(h.get("total_est") or 0),
+                    "iniciado_em": datetime.fromtimestamp(float(h.get("started_at") or 0)).strftime("%H:%M:%S"),
+                    "atualizado_em": datetime.fromtimestamp(float(h.get("updated_at") or 0)).strftime("%H:%M:%S"),
+                }
+                for h in hist
+            ]
+        )
+        st.dataframe(dfr, width="stretch", hide_index=True, height=min(320, 80 + len(dfr) * 26))
+
+    res = st.session_state.get("ing_lote_csv_resultado")
+    if not isinstance(res, dict):
+        return
+    st.markdown("**Resultado da última execução**")
+    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1.metric("Processados", int(res.get("processados") or 0))
+    m2.metric("OK", int(res.get("ok_itens") or 0))
+    m3.metric("Erros", int(res.get("erro_itens") or 0))
+    m4.metric("Ignorados", int(res.get("ignorados") or 0))
+    rows = list(res.get("resultados") or [])
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, width="stretch", hide_index=True, height=min(420, 90 + len(df) * 28))
+        st.download_button(
+            "Baixar resultado JSON",
+            data=json.dumps(res, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name="resultado_ingestao_lote.json",
+            mime="application/json",
+            key="ing_lote_csv_dl_json",
+            use_container_width=True,
+            type="secondary",
+        )
+        st.download_button(
+            "Baixar resultado CSV",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="resultado_ingestao_lote.csv",
+            mime="text/csv",
+            key="ing_lote_csv_dl_csv",
+            use_container_width=True,
+            type="secondary",
+        )
+
+
+def _render_aba_lotes_processados() -> None:
+    st.markdown('<div class="sim-card-head">Consulta de lotes CSV</div>', unsafe_allow_html=True)
+    st.caption("Histórico, status e resultados das execuções em lote da sessão atual.")
+    hist = _ing_lote_bg_list()[:40]
+    job_ref = escolher_job_referencia(
+        hist,
+        job_id_atual=str(st.session_state.get("ing_lote_csv_job_id") or ""),
+    )
+    status, proc, total_est, frac = progresso_job(job_ref)
+    _notificar_conclusao_lote(job_ref)
+    st.markdown(
+        _sidebar_progress_ring_html(frac, status=status, proc=proc, total_est=total_est),
+        unsafe_allow_html=True,
+    )
+    if isinstance(job_ref, dict):
+        jid = str(job_ref.get("job_id") or "")
+        status_txt = str(job_ref.get("status") or "—")
+        arquivo = str(job_ref.get("arquivo_nome") or "—")
+        st.caption(f"Job ativo/referência: `{jid[:8]}` · {status_txt} · arquivo: {arquivo}")
+        if status_txt == "running":
+            c1, c2 = st.columns(2, gap="small")
+            with c1:
+                if st.button("Atualizar status", key="lotes_view_refresh", use_container_width=True, type="secondary"):
+                    st.rerun()
+            with c2:
+                if st.button("Cancelar job", key="lotes_view_cancel", use_container_width=True, type="secondary"):
+                    if _ing_lote_bg_cancel(jid):
+                        st.warning("Cancelamento solicitado.")
+                    else:
+                        st.info("Job já finalizado.")
+                    st.rerun()
+    else:
+        st.info("Nenhum job encontrado. Inicie um lote pelo sidebar.")
+
+    if hist:
+        dfr = pd.DataFrame(
+            [
+                {
+                    "job": str(h.get("job_id") or "")[:8],
+                    "arquivo": str(h.get("arquivo_nome") or "")[:60],
+                    "status": str(h.get("status") or ""),
+                    "processados": int(h.get("processed") or 0),
+                    "total_est": int(h.get("total_est") or 0),
+                    "iniciado_em": datetime.fromtimestamp(float(h.get("started_at") or 0)).strftime("%H:%M:%S"),
+                    "atualizado_em": datetime.fromtimestamp(float(h.get("updated_at") or 0)).strftime("%H:%M:%S"),
+                }
+                for h in hist
+            ]
+        )
+        st.dataframe(dfr, width="stretch", hide_index=True, height=min(420, 95 + len(dfr) * 26))
+
+        opcoes = [str(h.get("job_id") or "") for h in hist if str(h.get("job_id") or "").strip()]
+        if opcoes:
+            atual = str(st.session_state.get("ing_lote_csv_job_id") or "").strip()
+            if atual not in opcoes:
+                atual = opcoes[0]
+            sel = st.selectbox(
+                "Selecionar job para detalhes",
+                options=opcoes,
+                index=opcoes.index(atual),
+                key="lotes_view_job_select",
+                format_func=lambda x: f"{x[:8]}",
+            )
+            jdet = _ing_lote_bg_get(sel)
+            if isinstance(jdet, dict):
+                st.session_state["ing_lote_csv_job_id"] = sel
+                rj = jdet.get("resultado")
+                if isinstance(rj, dict):
+                    st.session_state["ing_lote_csv_resultado"] = rj
+
+    res = st.session_state.get("ing_lote_csv_resultado")
+    if not isinstance(res, dict):
+        return
+    st.markdown("**Resultado do job selecionado**")
+    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1.metric("Processados", int(res.get("processados") or 0))
+    m2.metric("OK", int(res.get("ok_itens") or 0))
+    m3.metric("Erros", int(res.get("erro_itens") or 0))
+    m4.metric("Ignorados", int(res.get("ignorados") or 0))
+    rows = list(res.get("resultados") or [])
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, width="stretch", hide_index=True, height=min(420, 90 + len(df) * 28))
+        cdl1, cdl2 = st.columns(2, gap="small")
+        with cdl1:
+            st.download_button(
+                "Baixar JSON do job",
+                data=json.dumps(res, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name="resultado_ingestao_lote.json",
+                mime="application/json",
+                key="lotes_view_dl_json",
+                use_container_width=True,
+                type="secondary",
+            )
+        with cdl2:
+            st.download_button(
+                "Baixar CSV do job",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name="resultado_ingestao_lote.csv",
+                mime="text/csv",
+                key="lotes_view_dl_csv",
+                use_container_width=True,
+                type="secondary",
+            )
+
+
 def _render_sidebar_marca() -> None:
     st.sidebar.markdown(
         '<div class="lnav-brand-wrap"><p class="lnav-brand-t">Leilão IA</p></div>',
@@ -4462,22 +5075,33 @@ def _render_sidebar_marca() -> None:
 
 def _render_sidebar_navegacao_modos() -> None:
     modo = str(st.session_state.get("assistente_modo") or "inicio")
-    nav: tuple[tuple[str, str], ...] = (
-        ("inicio", "📊  Painel"),
-        ("ingestao", "🏛️  Leilão"),
-        ("simulacao", "📐  Simulador"),
-        ("anuncios", "🗄️  Dados"),
+    nav: tuple[tuple[str, str, str], ...] = (
+        ("inicio", "📊", "Painel"),
+        ("ingestao", "🏛️", "Leilão"),
+        ("lotes", "🧰", "Lotes CSV"),
+        ("simulacao", "📐", "Simulador"),
+        ("anuncios", "🗄️", "Dados"),
     )
-    for mid, label in nav:
-        active = modo == mid
-        if st.sidebar.button(
-            label,
-            key=f"lnav_modo_{mid}",
-            use_container_width=True,
-            type="primary" if active else "secondary",
-        ):
-            st.session_state["assistente_modo"] = mid
-            st.rerun()
+    pares = [nav[i : i + 2] for i in range(0, len(nav), 2)]
+    for ridx, bloco in enumerate(pares):
+        cols = st.sidebar.columns(2, gap="small")
+        for cidx in range(2):
+            if cidx >= len(bloco):
+                continue
+            mid, icon, nome = bloco[cidx]
+            active = modo == mid
+            with cols[cidx]:
+                label = f"{icon}  {nome}"
+                if st.button(
+                    label,
+                    key=f"lnav_modo_{mid}",
+                    use_container_width=True,
+                    type="primary" if active else "secondary",
+                ):
+                    st.session_state["assistente_modo"] = mid
+                    st.rerun()
+    nomes = {k: n for k, _i, n in nav}
+    st.sidebar.caption(f"Aba ativa: **{nomes.get(modo, 'Painel')}**")
 
 
 def _render_sidebar_ingest_url() -> None:
@@ -4494,6 +5118,164 @@ def _render_sidebar_ingest_url() -> None:
     )
     if st.sidebar.button("▶  Processar URL", type="primary", use_container_width=True, key="sidebar_ingest_run"):
         _executar_ingestao_url_sidebar()
+
+
+def _sidebar_progress_ring_html(frac: float, *, status: str, proc: int, total_est: int) -> str:
+    p = int(max(0.0, min(1.0, float(frac))) * 100)
+    if status == "done":
+        p = 100
+    if status == "running":
+        cor = "#14b8a6"
+        st_txt = "Executando"
+    elif status == "done":
+        cor = "#22c55e"
+        st_txt = "Concluído"
+    elif status == "cancelled":
+        cor = "#f59e0b"
+        st_txt = "Cancelado"
+    elif status == "error":
+        cor = "#ef4444"
+        st_txt = "Falhou"
+    elif status == "idle":
+        cor = "#64748b"
+        st_txt = "Aguardando"
+    else:
+        cor = "#64748b"
+        st_txt = status or "—"
+    total_txt = str(total_est) if total_est > 0 else "?"
+    return f"""
+<div style="display:flex;align-items:center;gap:0.75rem;margin:0.15rem 0 0.35rem 0;">
+  <div style="
+      width:58px;height:58px;border-radius:50%;
+      background:conic-gradient({cor} 0 {p}%, rgba(148,163,184,0.22) {p}% 100%);
+      display:flex;align-items:center;justify-content:center;position:relative;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,0.1);">
+    <div style="
+        width:44px;height:44px;border-radius:50%;
+        background:#0f172a;display:flex;align-items:center;justify-content:center;
+        color:#e2e8f0;font-weight:700;font-size:0.78rem;">{p}%</div>
+  </div>
+  <div style="line-height:1.25;">
+    <div style="font-size:0.84rem;font-weight:650;color:#e2e8f0;">{html.escape(st_txt)}</div>
+    <div style="font-size:0.75rem;color:#94a3b8;">{proc}/{total_txt} itens</div>
+  </div>
+</div>
+"""
+
+
+def _render_sidebar_ingestao_lote_csv() -> None:
+    st.sidebar.markdown("### Ingestão em lote (CSV)")
+    hist = _ing_lote_bg_list()
+    job_ref = escolher_job_referencia(
+        hist,
+        job_id_atual=str(st.session_state.get("ing_lote_csv_job_id") or ""),
+    )
+    status, proc, total_est, frac = progresso_job(job_ref)
+    _notificar_conclusao_lote(job_ref)
+    st.sidebar.markdown(
+        _sidebar_progress_ring_html(frac, status=status, proc=proc, total_est=total_est),
+        unsafe_allow_html=True,
+    )
+    if isinstance(job_ref, dict):
+        jid = str(job_ref.get("job_id") or "")
+        if status == "running":
+            st.sidebar.caption(
+                f"Job {jid[:8]} · executando · último status: {str(job_ref.get('last_item_status') or '—')}"
+            )
+            auto = st.sidebar.checkbox(
+                "Autoatualizar (2s)",
+                key="sidebar_lote_csv_auto_refresh",
+                value=True,
+            )
+            if auto:
+                time.sleep(2.0)
+                st.rerun()
+        else:
+            st.sidebar.caption(f"Último job: {jid[:8]} · {status}")
+    else:
+        st.sidebar.caption("Nenhum job em lote iniciado nesta sessão.")
+    c1, c2 = st.sidebar.columns(2, gap="small")
+    with c1:
+        if st.button(
+            "Abrir aba lotes",
+            key="sidebar_lote_csv_ir_painel",
+            use_container_width=True,
+            type="secondary",
+        ):
+            st.session_state["assistente_modo"] = "lotes"
+            st.rerun()
+    with c2:
+        cancel_ok = bool(isinstance(job_ref, dict) and status == "running")
+        if st.button(
+            "Cancelar",
+            key="sidebar_lote_csv_cancel",
+            use_container_width=True,
+            type="secondary",
+            disabled=not cancel_ok,
+        ):
+            if cancel_ok and _ing_lote_bg_cancel(str(job_ref.get("job_id") or "")):
+                st.sidebar.warning("Cancelamento solicitado.")
+            st.rerun()
+    with st.sidebar.expander("Novo lote CSV", expanded=False):
+        arq = st.file_uploader(
+            "Arquivo CSV",
+            type=["csv"],
+            key="sidebar_ing_lote_csv_file",
+            help="Use para iniciar o processamento em background sem sair da barra lateral.",
+        )
+        if arq is not None:
+            _render_preview_csv_para_lote(
+                arq.getvalue(),
+                arquivo_nome=str(arq.name),
+            )
+        c3, c4 = st.columns(2, gap="small")
+        with c3:
+            max_itens = int(
+                st.number_input(
+                    "Máx. itens",
+                    min_value=0,
+                    max_value=10000,
+                    value=0,
+                    step=50,
+                    key="sidebar_ing_lote_csv_max_itens",
+                    help="0 = todos",
+                )
+            )
+        with c4:
+            max_fc = int(
+                st.number_input(
+                    "Máx. FC/item",
+                    min_value=0,
+                    max_value=50,
+                    value=15,
+                    step=1,
+                    key="sidebar_ing_lote_csv_max_fc_item",
+                )
+            )
+        if st.button(
+            "Iniciar lote em background",
+            key="sidebar_ing_lote_csv_run",
+            use_container_width=True,
+            type="primary",
+        ):
+            if not arq:
+                st.error("Selecione um CSV.")
+            else:
+                try:
+                    jid = _ing_lote_bg_start(
+                        arquivo_nome=str(arq.name),
+                        csv_bytes=arq.getvalue(),
+                        ignorar_cache_firecrawl=_ignorar_cache_firecrawl_sidebar(),
+                        max_itens=(max_itens if max_itens > 0 else None),
+                        max_fc_item=max_fc,
+                    )
+                    st.session_state["ing_lote_csv_job_id"] = jid
+                    st.session_state["assistente_modo"] = "lotes"
+                    st.success(f"Lote iniciado (job {jid[:8]}).")
+                    st.rerun()
+                except Exception as e:
+                    logger.exception("iniciar ingestao lote csv no sidebar")
+                    st.error(f"Falha ao iniciar lote: {e}")
 
 
 _BM_APPLY_DEFAULTS_FLAG = "_bm_apply_defaults"
@@ -4584,18 +5366,24 @@ def _render_sidebar_ajustes_busca() -> None:
 
 def _render_sidebar_app() -> None:
     _render_sidebar_marca()
-    st.sidebar.markdown('<div class="lnav-sep" aria-hidden="true"></div>', unsafe_allow_html=True)
-    _render_sidebar_navegacao_modos()
-    st.sidebar.markdown('<div class="lnav-sep" aria-hidden="true"></div>', unsafe_allow_html=True)
-    _render_sidebar_ingest_url()
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Uso e saldos")
-    st.sidebar.markdown(_html_sidebar_metric_cards(), unsafe_allow_html=True)
-    if st.sidebar.button("↻ Atualizar saldo Firecrawl", key="btn_atualizar_saldos", use_container_width=True):
-        invalidar_cache_saldos()
-        st.rerun()
-    st.sidebar.markdown("### Comparáveis")
-    _render_sidebar_ajustes_busca()
+    with st.sidebar.container(border=True):
+        st.markdown('<p class="lnav-card-title">Navegação</p>', unsafe_allow_html=True)
+        st.markdown('<p class="lnav-card-subtitle">Acesso rápido às áreas principais da aplicação.</p>', unsafe_allow_html=True)
+        _render_sidebar_navegacao_modos()
+    with st.sidebar.container(border=True):
+        st.markdown('<p class="lnav-card-title">Operação rápida</p>', unsafe_allow_html=True)
+        st.markdown('<p class="lnav-card-subtitle">Ingestão por URL e monitor de processamento em lote.</p>', unsafe_allow_html=True)
+        _render_sidebar_ingest_url()
+        _render_sidebar_ingestao_lote_csv()
+    with st.sidebar.container(border=True):
+        st.markdown('<p class="lnav-card-title">Configurações</p>', unsafe_allow_html=True)
+        with st.expander("Uso e saldos", expanded=False):
+            st.markdown(_html_sidebar_metric_cards(), unsafe_allow_html=True)
+            if st.button("↻ Atualizar saldos (Firecrawl + Google)", key="btn_atualizar_saldos", use_container_width=True):
+                invalidar_cache_saldos()
+                st.rerun()
+        with st.expander("Comparáveis", expanded=False):
+            _render_sidebar_ajustes_busca()
 
 
 def _dash_txt_card_resumo_local(x: Any) -> str:
@@ -5023,6 +5811,8 @@ def _render_conteudo_principal() -> None:
         titulo_hero = "Simulação de operação"
     elif modo == "anuncios":
         titulo_hero = "Anúncios e caches (Supabase)"
+    elif modo == "lotes":
+        titulo_hero = "Lotes CSV"
     elif modo == "ingestao":
         titulo_hero = "Leilões"
     else:
@@ -5057,6 +5847,10 @@ def _render_conteudo_principal() -> None:
 
     if modo == "anuncios":
         _render_aba_anuncios()
+        return
+
+    if modo == "lotes":
+        _render_aba_lotes_processados()
         return
 
     if modo in ("ingestao", "simulacao"):

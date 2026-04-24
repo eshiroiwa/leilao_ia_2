@@ -52,6 +52,18 @@ def _segmento_mercado_residencial(card: dict[str, Any], tipo_final: str) -> str:
     return "outros"
 
 
+def _titulo_card_invalido(titulo: Any) -> bool:
+    s = str(titulo or "").strip()
+    if not s:
+        return True
+    s_low = s.lower()
+    if s_low.startswith("mensagem]("):
+        return True
+    if s_low in {"mensagem", "contatar", "ver telefone"}:
+        return True
+    return False
+
+
 def persistir_cards_anuncios_mercado(
     client: Client,
     cards: list[dict[str, Any]],
@@ -65,6 +77,7 @@ def persistir_cards_anuncios_mercado(
     origem_metadados: str = "firecrawl_mercado",
     amostras_sem_filtro_area_edital: bool = False,
     leilao_row: dict[str, Any] | None = None,
+    exigir_geolocalizacao: bool = False,
 ) -> int:
     """Converte cards (listagem ou ficha) em linhas ``anuncios_mercado`` e faz upsert."""
     from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
@@ -92,6 +105,16 @@ def persistir_cards_anuncios_mercado(
             continue
         if area_m2 <= 0 or valor <= 0:
             continue
+        if _titulo_card_invalido(c.get("titulo")):
+            continue
+        if exigir_geolocalizacao:
+            try:
+                lat = float(c.get("latitude"))
+                lon = float(c.get("longitude"))
+                if lat == 0.0 and lon == 0.0:
+                    continue
+            except (TypeError, ValueError):
+                continue
         seg_m = _segmento_mercado_residencial(c, tipo_final)
         meta: dict[str, Any] = {
             "leilao_imovel_id": str(leilao_imovel_id or ""),
