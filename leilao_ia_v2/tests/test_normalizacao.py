@@ -25,3 +25,15 @@ def test_normalizar_data():
 
 def test_normalizar_url():
     assert normalizacao.normalizar_url_leilao("exemplo.com/x").startswith("https://")
+    u = normalizacao.normalizar_url_leilao("http://EXEMPLO.com/P?b=2&a=1")
+    assert u == "https://exemplo.com/P?a=1&b=2"
+    assert normalizacao.normalizar_url_leilao(u) == u
+
+
+def test_candidatas_url_inclui_http_e_barra():
+    c = normalizacao.candidatas_url_leilao_para_busca(
+        "https://venda-imoveis.caixa.gov.br/sistema/x.asp?k=1"
+    )
+    assert c[0].startswith("https://venda-imoveis")
+    assert any(x.startswith("http://venda-imoveis") for x in c)
+    assert any(x.endswith("x.asp/?k=1") or "x.asp/" in x for x in c)

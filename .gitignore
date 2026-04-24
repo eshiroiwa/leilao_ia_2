@@ -31,3 +31,6 @@ htmlcov/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Export de análise (simulação) — ficheiro gerado pelo botão na UI
+leilao_ia_v2/_debug/ultima_simulacao_*.json

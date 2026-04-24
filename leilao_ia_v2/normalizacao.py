@@ -8,6 +8,7 @@ import re
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from leilao_ia_v2.constants import (
     CONSERVACAO_VALIDAS,
@@ -138,9 +139,80 @@ def normalizar_data_para_iso(val: Any) -> Optional[str]:
 
 
 def normalizar_url_leilao(u: str) -> str:
+    """
+    Forma canônica para `url_leilao`: sempre https, host em minúsculas, path sem
+    barra final (exceto raiz), query com parâmetros ordenados, sem fragmento.
+    Assim, a detecção de duplicata alinha com o que é gravado no banco.
+    """
     u = (u or "").strip()
     if not u:
         return u
     if not u.lower().startswith(("http://", "https://")):
         u = "https://" + u
-    return u
+    p = urlparse(u)
+    netloc = (p.netloc or "").strip()
+    if not netloc:
+        return u
+    netloc = netloc.lower()
+    if netloc.endswith(":443"):
+        netloc = netloc[:-4]
+    path = p.path or ""
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    # Chaves em minúsculas (ex.: HdnImovel vs hdnimovel) para bater com legado/BD.
+    raw = parse_qsl(p.query, keep_blank_values=True)
+    q = [(k.strip().lower(), v) for k, v in raw]
+    q.sort(key=lambda kv: (kv[0], kv[0]))
+    query = urlencode(q, doseq=True)
+    return urlunparse(("https", netloc, path, "", query, ""))
+
+
+def valores_id_numericos_grandes_na_query(u: str) -> list[str]:
+    """
+    Valores numéricos longos no query string (ex.: hdnimovel da Caixa) para busca
+    `ilike` quando o `url_leilao` no banco difere sutilmente (encoding, capitalização).
+    """
+    u = (u or "").strip()
+    if not u:
+        return []
+    if not u.lower().startswith(("http://", "https://")):
+        u = "https://" + u
+    p = urlparse(u)
+    out: list[str] = []
+    for _k, v in parse_qsl(p.query, keep_blank_values=True):
+        v = (v or "").strip()
+        if v.isdigit() and len(v) >= 6:
+            out.append(v)
+    return sorted(set(out), key=len, reverse=True)
+
+
+def candidatas_url_leilao_para_busca(u: str) -> list[str]:
+    """
+    Listas de strings a consultar no Supabase para achar o mesmo anúncio
+    (registros antigos podem ter http, barra final no path, etc.).
+    A primeira canônica deve coincidir com `normalizar_url_leilao`.
+    """
+    canon = normalizar_url_leilao(u)
+    if not canon:
+        return []
+    out: list[str] = [canon]
+    if canon.startswith("https://"):
+        out.append("http://" + canon[8:])
+    p = urlparse(canon)
+    if p.path and len(p.path) > 1 and not p.path.endswith("/"):
+        com_barra = urlunparse(("https", p.netloc, p.path + "/", "", p.query, ""))
+        if com_barra not in out:
+            out.append(com_barra)
+        if com_barra.startswith("https://"):
+            out.append("http://" + com_barra[8:])
+    if p.path and len(p.path) > 1 and p.path.endswith("/"):
+        sem_barra = urlunparse(("https", p.netloc, p.path.rstrip("/"), "", p.query, ""))
+        if sem_barra not in out:
+            out.append(sem_barra)
+    seen: set[str] = set()
+    dedup: list[str] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            dedup.append(x)
+    return dedup

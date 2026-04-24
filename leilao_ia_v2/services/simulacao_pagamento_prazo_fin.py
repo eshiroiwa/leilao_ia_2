@@ -58,11 +58,6 @@ def total_parcelas_price_acumuladas(principal: float, i_mes: float, n: int, t: i
     return round(pmt_ * k, 2)
 
 
-def juros_totais_price(principal: float, i_mes: float, n: int) -> float:
-    pmt_ = pmt_price(principal, i_mes, n)
-    return max(0.0, round(pmt_ * n - principal, 2))
-
-
 # --- SAC (Sistema de Amortização Constante) ---
 
 

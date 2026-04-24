@@ -52,7 +52,6 @@ from leilao_ia_v2.config.busca_mercado_parametros import (
 )
 from leilao_ia_v2.pipeline.ingestao_edital import executar_ingestao_edital
 from leilao_ia_v2.schemas.operacao_simulacao import (
-    ModoPagamentoSimulacao,
     ModoReforma,
     ModoValorVenda,
     OperacaoSimulacaoDocumento,
@@ -84,6 +83,10 @@ from leilao_ia_v2.ui.dashboard_comparacao_modais import (
     html_linha_detalhe_painel,
     html_linha_detalhe_painel_link,
 )
+from leilao_ia_v2.services.simulacao_debug_export import (
+    build_simulacao_debug_payload,
+    export_simulacao_debug_json,
+)
 from leilao_ia_v2.ui.simulacao_estado import (
     TAGS,
     construir_inputs_de_sessao,
@@ -97,16 +100,8 @@ from leilao_ia_v2.ui.simulacao_estado import (
     simop_key_tempo_venda_global,
     simop_key_ui_nicho_prazo_fin,
     simop_limpar_snapshot_draft,
-    simop_m_lab_to_tag,
     simop_restaurar_draft_de_snapshot,
 )
-
-_SIMOP_MPAG_LABS = ("À vista", "Parcelado (judicial)", "Financiado (bancário)")
-_SIMOP_MPAG_TO_ENUM: dict[str, ModoPagamentoSimulacao] = {
-    "À vista": ModoPagamentoSimulacao.VISTA,
-    "Parcelado (judicial)": ModoPagamentoSimulacao.PRAZO,
-    "Financiado (bancário)": ModoPagamentoSimulacao.FINANCIADO,
-}
 
 _SIMOP_REFUI_SPECS: tuple[tuple[str, str], ...] = (
     ("none", "Sem reforma"),
@@ -116,23 +111,6 @@ _SIMOP_REFUI_SPECS: tuple[tuple[str, str], ...] = (
     ("alto", "2,5k/m²"),
     ("manual", "R$ livre"),
 )
-
-
-def _simop_mpag_label_para_valor(lab: str) -> ModoPagamentoSimulacao:
-    return _SIMOP_MPAG_TO_ENUM.get(lab, ModoPagamentoSimulacao.VISTA)
-
-
-def _simop_mpag_valor_default_para_label(v: object) -> str:
-    if isinstance(v, ModoPagamentoSimulacao):
-        for lab, en in _SIMOP_MPAG_TO_ENUM.items():
-            if en == v:
-                return lab
-    s = str(v or "").strip().lower()
-    if s in ("prazo", ModoPagamentoSimulacao.PRAZO.value):
-        return "Parcelado (judicial)"
-    if s in ("financiado", ModoPagamentoSimulacao.FINANCIADO.value, "fin"):
-        return "Financiado (bancário)"
-    return "À vista"
 from leilao_ia_v2.schemas.relatorio_mercado_contexto import parse_relatorio_mercado_contexto_json
 from leilao_ia_v2.ui.dashboard_inicio import _roi_bruto_de_row
 from leilao_ia_v2.services.roi_pos_cache_leilao import metricas_pos_cache_de_leilao_row
@@ -353,15 +331,6 @@ def _html_foto_imovel_extracao(row: dict[str, Any]) -> str:
     )
 
 
-def _render_foto_imovel_acima_endereco(row: dict[str, Any]) -> None:
-    """Exibe a imagem do imóvel quando há URL; fica acima do card de endereço."""
-    h = _html_foto_imovel_extracao(row)
-    if not h:
-        return
-    st.markdown(h, unsafe_allow_html=True)
-    st.caption("Foto do imóvel (edital)")
-
-
 def _render_cards_extracao(
     row: dict[str, Any],
     *,
@@ -398,7 +367,7 @@ def _render_cards_extracao(
         st.html(
             f'<div class="sim-res-col-scroll sim-card-html">{_html_sim_venda_lucros_tres_cards(o_sim)}</div>'
         )
-        if _row_tem_simulacao_gravada(row):
+        if leilao_imoveis_repo.leilao_tem_simulacao_utilizador_gravada(row):
             st.caption(
                 "Com base na **simulação gravada** (parâmetros em `operacao_simulacao_json` / `simulacoes_modalidades_json` "
                 "e caches atuais), como na aba Simulação."
@@ -964,232 +933,15 @@ def _html_sim_venda_lucros_tres_cards(o: SimulacaoOperacaoOutputs) -> str:
     return f'<div class="sim-fin-sec"><div class="sim-res-grid">{inner}</div></div>'
 
 
-def _html_simulacao_resultado_cards(o: SimulacaoOperacaoOutputs) -> str:
-    """Cards HTML agrupados por etapa da operação (venda → custos → lucro/IR)."""
-    venda = _fmt_valor_campo("valor_venda", o.valor_venda_estimado)
-    lance_c = _fmt_valor_campo("valor_venda", o.lance_brl)
-    lance_arrem_sub = "nominal (arrematação)"
-    if o.desconto_pagamento_avista_ativo and (o.desconto_pagamento_avista_valor_brl or 0) > 0.01:
-        lance_arrem_sub = "nominal — leiloeiro/ITBI/reg. (%) s/ cheio"
-    sub_lbl = "sem corretagem"
-    if (o.saldo_divida_quitacao_na_venda or 0) > 0.5:
-        sub_lbl = "incl. quitação (caixa+saldo) · sem corretagem"
-    sub = _fmt_valor_campo("valor_venda", o.subtotal_custos_operacao)
-    ctot = _fmt_valor_campo("valor_venda", o.custo_total_com_corretagem)
-    corr = _fmt_valor_campo("valor_venda", o.comissao_imobiliaria_brl)
-    lucro_b = _fmt_valor_campo("valor_venda", o.lucro_bruto)
-    roi_b = f"{(o.roi_bruto or 0) * 100:.2f} %" if o.roi_bruto is not None else "—"
-    ir_ = _fmt_valor_campo("valor_venda", o.ir_calculado_brl)
-    lucro_l = _fmt_valor_campo("valor_venda", o.lucro_liquido)
-    roi_l = f"{(o.roi_liquido or 0) * 100:.2f} %" if o.roi_liquido is not None else "—"
-    ref = _fmt_valor_campo("valor_venda", o.reforma_brl)
-    cls_lb, cls_ll = _sim_val_class_lucro_bruto_liquido(o)
-    clei_sub = ""
-    if (o.comissao_leiloeiro_pct_efetivo or 0) > 0:
-        clei_sub = f"{o.comissao_leiloeiro_pct_efetivo:.2f} % s/ lance"
-    elif o.comissao_leiloeiro_brl and o.comissao_leiloeiro_brl > 0:
-        clei_sub = "fixo"
-    itbi_sub = ""
-    if (o.itbi_pct_efetivo or 0) > 0:
-        itbi_sub = f"{o.itbi_pct_efetivo:.2f} % s/ lance"
-    elif o.itbi_brl and o.itbi_brl > 0:
-        itbi_sub = "fixo (legado)"
-
-    reg_sub = ""
-    if (o.registro_pct_efetivo or 0) > 0:
-        reg_sub = f"{o.registro_pct_efetivo:.2f} % s/ lance"
-    elif o.registro_brl and o.registro_brl > 0:
-        reg_sub = "fixo"
-
-    ir_sub = ""
-    if o.ir_usou_manual:
-        ir_sub = "valor fixo informado"
-    elif (o.base_ir or 0) > 0:
-        ir_sub = f"Base p/ IR {_fmt_valor_campo('valor_venda', o.base_ir)}"
-
-    sec_mercado = [
-        _html_sim_res_card("Venda estimada", venda, accent=True),
-        _html_sim_res_card("Corretagem (saída)", corr),
-    ]
-    sec_arrematacao = [
-        _html_sim_res_card("Lance (arrematação)", lance_c, sub=lance_arrem_sub),
-    ]
-    if o.desconto_pagamento_avista_ativo and (o.lance_pago_apos_desconto_brl or 0) >= 0 and (
-        abs((o.lance_brl or 0) - (o.lance_pago_apos_desconto_brl or 0)) > 0.01
-    ):
-        sec_arrematacao.append(
-            _html_sim_res_card(
-                "Lance pago (à vista)",
-                _fmt_valor_campo("valor_venda", o.lance_pago_apos_desconto_brl),
-                sub="caixa do imóvel após desconto",
-            )
-        )
-    sec_desconto_av: list[str] = []
-    if o.desconto_pagamento_avista_ativo and (o.desconto_pagamento_avista_valor_brl or 0) > 0.01:
-        sec_desconto_av = [
-            _html_sim_res_card(
-                "Desconto (à vista)",
-                _fmt_valor_campo("valor_venda", o.desconto_pagamento_avista_valor_brl),
-                sub=f"{o.desconto_pagamento_avista_pct_efetivo or 0:.2f} % s/ lance nominal",
-                accent=True,
-            ),
-        ]
-    sec_tributos = [
-        _html_sim_res_card(
-            "Comissão leiloeiro",
-            _fmt_valor_campo("valor_venda", o.comissao_leiloeiro_brl),
-            sub=clei_sub,
-        ),
-        _html_sim_res_card(
-            "ITBI",
-            _fmt_valor_campo("valor_venda", o.itbi_brl),
-            sub=itbi_sub,
-        ),
-        _html_sim_res_card("Registro", _fmt_valor_campo("valor_venda", o.registro_brl), sub=reg_sub),
-    ]
-    sec_custo_ref = [
-        _html_sim_res_card("Condomínio atrasado", _fmt_valor_campo("valor_venda", o.condominio_atrasado_brl)),
-        _html_sim_res_card("IPTU atrasado", _fmt_valor_campo("valor_venda", o.iptu_atrasado_brl)),
-        _html_sim_res_card("Reforma", ref, sub=str(o.reforma_modo_resolvido or "—")),
-        _html_sim_res_card("Desocupação", _fmt_valor_campo("valor_venda", o.desocupacao_brl)),
-        _html_sim_res_card("Outros custos", _fmt_valor_campo("valor_venda", o.outros_custos_brl)),
-    ]
-    sec_totais = [
-        _html_sim_res_card("Subtotal operação", sub, sub=sub_lbl),
-        _html_sim_res_card("Custo total (op. + corret.)", ctot),
-    ]
-    rla = o.roi_liquido_anualizado
-    rba = o.roi_bruto_anualizado
-    anual_suf_l = f" · anual. {(rla * 100):.2f} %" if rla is not None else ""
-    anual_suf_b = f" · anual. {(rba * 100):.2f} %" if rba is not None else ""
-    sec_lucro = [
-        _html_sim_res_card("Lucro bruto", lucro_b, sub=f"ROI bruto {roi_b}{anual_suf_b}", val_class=cls_lb),
-        _html_sim_res_card("IR", ir_, sub=ir_sub),
-        _html_sim_res_card("Lucro líquido", lucro_l, sub=f"ROI líq. {roi_l}{anual_suf_l}", val_class=cls_ll),
-    ]
-    lmx = o.lance_maximo_para_roi_desejado
-    lmx_ok = lmx is not None and float(lmx) > 0
-    lmax_val = _fmt_valor_campo("valor_venda", float(lmx)) if lmx_ok else "—"
-    lmax_sub_parts: list[str] = []
-    rinf = o.roi_desejado_pct_informado
-    if rinf is not None and float(rinf) > 0:
-        modo_inf = str(o.roi_desejado_modo_informado or "bruto").strip().lower()
-        base_lbl = "ROI bruto" if modo_inf in ("bruto", "") else "ROI líquido"
-        lmax_sub_parts.append(f"Meta {float(rinf):.2f} % · {base_lbl}")
-    if o.lance_maximo_roi_notas:
-        lmax_sub_parts.append(str(o.lance_maximo_roi_notas[0])[:160])
-    lmax_sub = (
-        " · ".join(lmax_sub_parts)
-        if lmax_sub_parts
-        else ("Informe ROI desejado > 0 para estimar o teto de lance." if not lmx_ok else "")
-    )
-    sec_lance_max = [
-        _html_sim_res_card(
-            "Lance máximo recomendado",
-            lmax_val,
-            sub=lmax_sub,
-            accent=bool(lmx_ok),
-        ),
-    ]
-    sec_horizonte: list[str] = []
-    if (o.tempo_estimado_venda_meses_resolvido or 0) > 0 and str(o.modo_pagamento_resolvido or "").strip():
-        mp_r = str(o.modo_pagamento_resolvido or "").replace("_", " ")
-        sec_horizonte = [
-            _html_sim_res_card(
-                "Tempo até a venda (T)",
-                f"{o.tempo_estimado_venda_meses_resolvido:.1f} meses",
-                sub=mp_r,
-            ),
-            _html_sim_res_card(
-                "Desembolso de caixa (até a venda)",
-                _fmt_valor_campo("valor_venda", o.investimento_cash_ate_momento_venda or 0),
-                sub="Inclui entrada, custos iniciais e parcelas vencidas em T (base p/ ROI).",
-            ),
-        ]
-        if (o.saldo_divida_quitacao_na_venda or 0) > 0.5:
-            sec_horizonte.append(
-                _html_sim_res_card(
-                    "Quitação (saldo na venda)",
-                    _fmt_valor_campo("valor_venda", o.saldo_divida_quitacao_na_venda),
-                    sub="Saldo a liquidar com o comprador/instituição no repasse.",
-                )
-            )
-        if (o.pmt_mensal_resolvido or 0) > 0.5:
-            sec_horizonte.append(
-                _html_sim_res_card(
-                    "Parcela (referência)",
-                    _fmt_valor_campo("valor_venda", o.pmt_mensal_resolvido),
-                    sub="SAC: 1.ª prestação (amort.+juros). Price: PMT fixa. Taxa a.a. → juros mensais compostos.",
-                )
-            )
-        if (o.total_juros_ate_momento_venda or 0) > 0.5:
-            sec_horizonte.append(
-                _html_sim_res_card(
-                    "Juros no período",
-                    _fmt_valor_campo("valor_venda", o.total_juros_ate_momento_venda),
-                    sub="Parte de juros nas parcelas até T (aprox. Price/SAC).",
-                )
-            )
-    fin_blocks: list[str] = [
-        _html_sim_res_section("Mercado", sec_mercado),
-    ]
-    if sec_horizonte:
-        fin_blocks.append(_html_sim_res_section("Prazo até a venda", sec_horizonte))
-    fin_blocks.append(_html_sim_res_section("Arrematação", sec_arrematacao))
-    if sec_desconto_av:
-        fin_blocks.append(_html_sim_res_section("Desconto à vista", sec_desconto_av))
-    fin_blocks.extend(
-        [
-            _html_sim_res_section("Tributos", sec_tributos),
-            _html_sim_res_section("Custo e reforma", sec_custo_ref),
-            _html_sim_res_section("Totais", sec_totais),
-            _html_sim_res_section("Lucro e IR", sec_lucro),
-            _html_sim_res_section("Sensibilidade (ROI desejado)", sec_lance_max),
-        ]
-    )
-    return "".join(fin_blocks)
-
-
-def _lance_brl_da_simulacao_gravada(row: dict[str, Any]) -> float:
-    """
-    Lance persistido em ``simulacoes_modalidades_json`` / legado ``operacao_simulacao_json``
-    (à vista: ``inputs.lance_brl``; se zero, tenta ``outputs.lance_brl``).
-    """
-    b0 = parse_simulacoes_modalidades_json(
-        row.get("simulacoes_modalidades_json"),
-        legado_operacao=row.get("operacao_simulacao_json"),
-    )
-    doc = b0.vista
-    l_in = float(doc.inputs.lance_brl or 0)
-    if l_in > 0:
-        return l_in
-    if doc.outputs is not None:
-        l_out = float(doc.outputs.lance_brl or 0)
-        if l_out > 0:
-            return l_out
-    return 0.0
-
-
-def _row_tem_simulacao_gravada(row: dict[str, Any] | None) -> bool:
-    """Há registo em ``simulacoes_modalidades_json`` ou em ``operacao_simulacao_json`` (inputs/outputs)."""
-    if not row or not isinstance(row, dict):
-        return False
-    if row.get("simulacoes_modalidades_json"):
-        return True
-    oj = row.get("operacao_simulacao_json")
-    if not oj or not isinstance(oj, dict):
-        return False
-    return bool(oj.get("outputs") or oj.get("inputs"))
-
-
 def _outputs_indicadores_operacao_ou_nada(
     row: dict[str, Any], caches: list[dict[str, Any]], ads_map: dict[str, Any]
 ) -> SimulacaoOperacaoOutputs | None:
     """
-    Com simulação gravada: ``calcular_simulacao`` (parâmetros do utilizador + caches).
-    Sem simulação: colunas pós-cache / recomputo a partir de ``valor_mercado_estimado`` (6% corretagem, IR 15% s/ lucro bruto).
+    Com simulação **gravada** (outputs reais no JSON): ``calcular_simulacao``.
+    Caso contrário, apenas **pós-cache** (``metricas_lucro_roi_pos_cache`` / colunas) —
+    nunca defaults da simulação.
     """
-    if _row_tem_simulacao_gravada(row):
+    if leilao_imoveis_repo.leilao_tem_simulacao_utilizador_gravada(row):
         try:
             doc0 = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
             doc_sim = calcular_simulacao(
@@ -1674,8 +1426,6 @@ def _render_simulacao_operacao(
                 st.caption(n)
 
     with _form_ctx:
-        doc0 = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
-        inp0 = doc0.inputs
         simop_restaurar_draft_de_snapshot(iid)
         _simop_hidratar_modalidades(iid, row, row.get("operacao_simulacao_json"))
         mpk = simop_key_mpag(iid)
@@ -1963,7 +1713,7 @@ def _render_simulacao_operacao(
                 )
                 r3 = st.columns(4, gap="small")
                 with r3[0]:
-                    cond = number_compact(
+                    _cond = number_compact(
                         "Condom. (R$)",
                         w=W_BRL,
                         min_value=0.0,
@@ -1971,7 +1721,7 @@ def _render_simulacao_operacao(
                         key=_sk("cond"),
                     )
                 with r3[1]:
-                    iptu = number_compact(
+                    _iptu = number_compact(
                         "IPTU (R$)",
                         w=W_BRL,
                         min_value=0.0,
@@ -1979,7 +1729,7 @@ def _render_simulacao_operacao(
                         key=_sk("iptu"),
                     )
                 with r3[2]:
-                    desoc = number_compact(
+                    _desoc = number_compact(
                         "Desoc. (R$)",
                         w=W_BRL,
                         min_value=0.0,
@@ -1987,7 +1737,7 @@ def _render_simulacao_operacao(
                         key=_sk("des"),
                     )
                 with r3[3]:
-                    outros = number_compact(
+                    _outros = number_compact(
                         "Outros (R$)",
                         w=W_BRL,
                         min_value=0.0,
@@ -2024,9 +1774,6 @@ def _render_simulacao_operacao(
                     f"Prévia reforma: {_fmt_valor_campo('valor_venda', ref_pv_brl)} ({ref_pv_tag})"
                     + (f" · {area_sim:.0f} m²" if area_sim > 0 else "")
                 )
-
-        ir_pf_pct = float(st.session_state.get(_sk("ir_pf"), inp0_tag.ir_aliquota_pf_pct))
-        ir_pj_pct = float(st.session_state.get(_sk("ir_pj"), inp0_tag.ir_aliquota_pj_pct))
 
         prov_venda = inp0_tag.model_copy(
             update={
@@ -2279,7 +2026,9 @@ def _render_simulacao_operacao(
             logger.debug("Snapshot relatório simulação", exc_info=True)
         with st.container(border=True):
             st.markdown('<div class="sim-card-head">Persistência</div>', unsafe_allow_html=True)
-            _tip_btn_persist = "primary" if _row_tem_simulacao_gravada(row) else "secondary"
+            _tip_btn_persist = (
+                "primary" if leilao_imoveis_repo.leilao_tem_simulacao_utilizador_gravada(row) else "secondary"
+            )
             ab1, ab2, ab3 = st.columns(3, gap="small")
             with ab1:
                 if st.button(
@@ -2290,12 +2039,16 @@ def _render_simulacao_operacao(
                 ):
                     try:
                         cli = get_supabase_client()
-                        pay_doc = doc.model_dump(mode="json")
+                        # Recalcula imediatamente antes de gravar — evita desvio JSON vs colunas
+                        doc_gravar = calcular_simulacao(
+                            row_leilao=row, inp=inp, caches_ordenados=caches, ads_por_id=ads_map
+                        )
+                        pay_doc = doc_gravar.model_dump(mode="json")
                         b_merge = parse_simulacoes_modalidades_json(
                             row.get("simulacoes_modalidades_json"),
                             legado_operacao=row.get("operacao_simulacao_json"),
                         )
-                        b_new = b_merge.model_copy(update={"vista": doc})
+                        b_new = b_merge.model_copy(update={"vista": doc_gravar})
                         leilao_imoveis_repo.atualizar_operacao_e_modalidades(
                             iid, pay_doc, b_new.model_dump(mode="json"), cli
                         )
@@ -2352,6 +2105,31 @@ def _render_simulacao_operacao(
                     "**Gravar as 3** recalcula e salva vista + parcelado + financiado; o legado segue a simulação **à vista**. "
                     "Lucro bruto = venda − custos − corretagem; com desconto à vista, subtotal com **lance pago**; ITBI comiss. no nominal."
                 )
+            dbg1, dbg2 = st.columns(2, gap="small")
+            _sim_dbg = build_simulacao_debug_payload(row, inp, doc)
+            _sim_dbg_s = json.dumps(_sim_dbg, ensure_ascii=False, indent=2)
+            with dbg1:
+                st.download_button(
+                    "Descarregar JSON (análise)",
+                    data=_sim_dbg_s,
+                    file_name=f"sim_debug_{(iid or '')[:12]}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    help="Parcelas, controle algebrico e pós-cache para comparar com o teu cálculo manual.",
+                    key=_sk("dbg_json_dl"),
+                )
+            with dbg2:
+                if st.button(
+                    "Gravar JSON no projeto (…/_debug/)",
+                    use_container_width=True,
+                    help="Cria/actualiza leilao_ia_v2/_debug/ultima_simulacao_<id>.json (gitignore).",
+                    key=_sk("dbg_json_path"),
+                ):
+                    try:
+                        _, p_dbg = export_simulacao_debug_json(row, inp, doc)
+                        st.success(f"Ficheiro gravado: `{p_dbg}`")
+                    except OSError as e:
+                        st.error(f"Não foi possível gravar: {e}")
 
         o_cmp: SimulacaoOperacaoOutputs | None = None
         _tit_cmp: str | None = None
@@ -4519,56 +4297,69 @@ def _aplicar_snapshot_apos_ingestao_ok(r: Any) -> None:
     )
 
 
-def _render_bloco_duplicata_ingestao() -> None:
-    st.warning("Esta URL já existe no banco. Escolha como proceder.")
-    st.json(st.session_state.pending_duplicate_registro)
-    ign = _ignorar_cache_firecrawl_sidebar()
-    c1, c2 = st.columns(2)
-    cli = get_supabase_client()
-    with c1:
-        if st.button("Sobrescrever registro", type="primary", key="dup_ingest_overwrite"):
-            r = executar_ingestao_edital(
-                st.session_state.pending_duplicate_url,
-                cli,
-                sobrescrever_duplicata=True,
-                ignorar_cache_firecrawl=ign,
-            )
-            st.session_state.pending_duplicate_url = None
-            st.session_state.pending_duplicate_registro = None
-            _aplicar_snapshot_apos_ingestao_ok(r)
-            st.session_state["assistente_modo"] = "ingestao"
-            st.session_state.pop("_dash_rows", None)
-            st.success("Atualizado.")
-            st.rerun()
-    with c2:
-        if st.button("Manter registro atual", key="dup_ingest_keep"):
-            url_dup = st.session_state.pending_duplicate_url
-            r = executar_ingestao_edital(
-                url_dup,
-                cli,
-                sobrescrever_duplicata=False,
-                ignorar_cache_firecrawl=ign,
-            )
-            st.session_state.pending_duplicate_url = None
-            st.session_state.pending_duplicate_registro = None
-            m = r.metricas_llm or {}
-            st.session_state.snapshot = {
-                "url": r.url_leilao,
-                "status": r.modo,
-                "nota": r.log or "",
-            }
-            row_kept = leilao_imoveis_repo.buscar_por_url_leilao(
-                normalizar_url_leilao(url_dup), cli
-            )
-            st.session_state["ultimo_extracao"] = row_kept
-            _acumular_metricas_sidebar(
-                m,
-                row_kept if isinstance(row_kept, dict) else None,
-                firecrawl_chamadas_api_ingestao=r.firecrawl_chamadas_api_total,
-            )
-            st.session_state["assistente_modo"] = "ingestao"
-            st.info("Sem alterações no banco.")
-            st.rerun()
+def _render_sidebar_ingest_alerta_duplicata() -> None:
+    reg = st.session_state.get("pending_duplicate_registro")
+    pend = st.session_state.get("pending_duplicate_url")
+    if not reg or not pend:
+        return
+    st.sidebar.warning(
+        f"**URL já cadastrada** — {reg.get('cidade') or '—'}/"
+        f"{reg.get('estado') or '—'}. Cole **outra URL** abaixo ou toque em *Dispensar*."
+    )
+    ex_url = str(reg.get("url_leilao") or "")
+    if ex_url:
+        corte = 96
+        st.sidebar.caption(f"No sistema: {ex_url[:corte]}{'…' if len(ex_url) > corte else ''}")
+    if st.sidebar.button("Dispensar aviso", type="secondary", use_container_width=True, key="dup_ingest_dismiss"):
+        st.session_state.pending_duplicate_url = None
+        st.session_state.pending_duplicate_registro = None
+        st.rerun()
+    with st.sidebar.expander("Atualizar registro existente (avançado)", expanded=False):
+        ign = _ignorar_cache_firecrawl_sidebar()
+        c1, c2 = st.sidebar.columns(2)
+        cli = get_supabase_client()
+        with c1:
+            if st.button("Sobrescrever", type="primary", use_container_width=True, key="sidebar_dup_ingest_overwrite"):
+                r = executar_ingestao_edital(
+                    st.session_state.pending_duplicate_url,
+                    cli,
+                    sobrescrever_duplicata=True,
+                    ignorar_cache_firecrawl=ign,
+                )
+                st.session_state.pending_duplicate_url = None
+                st.session_state.pending_duplicate_registro = None
+                _aplicar_snapshot_apos_ingestao_ok(r)
+                st.session_state["assistente_modo"] = "ingestao"
+                st.session_state.pop("_dash_rows", None)
+                st.rerun()
+        with c2:
+            if st.button("Manter", use_container_width=True, key="sidebar_dup_ingest_keep"):
+                url_dup = st.session_state.pending_duplicate_url
+                r = executar_ingestao_edital(
+                    url_dup,
+                    cli,
+                    sobrescrever_duplicata=False,
+                    ignorar_cache_firecrawl=ign,
+                )
+                st.session_state.pending_duplicate_url = None
+                st.session_state.pending_duplicate_registro = None
+                m = r.metricas_llm or {}
+                st.session_state.snapshot = {
+                    "url": r.url_leilao,
+                    "status": r.modo,
+                    "nota": r.log or "",
+                }
+                row_kept = leilao_imoveis_repo.buscar_por_url_leilao(
+                    normalizar_url_leilao(url_dup), cli
+                )
+                st.session_state["ultimo_extracao"] = row_kept
+                _acumular_metricas_sidebar(
+                    m,
+                    row_kept if isinstance(row_kept, dict) else None,
+                    firecrawl_chamadas_api_ingestao=r.firecrawl_chamadas_api_total,
+                )
+                st.session_state["assistente_modo"] = "ingestao"
+                st.rerun()
 
 
 def _executar_ingestao_url_sidebar() -> None:
@@ -4576,6 +4367,11 @@ def _executar_ingestao_url_sidebar() -> None:
     if not url:
         st.sidebar.error("Cole a URL do leilão.")
         return
+    nurl = normalizar_url_leilao(url)
+    pend = st.session_state.get("pending_duplicate_url")
+    if pend and nurl and nurl != pend:
+        st.session_state.pending_duplicate_url = None
+        st.session_state.pending_duplicate_registro = None
     ign = _ignorar_cache_firecrawl_sidebar()
     cli = get_supabase_client()
     try:
@@ -4584,8 +4380,15 @@ def _executar_ingestao_url_sidebar() -> None:
                 url, cli, sobrescrever_duplicata=None, ignorar_cache_firecrawl=ign
             )
     except EscolhaSobreDuplicataNecessaria as dup:
-        st.session_state.pending_duplicate_url = url
+        st.session_state.pending_duplicate_url = nurl
         st.session_state.pending_duplicate_registro = dup.registro_existente
+        st.session_state["ultimo_extracao"] = dup.registro_existente
+        st.session_state.snapshot = {
+            "url": nurl,
+            "status": "duplicata",
+            "id": str(dup.registro_existente.get("id") or ""),
+            "nota": "Cole outra URL na barra lateral ou disperse o aviso.",
+        }
         st.rerun()
         return
     except IngestaoSemConteudoEditalError as e:
@@ -4643,6 +4446,7 @@ def _render_sidebar_navegacao_modos() -> None:
 
 
 def _render_sidebar_ingest_url() -> None:
+    _render_sidebar_ingest_alerta_duplicata()
     st.sidebar.text_input(
         "URL do leilão",
         placeholder="https://…",
@@ -4857,7 +4661,7 @@ def _render_calendario_interativo_dash(d: Any) -> None:
             st.rerun()
 
     if st.session_state.get("_dash_dia_filtro"):
-        c_lim_a, c_lim_b, c_lim_c = st.columns([2, 1, 2])
+        _, c_lim_b, _ = st.columns([2, 1, 2])
         with c_lim_b:
             if st.button("✕", key="dash_cal_ver_todos", use_container_width=False, type="tertiary"):
                 st.session_state.pop("_dash_dia_filtro", None)
@@ -5035,10 +4839,6 @@ def _render_conteudo_principal() -> None:
         "</div></div>",
         unsafe_allow_html=True,
     )
-
-    if st.session_state.pending_duplicate_url:
-        _render_bloco_duplicata_ingestao()
-        st.stop()
 
     _render_pendente_frase_firecrawl_pos_ingest()
 

@@ -13,7 +13,6 @@ python-dotenv>=1.0
 firecrawl-py>=1.15
 streamlit>=1.36
 streamlit-extras>=0.3.5
-streamlit-shadcn-ui>=0.1.19
 streamlit-folium>=0.23.0
 folium>=0.17.0
 geopy>=2.4

@@ -10,10 +10,12 @@ def test_buscar_por_url_leilao_encontrado():
     resp.data = [{"id": "u1", "url_leilao": "https://leilao.example/x"}]
     lim_ = MagicMock()
     lim_.execute.return_value = resp
-    eq = MagicMock()
-    eq.limit.return_value = lim_
+    ord_ = MagicMock()
+    ord_.limit.return_value = lim_
+    inn = MagicMock()
+    inn.order.return_value = ord_
     sel = MagicMock()
-    sel.eq.return_value = eq
+    sel.in_.return_value = inn
     tbl = MagicMock()
     tbl.select.return_value = sel
     client.table.return_value = tbl
@@ -21,6 +23,9 @@ def test_buscar_por_url_leilao_encontrado():
     row = lim.buscar_por_url_leilao("https://leilao.example/x", client)
     assert row["id"] == "u1"
     client.table.assert_called_with(TABELA_LEILAO_IMOVEIS)
+    cargs = sel.in_.call_args[0]
+    assert cargs[0] == "url_leilao"
+    assert "https://leilao.example/x" in cargs[1]
 
 
 def test_remover_cache_media_bairro_id():
@@ -72,10 +77,12 @@ def test_buscar_por_url_leilao_vazio():
     resp.data = []
     lim_ = MagicMock()
     lim_.execute.return_value = resp
-    eq = MagicMock()
-    eq.limit.return_value = lim_
+    ord_ = MagicMock()
+    ord_.limit.return_value = lim_
+    inn = MagicMock()
+    inn.order.return_value = ord_
     sel = MagicMock()
-    sel.eq.return_value = eq
+    sel.in_.return_value = inn
     tbl = MagicMock()
     tbl.select.return_value = sel
     client.table.return_value = tbl

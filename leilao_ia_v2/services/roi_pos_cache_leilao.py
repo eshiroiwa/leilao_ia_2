@@ -1,8 +1,9 @@
 """
 Após a montagem do cache de mercado, estima ROI bruto, lucro bruto/líquido, ROI líquido
 e lance máximo (50% de ROI bruto) a partir de ``valor_medio_venda`` / min / max do
-``cache_media_bairro`` principal. Inclui 6% de comissão imobiliária s/ venda; lucro
-líquido projeta 15% de IR (PF) sobre o lucro bruto positivo.
+``cache_media_bairro`` principal. Receita líquida: venda menos 6% de corretagem; na compra
+``L * (1 + r) + C_fix`` com 5%+3%+2% (e reforma, **zero** se tipo for terreno/lote) — alinhado a ``simulacao_operacao``.
+Lucro líquido: 15% de IR (PF) sobre o lucro bruto positivo.
 
 Persiste em colunas de ``leilao_imoveis`` (ver ``012``/``013`` em ``leilao_ia_v2/sql/``).
 """
@@ -17,6 +18,7 @@ from typing import Any, Optional
 
 from supabase import Client
 
+from leilao_ia_v2.normalizacao import normalizar_tipo_imovel
 from leilao_ia_v2.persistence import cache_media_bairro_repo, leilao_imoveis_repo
 
 logger = logging.getLogger(__name__)
@@ -63,27 +65,117 @@ def _parse_extra_leilao(row: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def aplica_comissao_leiloeiro(row: dict[str, Any]) -> bool:
-    """
-    Em Caixa / venda direta online / venda online, não há 5% de comissão de leiloeiro
-    (só impostos % sobre a base alvo).
-    """
-    url = str(row.get("url_leilao") or "").lower()
+def _blob_texto_sinais_leiloeiro(row: dict[str, Any]) -> str:
+    """URL + `leilao_extra_json` + início do edital (onde costuma surgir a modalidade)."""
     ex = _parse_extra_leilao(row)
-    ex_txt = json.dumps(ex, ensure_ascii=False).lower()
-    if "caixa.gov" in url or "venda online" in ex_txt or "venda direta" in ex_txt:
-        return False
-    if re.search(
-        r"\b(caixa|venda\s+direta|venda\s+online|leilao\s*online|online\s*sem\s*leiloeiro)\b",
-        ex_txt,
+    partes: list[str] = [str(row.get("url_leilao") or "")]
+    for k in (
+        "observacoes_markdown",
+        "regras_leilao_markdown",
+        "modalidade_venda",
+        "tipo_pagamento_resumo",
     ):
-        return False
+        v = ex.get(k)
+        if v is not None and v != "":
+            partes.append(str(v))
+    em = row.get("edital_markdown")
+    if em:
+        partes.append(str(em)[:20000])
+    return "\n".join(partes)
+
+
+def _possui_exige_comissao_leiloeiro_licitacao_ou_sfi(txt: str) -> bool:
+    """
+    Licitação aberta (presencial) e leilão SFI: em geral há comissão de leiloeiro.
+    """
+    t = txt
     if re.search(
-        r"\b(caixa|venda\s+direta|venda\s+online)\b",
-        url,
+        r"licita[ç]ão\s+aberta|licitacao\s+aberta|licita[ç]ão[-\s]aberta",
+        t,
+        re.I,
     ):
+        return True
+    if re.search(r"leil[aã]o\s+sfi|leilao\s+sfi|leil[aã]o[-\s]sfi|leilao[-\s]sfi", t, re.I):
+        return True
+    return False
+
+
+def _caixa_tem_sinal_comissao_leiloeiro(txt: str) -> bool:
+    """
+    Sinais de que a Caixa cobra 5% de leiloeiro: pessoa, leilão único, licitação aberta, SFI, etc.
+    (texto de edital / observações; normalmente em português.)
+    """
+    t = txt
+    if re.search(
+        r"leiloeiro\s*\(a\)|leiloeir[oa]\s*\(a\)|\bleiloeir[oa]s?\b|leiloeiros?",
+        t,
+        re.I,
+    ):
+        return True
+    if re.search(
+        r"leil[aã]o\s+[uú]nico|leilao\s+unico|leil[aã]o[-\s]+[uú]nico|leilao[-\s]unico",
+        t,
+        re.I,
+    ):
+        return True
+    if _possui_exige_comissao_leiloeiro_licitacao_ou_sfi(txt):
+        return True
+    return False
+
+
+def _caixa_tem_sinal_isencao_comissao_leiloeiro(txt: str) -> bool:
+    """
+    Sem 5% de leiloeiro na Caixa: *venda online*, *compra direta* ou *venda direta online*
+    (o edital de compra/venda directa no portal, não confundir com leilão com leiloeiro nomeado).
+    """
+    t = " ".join(str(txt).split())
+    t = t.lower()
+    if re.search(r"\bcompra\s+direta\b", t, re.I):
+        return True
+    if re.search(r"\bvenda\s+on[-\s]?line\b", t, re.I):
+        return True
+    if re.search(r"venda\s+direta\s+on[-\s]?line", t, re.I):
+        return True
+    return False
+
+
+def _caixa_aplica_regra_comissao_leiloeiro(txt: str) -> bool:
+    """
+    1) Qualquer sinal de comissão (leiloeiro, leilão único, licitação aberta, SFI) → cobra 5%.
+    2) Senão, sinal de isenção (venda online, compra direta, venda direta online) → não cobra.
+    3) Senão, assume-se leilão com comissão (regra conservadora no portal Caixa).
+    """
+    if _caixa_tem_sinal_comissao_leiloeiro(txt):
+        return True
+    if _caixa_tem_sinal_isencao_comissao_leiloeiro(txt):
         return False
     return True
+
+
+def aplica_comissao_leiloeiro(row: dict[str, Any]) -> bool:
+    """
+    Retorna se incidem os 5% de comissão de leiloeiro sobre a arrematação (o resto do ``r`` continua 3+2%).
+
+    **Caixa (``caixa.gov``):** regra própria em ``_caixa_aplica_regra_comissao_leiloeiro``
+    (leiloeiro, leilão único, licitação aberta, etc. → cobra; venda online, compra direta → não cobra).
+
+    **Fora da Caixa:** considera-se sempre comissão de leiloeiro (5%).
+    """
+    url = str(row.get("url_leilao") or "").lower()
+    if "caixa.gov" in url:
+        return _caixa_aplica_regra_comissao_leiloeiro(_blob_texto_sinais_leiloeiro(row))
+    return True
+
+
+def imovel_sem_reforma_pos_cache(row: dict[str, Any]) -> bool:
+    """
+    Terreno ou lote: no pós-cache a reforma estimada (tabela R$/m²) não se aplica — custo 0.
+    Alinhado ao segmento terrenos no cache de mercado.
+    """
+    t = normalizar_tipo_imovel(row.get("tipo_imovel"))
+    if not t or t == "desconhecido":
+        return False
+    return t in ("terreno", "lote")
 
 
 def _lance_referencia_brl(row: dict[str, Any]) -> float:
@@ -139,11 +231,14 @@ class RoiPosCacheResultado:
     payload: dict[str, Any]
 
 
-def _custo_reforma_pos_cache(area_m2: float) -> float:
+def _custo_reforma_pos_cache(area_m2: float, *, sem_reforma: bool = False) -> float:
     """
     Só a reforma (R$) para o agente pós-cache, sem desocupação.
+    - ``sem_reforma`` (terreno/lote): 0
     - sem área (>0) não aplicável: 0; até 50 m²: 10.000; até 70 m²: 15.000; acima: 500 × m².
     """
+    if sem_reforma:
+        return 0.0
     a = float(area_m2)
     if a <= 0.0:
         return 0.0
@@ -154,19 +249,21 @@ def _custo_reforma_pos_cache(area_m2: float) -> float:
     return REFORMA_RS_POR_M2 * a
 
 
-def _custo_fixos(area_m2: float) -> float:
-    c = _custo_reforma_pos_cache(area_m2)
+def _custo_fixos(area_m2: float, *, sem_reforma: bool = False) -> float:
+    c = _custo_reforma_pos_cache(area_m2, sem_reforma=sem_reforma)
     if area_m2 > LIMIAR_M2_DESOC:
         c += DESOCUPACAO_ACIMA_100M2
     return c
 
 
-def _venda_liquida_projetada(valor_venda: float, r: float) -> float:
+def _venda_liquida_projetada(valor_venda: float) -> float:
     """
-    Receita líquida do lado da venda (simplificação alinhada à simulação v2):
-    tributos/encargos modelados com taxa `r` sobre V e, em separado, 6% de corretagem s/ V.
+    Receita líquida no pós-cache: **só** 6% de comissão imobiliária s/ V.
+    Comissão de leiloeiro, ITBI e registro entram no investimento
+    ``L * (1 + r) + C_fix``, não em V.
     """
-    return valor_venda * (1.0 - r) - PCT_COMISSAO_IMOBILIARIA * valor_venda
+    v = float(valor_venda)
+    return v - PCT_COMISSAO_IMOBILIARIA * v
 
 
 def calcular_roi_e_lance_max(
@@ -175,17 +272,17 @@ def calcular_roi_e_lance_max(
     area_m2: float,
     *,
     aplica_5: bool,
+    sem_reforma: bool = False,
 ) -> tuple[Optional[float], Optional[float]]:
     """
     Retorna (roi_projetado_pct, lance_max_50).
 
-    - v_liq_venda = V * (1 - r) - 6% V (comissão imobiliária s/ venda)
-    - Lucro = v_liq_venda - L * (1 + r) - C_fix
-    - Investimento = L * (1 + r) + C_fix
-    - r = _taxa_total (compra; mesmo r na aquisição)
+    - v_liq_venda = V - 6% V (comissão imob.); 5%+3%+2% só no investimento (L*(1+r)+C_fix)
+    - Lucro = v_liq_venda - (L * (1 + r) + C_fix)
+    - r = _taxa_total (comissões/tributos **sobre a arrematação**)
     """
     m = metricas_lucro_roi_pos_cache(
-        valor_venda, lance, area_m2, aplica_5_leiloeiro=aplica_5
+        valor_venda, lance, area_m2, aplica_5_leiloeiro=aplica_5, sem_reforma=sem_reforma
     )
     return m.get("roi_projetado"), m.get("lance_maximo_recomendado")
 
@@ -196,13 +293,14 @@ def metricas_lucro_roi_pos_cache(
     area_m2: float,
     *,
     aplica_5_leiloeiro: bool,
+    sem_reforma: bool = False,
 ) -> dict[str, Any]:
     """
     Uma fonte de verdade para o agente pós-cache: lucros, ROIs, lance máximo (50% ROI bruto),
     com 6% corretagem s/ venda e IR 15% s/ lucro bruto (PF, sobre lucro positivo).
     Chaves nulas se não houver lance/valor.
     """
-    C_fix = _custo_fixos(area_m2)
+    C_fix = _custo_fixos(area_m2, sem_reforma=sem_reforma)
     r = _taxa_total(aplica_5_leiloeiro=aplica_5_leiloeiro)
     out: dict[str, Any] = {
         "roi_projetado": None,
@@ -213,7 +311,7 @@ def metricas_lucro_roi_pos_cache(
     }
     if valor_venda <= 0 or lance <= 0:
         return out
-    v_liq = _venda_liquida_projetada(valor_venda, r)
+    v_liq = _venda_liquida_projetada(valor_venda)
     invest = lance * (1.0 + r) + C_fix
     if invest <= 0:
         return out
@@ -256,7 +354,11 @@ def metricas_pos_cache_de_leilao_row(row: dict[str, Any]) -> Optional[dict[str, 
     if l <= 0:
         return None
     return metricas_lucro_roi_pos_cache(
-        v, l, a, aplica_5_leiloeiro=aplica_comissao_leiloeiro(row)
+        v,
+        l,
+        a,
+        aplica_5_leiloeiro=aplica_comissao_leiloeiro(row),
+        sem_reforma=imovel_sem_reforma_pos_cache(row),
     )
 
 
@@ -266,7 +368,12 @@ def estimar_e_gravar_roi_pos_cache(
 ) -> RoiPosCacheResultado:
     """
     Lê o 1.º cache em ``cache_media_bairro_ids``; se houver amostra, grava
-    `valor_mercado_estimado`, reforma, min/max, `roi_projetado`, `lance_maximo_recomendado`.
+    `valor_mercado_estimado` (e métricas heurísticas) a partir do cache e do lance.
+
+    Se o leilão já tiver ``operacao_simulacao_json`` com ``outputs`` (simulação gravada),
+    **não** sobrescreve lucro, ROI, valor, reforma e lance máximo — passam a vir só de
+    ``calcular_simulacao`` + ``atualizar_operacao_e_modalidades`` (evita pós-cache a
+    anular o alinhamento com o documento).
     """
     lid = str(leilao_imovel_id or "").strip()
     if not lid:
@@ -299,13 +406,14 @@ def estimar_e_gravar_roi_pos_cache(
         )
 
     aplica5 = aplica_comissao_leiloeiro(row)
+    sem_reforma = imovel_sem_reforma_pos_cache(row)
     lance = _lance_referencia_brl(row)
-    custo_reforma = round(_custo_reforma_pos_cache(area), 2)
+    custo_reforma = round(_custo_reforma_pos_cache(area, sem_reforma=sem_reforma), 2)
 
     m_comp: dict[str, Any] = {}
     if lance > 0:
         m_comp = metricas_lucro_roi_pos_cache(
-            v_merc, lance, area, aplica_5_leiloeiro=aplica5
+            v_merc, lance, area, aplica_5_leiloeiro=aplica5, sem_reforma=sem_reforma
         )
     else:
         logger.info(
@@ -324,5 +432,14 @@ def estimar_e_gravar_roi_pos_cache(
         "lucro_liquido_projetado": m_comp.get("lucro_liquido_projetado"),
         "roi_liquido_projetado": m_comp.get("roi_liquido_projetado"),
     }
-    leilao_imoveis_repo.atualizar_leilao_imovel(lid, {k: v for k, v in payload.items() if v is not None}, client)
+    if leilao_imoveis_repo.leilao_tem_indicadores_simulacao_gravados(row.get("operacao_simulacao_json")):
+        for k in leilao_imoveis_repo.COLUNAS_INDICADORES_SOMENTE_SIMULACAO:
+            payload.pop(k, None)
+        logger.info(
+            "ROI pós-cache: não sobrescreve indicadores financeiros (já há `operacao_simulacao_json.outputs`); "
+            "mantém-se max/min de região. leilao=%s",
+            lid[:12],
+        )
+    to_write = {k: v for k, v in payload.items() if v is not None}
+    leilao_imoveis_repo.atualizar_leilao_imovel(lid, to_write, client)
     return RoiPosCacheResultado(True, "gravado", payload)

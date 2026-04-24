@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 

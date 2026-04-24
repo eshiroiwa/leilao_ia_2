@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from supabase import Client
+from postgrest.exceptions import APIError
 
 from leilao_ia_v2.config.busca_mercado_parametros import get_busca_mercado_parametros
 from leilao_ia_v2.constants import STATUS_PENDENTE
@@ -54,6 +55,11 @@ class ResultadoIngestaoEdital:
 
 def _montar_log_linhas(*linhas: str) -> str:
     return "\n".join(l for l in linhas if l)
+
+
+def _eh_violacao_unique_url_insert(e: APIError) -> bool:
+    c = getattr(e, "code", None)
+    return c in ("23505", 23505)
 
 
 def _modalidade_venda_apos_datas(ext: ExtracaoEditalLLM) -> LeilaoExtraJson:
@@ -311,20 +317,35 @@ def executar_ingestao_edital(
         longitude=coords[1] if coords else None,
     )
 
-    if existente:
-        iid = str(existente["id"])
-        prev_cache = list(existente.get("cache_media_bairro_ids") or [])
+    alvo: Optional[dict] = existente
+    insercao_row: Optional[dict] = None
+    if alvo is None:
+        try:
+            insercao_row = leilao_imoveis_repo.inserir_leilao_imovel(payload, client)
+        except APIError as e:
+            if not _eh_violacao_unique_url_insert(e):
+                raise
+            alvo = leilao_imoveis_repo.buscar_por_url_leilao(url, client)
+            if alvo is None:
+                raise
+            if sobrescrever_duplicata is None:
+                raise EscolhaSobreDuplicataNecessaria(alvo) from e
+            insercao_row = None
+    if insercao_row is not None:
+        imovel_id = str(insercao_row.get("id") or "")
+        log_parts.append(f"Inserido id={imovel_id}")
+        modo_out: Literal["inserido", "atualizado", "ignorado_duplicata"] = "inserido"
+    elif alvo is not None:
+        iid = str(alvo["id"])
+        prev_cache = list(alvo.get("cache_media_bairro_ids") or [])
         if prev_cache:
             payload["cache_media_bairro_ids"] = prev_cache
         leilao_imoveis_repo.atualizar_leilao_imovel(iid, payload, client)
         log_parts.append(f"Registro atualizado id={iid}")
         imovel_id = iid
-        modo_out: Literal["inserido", "atualizado", "ignorado_duplicata"] = "atualizado"
+        modo_out = "atualizado"
     else:
-        row = leilao_imoveis_repo.inserir_leilao_imovel(payload, client)
-        imovel_id = str(row.get("id") or "")
-        log_parts.append(f"Inserido id={imovel_id}")
-        modo_out = "inserido"
+        raise RuntimeError("gravação do leilão: insert não retornou linha e não há registro a atualizar")
 
     summ: dict[str, Any] = {}
     pos_cache: dict[str, Any] = {}
@@ -410,28 +431,4 @@ def executar_ingestao_edital(
         pos_comparaveis=summ,
         pos_cache=pos_cache,
         firecrawl_chamadas_api_total=n_fc_total,
-    )
-
-
-def executar_ingestao_edital_sobrescrever(
-    url: str,
-    client: Client,
-    *,
-    ignorar_cache_firecrawl: bool = False,
-) -> ResultadoIngestaoEdital:
-    """Atualiza registro existente da URL (ou insere se não existir)."""
-    url = normalizar_url_leilao(url)
-    existente = leilao_imoveis_repo.buscar_por_url_leilao(url, client)
-    if existente:
-        return executar_ingestao_edital(
-            url,
-            client,
-            sobrescrever_duplicata=True,
-            ignorar_cache_firecrawl=ignorar_cache_firecrawl,
-        )
-    return executar_ingestao_edital(
-        url,
-        client,
-        sobrescrever_duplicata=None,
-        ignorar_cache_firecrawl=ignorar_cache_firecrawl,
     )

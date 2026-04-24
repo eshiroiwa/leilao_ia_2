@@ -26,6 +26,7 @@ from leilao_ia_v2.exceptions import (
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
 from leilao_ia_v2.pipeline.ingestao_edital import executar_ingestao_edital
 from leilao_ia_v2.planilha_urls import ler_urls_de_planilha
+from leilao_ia_v2.normalizacao import normalizar_url_leilao
 from leilao_ia_v2.supabase_client import get_supabase_client
 from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS
 
@@ -45,38 +46,45 @@ st.caption("Firecrawl + LLM + Supabase. Duplicata: confirme se deseja sobrescrev
 
 ignorar_cache = st.sidebar.checkbox("Ignorar cache em disco do Firecrawl", value=False)
 
-if st.session_state.pending_duplicate_url:
-    st.warning("Há uma URL aguardando decisão de sobrescrita.")
-    st.json(st.session_state.pending_duplicate_registro)
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Sobrescrever registro existente", type="primary"):
-            cli = get_supabase_client()
-            r = executar_ingestao_edital(
-                st.session_state.pending_duplicate_url,
-                cli,
-                sobrescrever_duplicata=True,
-                ignorar_cache_firecrawl=ignorar_cache,
-            )
-            st.success(f"Atualizado: {r.modo} id={r.id}")
-            st.text(r.log)
-            st.session_state.pending_duplicate_url = None
-            st.session_state.pending_duplicate_registro = None
-            st.rerun()
-    with c2:
-        if st.button("Manter registro atual (não alterar)"):
-            cli = get_supabase_client()
-            r = executar_ingestao_edital(
-                st.session_state.pending_duplicate_url,
-                cli,
-                sobrescrever_duplicata=False,
-                ignorar_cache_firecrawl=ignorar_cache,
-            )
-            st.info(r.log)
-            st.session_state.pending_duplicate_url = None
-            st.session_state.pending_duplicate_registro = None
-            st.rerun()
-    st.stop()
+if st.session_state.pending_duplicate_registro and st.session_state.pending_duplicate_url:
+    reg = st.session_state.pending_duplicate_registro
+    st.warning(
+        f"**URL já cadastrada** — {reg.get('cidade') or '—'}/{reg.get('estado') or '—'}. "
+        "Informe outra URL na aba abaixo ou toque em *Dispensar*."
+    )
+    if st.button("Dispensar aviso", type="secondary", key="ingestao_dup_dismiss"):
+        st.session_state.pending_duplicate_url = None
+        st.session_state.pending_duplicate_registro = None
+        st.rerun()
+    with st.expander("Atualizar registro (avançado)"):
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Sobrescrever registro existente", type="primary", key="ingestao_dup_over"):
+                cli = get_supabase_client()
+                r = executar_ingestao_edital(
+                    st.session_state.pending_duplicate_url,
+                    cli,
+                    sobrescrever_duplicata=True,
+                    ignorar_cache_firecrawl=ignorar_cache,
+                )
+                st.success(f"Atualizado: {r.modo} id={r.id}")
+                st.text(r.log)
+                st.session_state.pending_duplicate_url = None
+                st.session_state.pending_duplicate_registro = None
+                st.rerun()
+        with c2:
+            if st.button("Manter (não alterar)", key="ingestao_dup_keep"):
+                cli = get_supabase_client()
+                r = executar_ingestao_edital(
+                    st.session_state.pending_duplicate_url,
+                    cli,
+                    sobrescrever_duplicata=False,
+                    ignorar_cache_firecrawl=ignorar_cache,
+                )
+                st.info(r.log)
+                st.session_state.pending_duplicate_url = None
+                st.session_state.pending_duplicate_registro = None
+                st.rerun()
 
 tab1, tab2 = st.tabs(["URL avulsa", "Planilha (URLs)"])
 
@@ -98,7 +106,7 @@ with tab1:
                 st.text(r.log)
                 st.json(r.metricas_llm)
             except EscolhaSobreDuplicataNecessaria as dup:
-                st.session_state.pending_duplicate_url = url_avulsa.strip()
+                st.session_state.pending_duplicate_url = normalizar_url_leilao(url_avulsa.strip())
                 st.session_state.pending_duplicate_registro = dup.registro_existente
                 st.warning("URL já cadastrada. Use os botões acima para sobrescrever ou manter.")
                 st.rerun()

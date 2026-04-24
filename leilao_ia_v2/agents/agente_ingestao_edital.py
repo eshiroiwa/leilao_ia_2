@@ -9,11 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Optional
 
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
 from agno.tools import tool
 
 from leilao_ia_v2.exceptions import (
@@ -115,33 +112,3 @@ def tool_ingestir_leilao_por_url(
     except Exception as e:
         logger.exception("tool_ingestir_leilao_por_url")
         return json.dumps({"ok": False, "erro": str(e)}, ensure_ascii=False)
-
-
-def criar_agente_ingestao_edital(
-    *,
-    model_id: Optional[str] = None,
-    markdown: bool = True,
-) -> Agent:
-    mid = model_id or os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-    return Agent(
-        model=OpenAIChat(id=mid),
-        tools=[tool_ingestir_leilao_por_url],
-        instructions=(
-            "Você opera a ingestão de editais de leilão (imóveis). "
-            "Para processar uma URL, chame tool_ingestir_leilao_por_url. "
-            "Após gravar o imóvel, o pipeline resolve automaticamente o cache de mercado (reutiliza cache "
-            "existente no mesmo geo quando as amostras ainda servem; só então complementa anúncios via Firecrawl Search se preciso). "
-            "IMPORTANTE para a resposta ao usuário: seja **breve** (no máximo 3 frases curtas). "
-            "**Não** cole na conversa o JSON retornado pela ferramenta, nem tokens, nem log técnico. "
-            "Diga em linguagem natural o resultado (gravado / atualizado / ignorado duplicata / erro) e, se houver, "
-            "o id do registro; mencione que detalhes, cards e mapa aparecem no painel à esquerda da tela. "
-            "A extração lê o markdown do edital e grava campos como valor de lance e, quando o edital trouxer, "
-            "valor de avaliação (perícia), que é distinto do lance. "
-            "Se duplicata=true, pergunte se deseja sobrescrever e só então chame a tool de novo com "
-            "sobrescrever_se_duplicado='true' ou 'false'. "
-            "Se sem_conteudo_edital=true, explique em 2 frases e use orientacao_usuario. "
-            "Se url_invalida=true, uma frase basta. "
-            "Use português do Brasil."
-        ),
-        markdown=markdown,
-    )

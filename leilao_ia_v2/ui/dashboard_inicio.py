@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import html
 import re
-from calendar import monthcalendar
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from leilao_ia_v2.persistence import leilao_imoveis_repo
 from leilao_ia_v2.schemas.operacao_simulacao import (
     parse_operacao_simulacao_json,
     parse_simulacoes_modalidades_json,
@@ -100,17 +100,6 @@ class DashboardDados:
 {self._lembretes_html()}
   </div>
 </article>"""
-
-    def to_html_shell(self) -> str:
-        """KPIs + lembretes; calendário interativo (Streamlit) não está incluído — use a barra aplicação."""
-        return f"""{self.to_html_kpis_sozinho()}
-<div class="db-root" style="margin-top:0.65rem" lang="pt-BR">
-{self.to_html_lembretes_secao()}
-</div>"""
-
-    def to_html_tabelas_titulo(self) -> str:
-        return f"""{CSS_DASHBOARD_INICIO}
-<div class="db-root db-inline"><h3 class="db-h3">Oportunidades e pendências (dados do painel acima)</h3></div>"""
 
 
 # Injetar no painel Streamlit: cards de seção (border) e botões estilo “card” clicáveis
@@ -326,12 +315,8 @@ def _lucro_liquido_de_row(row: dict[str, Any]) -> float | None:
 
 
 def _tem_simulacao(row: dict[str, Any]) -> bool:
-    if row.get("simulacoes_modalidades_json"):
-        return True
-    oj = row.get("operacao_simulacao_json")
-    if not oj or not isinstance(oj, dict):
-        return False
-    return bool(oj.get("outputs") or oj.get("inputs"))
+    """Há simulação **gravada** (outputs reais), não só JSON com defaults/inputs vazios."""
+    return leilao_imoveis_repo.leilao_tem_simulacao_utilizador_gravada(row)
 
 
 def _tem_mercado_llm(row: dict[str, Any]) -> bool:
@@ -506,40 +491,6 @@ def agregar_listas_por_dia(
     return proximos, top_l, pendentes
 
 
-def _html_mini_calendario(hoje: date, calendario: dict[str, list[tuple[str, str]]]) -> str:
-    y, m = hoje.year, hoje.month
-    weeks = monthcalendar(y, m)
-    wdays = "Dom Seg Ter Qua Qui Sex Sáb".split()
-    head = "".join(f"<div class='db-cal-h'>{html.escape(d)}</div>" for d in wdays)
-    cells: list[str] = []
-    for wk in weeks:
-        for d in wk:
-            if d == 0:
-                cells.append("<div class='db-cal-d db-cal-empty'></div>")
-                continue
-            try:
-                dt = date(y, m, d)
-            except ValueError:
-                cells.append("<div class='db-cal-d db-cal-empty'></div>")
-                continue
-            k = dt.isoformat()
-            has = k in calendario
-            cls = "db-cal-d db-cal-has" if has else "db-cal-d"
-            if dt == hoje:
-                cls += " db-cal-today"
-            tip = ""
-            if has:
-                cidades = " · ".join(c for c, _ in calendario[k][:3])
-                tip = f' title="{html.escape(cidades)}"'
-            mark = "●" if has else str(d)
-            cells.append(
-                f"<div class='{cls}'{tip}><span class='db-cal-n'>{d}</span>"
-                f"{'<span class=\"db-dot\" aria-hidden=\"true\"></span>' if has else ''}</div>"
-            )
-    grid = f"<div class='db-cal-grid'>{head}{''.join(cells)}</div>"
-    return f"<p class='db-cal-title'>{html.escape(f'{m:02d}/{y}')}</p>{grid}"
-
-
 CSS_DASHBOARD_INICIO = """
 <style>
 .db-root { font-family: "DM Sans", system-ui, sans-serif; color: #e2e8f0; margin: 0.25rem 0 1rem 0; }
@@ -560,16 +511,6 @@ CSS_DASHBOARD_INICIO = """
 .db-muted { color: #94a3b8; font-size: 0.84rem; line-height: 1.4; }
 .db-muted.sm { font-size: 0.78rem; margin-bottom: 0.5rem; }
 .db-rem { margin: 0.35rem 0 0 1.1rem; padding: 0; color: #cbd5e1; font-size: 0.86rem; line-height: 1.5; }
-.db-cal-title { font-size: 0.78rem; color: #a5b4fc; font-weight: 600; margin: 0 0 0.4rem; }
-.db-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; font-size: 0.7rem; }
-.db-cal-h { text-align: center; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; padding: 0.2rem; }
-.db-cal-d { min-height: 2.1rem; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  background: rgba(0,0,0,.2); border: 1px solid rgba(255,255,255,.04); }
-.db-cal-empty { background: transparent; border: none; }
-.db-cal-today { outline: 1px solid rgba(52, 211, 153, 0.45); }
-.db-cal-has { background: rgba(52, 211, 153, 0.1); border-color: rgba(52, 211, 153, 0.25); }
-.db-cal-n { font-weight: 600; color: #e2e8f0; }
-.db-dot { color: #34d399; font-size: 0.5rem; line-height: 0; }
 /* Lembretes dentro de card dc- (paleta alinhada a Comparar) */
 .dc-card .db-rem { color: hsl(215 16% 72%); }
 .dc-card .db-muted { color: hsl(215 18% 58%); }

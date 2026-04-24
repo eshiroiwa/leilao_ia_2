@@ -33,15 +33,6 @@ SimopTag = Literal["vista", "prazo", "financiado"]
 TAGS: tuple[SimopTag, ...] = ("vista", "prazo", "financiado")
 
 
-def simop_m_lab_to_tag(m_lab: str) -> SimopTag:
-    t = (m_lab or "").strip()
-    if "Parcelado" in t:
-        return "prazo"
-    if "Financiado" in t:
-        return "financiado"
-    return "vista"
-
-
 def tag_to_modo_pagamento(tag: SimopTag) -> ModoPagamentoSimulacao:
     if tag == "prazo":
         return ModoPagamentoSimulacao.PRAZO
@@ -107,8 +98,8 @@ SIMOP_DRAFT_SNAPSHOT_BAG = "simop_draft_key_snapshots_v1"
 def _simop_chave_candidata_draft(iid: str, k: str) -> bool:
     """Inclui chaves ``simop_*`` deste leilão (sufixo), exceto a bandeira de hidratação e botões.
 
-    ``st.button`` (ex.: Gravar) não podem ser escritos em ``st.session_state`` — ver
-    ``StreamlitValueAssignmentNotAllowedError``.
+    ``st.button`` / ``st.download_button`` não podem ser repostos via ``st.session_state[...]``
+    a partir do snapshot — ver ``StreamlitValueAssignmentNotAllowedError``.
     """
     suf = _suf(iid)
     ks = str(k)
@@ -120,6 +111,11 @@ def _simop_chave_candidata_draft(iid: str, k: str) -> bool:
         return False
     if ks.startswith("simop_save3_"):
         return False
+    # st.download_button / st.button: repor a chave a partir do snapshot gera
+    # StreamlitValueAssignmentNotAllowedError (writes_allowed=False p/ estes widgets).
+    for needle in ("_dbg_json_dl_", "_dbg_json_path_"):
+        if needle in ks:
+            return False
     return True
 
 

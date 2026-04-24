@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 import time
 
-import pytest
-
 from leilao_ia_v2.services import disk_cache
 
 

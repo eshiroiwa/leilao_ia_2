@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="Análise de simulação">
+  <rect width="96" height="96" rx="12" fill="#0e1117"/>
+  <g fill="none" stroke="#7c9cff" stroke-width="3" stroke-linecap="round">
+    <path d="M18 72h60"/>
+    <path d="M18 18v54"/>
+  </g>
+  <g fill="#7c9cff" opacity="0.9">
+    <rect x="24" y="48" width="10" height="24" rx="2"/>
+    <rect x="38" y="36" width="10" height="36" rx="2"/>
+    <rect x="52" y="28" width="10" height="44" rx="2"/>
+    <rect x="66" y="40" width="10" height="32" rx="2"/>
+  </g>
+  <text x="48" y="16" text-anchor="middle" fill="#b4c2ff" font-family="system-ui,sans-serif" font-size="9">JSON</text>
+</svg>
