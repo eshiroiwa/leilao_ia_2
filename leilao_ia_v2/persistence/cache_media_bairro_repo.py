@@ -13,6 +13,20 @@ from leilao_ia_v2.constants import TABELA_CACHE_MEDIA_BAIRRO
 logger = logging.getLogger(__name__)
 
 
+def _executar_write_seguro(
+    query: Any,
+    *,
+    op_nome: str,
+    tabela: str = TABELA_CACHE_MEDIA_BAIRRO,
+) -> Any:
+    resp = query.execute()
+    if resp is None:
+        raise RuntimeError(f"Supabase {op_nome} retornou resposta nula ({tabela}).")
+    if not hasattr(resp, "data"):
+        logger.warning("Supabase %s sem atributo data (%s).", op_nome, tabela)
+    return resp
+
+
 def inserir(client: Client, linha: dict[str, Any]) -> Optional[str]:
     """Insere uma linha de cache e devolve o ``id`` (UUID) ou None."""
     payload = dict(linha)
@@ -20,7 +34,10 @@ def inserir(client: Client, linha: dict[str, Any]) -> Optional[str]:
     if not payload.get("chave_segmento"):
         logger.warning("cache_media_bairro: chave_segmento vazia — insert abortado")
         return None
-    resp = client.table(TABELA_CACHE_MEDIA_BAIRRO).insert(payload).execute()
+    resp = _executar_write_seguro(
+        client.table(TABELA_CACHE_MEDIA_BAIRRO).insert(payload),
+        op_nome="insert",
+    )
     data = getattr(resp, "data", None)
     if isinstance(data, list) and data:
         return str(data[0].get("id") or "") or None
@@ -152,4 +169,7 @@ def apagar_por_id(client: Client, cache_id: str) -> None:
     cid = str(cache_id or "").strip()
     if not cid:
         return
-    client.table(TABELA_CACHE_MEDIA_BAIRRO).delete().eq("id", cid).execute()
+    _executar_write_seguro(
+        client.table(TABELA_CACHE_MEDIA_BAIRRO).delete().eq("id", cid),
+        op_nome="delete",
+    )

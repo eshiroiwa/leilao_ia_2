@@ -31,6 +31,59 @@ COLUNAS_INDICADORES_SOMENTE_SIMULACAO: tuple[str, ...] = (
 )
 
 
+def _executar_write_seguro(
+    query: Any,
+    *,
+    op_nome: str,
+    tabela: str = TABELA_LEILAO_IMOVEIS,
+) -> Any:
+    """Executa write no Supabase com validações mínimas de resposta."""
+    resp = query.execute()
+    if resp is None:
+        raise RuntimeError(f"Supabase {op_nome} retornou resposta nula ({tabela}).")
+    if not hasattr(resp, "data"):
+        logger.warning("Supabase %s sem atributo data (%s).", op_nome, tabela)
+    return resp
+
+
+def _anexar_cache_media_bairro_ids_atomic_rpc(
+    imovel_id: str,
+    novos_ids: list[str],
+    client: Client,
+) -> list[str] | None:
+    """
+    Tenta anexar cache IDs de forma atómica via RPC no banco.
+    Requer função SQL ``rpc_anexar_cache_media_bairro_ids`` (ver migration 014).
+    """
+    try:
+        resp = _executar_write_seguro(
+            client.rpc(
+                "rpc_anexar_cache_media_bairro_ids",
+                {"p_imovel_id": str(imovel_id), "p_novos_ids": novos_ids},
+            ),
+            op_nome="rpc rpc_anexar_cache_media_bairro_ids",
+            tabela=TABELA_LEILAO_IMOVEIS,
+        )
+    except Exception:
+        logger.debug("RPC atómica de append de cache indisponível; fallback local.", exc_info=True)
+        return None
+
+    data = getattr(resp, "data", None)
+    if isinstance(data, list) and data:
+        row0 = data[0]
+        if isinstance(row0, dict):
+            arr = row0.get("cache_media_bairro_ids")
+            if isinstance(arr, list):
+                return [str(x).strip() for x in arr if str(x).strip()]
+        if isinstance(row0, list):
+            return [str(x).strip() for x in row0 if str(x).strip()]
+    if isinstance(data, dict):
+        arr = data.get("cache_media_bairro_ids")
+        if isinstance(arr, list):
+            return [str(x).strip() for x in arr if str(x).strip()]
+    return None
+
+
 def leilao_tem_indicadores_simulacao_gravados(operacao_simulacao_json: Any) -> bool:
     """
     Indica se existe documento de operação (legado) com ``outputs`` preenchidos —
@@ -249,7 +302,10 @@ def buscar_por_url_leilao(url: str, client: Client) -> Optional[dict[str, Any]]:
 
 def inserir_leilao_imovel(payload: dict[str, Any], client: Client) -> dict[str, Any]:
     logger.info("Supabase: insert url_leilao=%s", payload.get("url_leilao", "")[:80])
-    resp = client.table(TABELA_LEILAO_IMOVEIS).insert(payload).execute()
+    resp = _executar_write_seguro(
+        client.table(TABELA_LEILAO_IMOVEIS).insert(payload),
+        op_nome="insert",
+    )
     data = getattr(resp, "data", None)
     if isinstance(data, list) and data:
         return data[0]
@@ -260,7 +316,10 @@ def inserir_leilao_imovel(payload: dict[str, Any], client: Client) -> dict[str, 
 
 def atualizar_leilao_imovel(imovel_id: str, campos: dict[str, Any], client: Client) -> None:
     logger.info("Supabase: update id=%s keys=%s", imovel_id, list(campos.keys()))
-    client.table(TABELA_LEILAO_IMOVEIS).update(campos).eq("id", imovel_id).execute()
+    _executar_write_seguro(
+        client.table(TABELA_LEILAO_IMOVEIS).update(campos).eq("id", imovel_id),
+        op_nome="update",
+    )
 
 
 def atualizar_operacao_simulacao_json(
@@ -305,19 +364,44 @@ def definir_cache_media_bairro_ids(imovel_id: str, ids: list[str], client: Clien
 
 
 def anexar_cache_media_bairro_ids(imovel_id: str, novos_ids: list[str], client: Client) -> list[str]:
-    """Acrescenta UUIDs de cache ao array ``cache_media_bairro_ids`` sem duplicar."""
-    row = buscar_por_id(imovel_id, client)
-    if not row:
-        return []
-    cur = list(row.get("cache_media_bairro_ids") or [])
-    seen = set(str(x) for x in cur)
+    """Acrescenta UUIDs de cache ao array ``cache_media_bairro_ids`` sem duplicar.
+
+    Sem ``UPDATE`` atómico no banco, mantém melhor-esforço com até 3 tentativas para
+    reduzir perdas de anexos em cenários concorrentes.
+    """
+    add: list[str] = []
     for x in novos_ids:
         s = str(x).strip()
-        if s and s not in seen:
-            cur.append(s)
-            seen.add(s)
-    atualizar_leilao_imovel(imovel_id, {"cache_media_bairro_ids": cur}, client)
-    return cur
+        if s and s not in add:
+            add.append(s)
+    if not add:
+        row = buscar_por_id(imovel_id, client)
+        return list((row or {}).get("cache_media_bairro_ids") or [])
+
+    rpc_ids = _anexar_cache_media_bairro_ids_atomic_rpc(imovel_id, add, client)
+    if rpc_ids is not None:
+        return rpc_ids
+
+    for _ in range(3):
+        row = buscar_por_id(imovel_id, client)
+        if not row:
+            return []
+        cur = [str(x).strip() for x in (row.get("cache_media_bairro_ids") or []) if str(x).strip()]
+        seen = set(cur)
+        merged = list(cur)
+        for s in add:
+            if s not in seen:
+                merged.append(s)
+                seen.add(s)
+        if merged == cur:
+            return cur
+        atualizar_leilao_imovel(imovel_id, {"cache_media_bairro_ids": merged}, client)
+        conf = buscar_por_id(imovel_id, client)
+        conf_ids = [str(x).strip() for x in ((conf or {}).get("cache_media_bairro_ids") or []) if str(x).strip()]
+        if all(s in conf_ids for s in add):
+            return conf_ids
+    row = buscar_por_id(imovel_id, client)
+    return list((row or {}).get("cache_media_bairro_ids") or [])
 
 
 def remover_cache_media_bairro_id(imovel_id: str, cache_id: str, client: Client) -> list[str]:
@@ -362,14 +446,39 @@ def listar_ids_leilao_que_incluem_cache_id(cache_id: str, client: Client) -> lis
 
 
 def _listar_ids_com_cache_id_fallback(client: Client, cache_id: str) -> list[str]:
-    resp = client.table(TABELA_LEILAO_IMOVEIS).select("id,cache_media_bairro_ids").limit(2000).execute()
     out: list[str] = []
-    for r in getattr(resp, "data", None) or []:
-        arr = r.get("cache_media_bairro_ids") or []
-        if not isinstance(arr, (list, tuple)):
-            continue
-        if any(str(x).strip() == cache_id for x in arr):
-            iid = str(r.get("id") or "").strip()
-            if iid:
-                out.append(iid)
+    page = 0
+    page_size = 1000
+    while True:
+        ini = page * page_size
+        fim = ini + page_size - 1
+        q = client.table(TABELA_LEILAO_IMOVEIS).select("id,cache_media_bairro_ids")
+        try:
+            resp = q.range(ini, fim).execute()
+            rows_raw = getattr(resp, "data", None)
+            rows = list(rows_raw or []) if isinstance(rows_raw, list) else []
+            if not rows and page == 0:
+                # Compatibilidade com stubs/mocks antigos que só suportam `.limit(...)`.
+                resp = q.limit(2000).execute()
+                rows_raw = getattr(resp, "data", None)
+                rows = list(rows_raw or []) if isinstance(rows_raw, list) else []
+        except Exception:
+            resp = q.limit(2000).execute()
+            rows_raw = getattr(resp, "data", None)
+            rows = list(rows_raw or []) if isinstance(rows_raw, list) else []
+        if not rows:
+            break
+        for r in rows:
+            arr = r.get("cache_media_bairro_ids") or []
+            if not isinstance(arr, (list, tuple)):
+                continue
+            if any(str(x).strip() == cache_id for x in arr):
+                iid = str(r.get("id") or "").strip()
+                if iid:
+                    out.append(iid)
+        if page == 0 and len(rows) == 2000:
+            break
+        if len(rows) < page_size:
+            break
+        page += 1
     return out

@@ -24,12 +24,18 @@ from leilao_ia_v2.persistence import cache_media_bairro_repo, leilao_imoveis_rep
 logger = logging.getLogger(__name__)
 
 # Premissas do agente (corretagem 6% s/ venda; IR 15% s/ lucro bruto; registro 2% no pós-cache)
-REFORMA_RS_POR_M2 = 500.0
-# Reforma pós-cache: ≤50m² 10k; >50 e ≤70m² 15k; >70m² 500 R$/m² (mais desocupação se >100m²; ver _custo_fixos)
-LIMIAR_M2_REFORMA_TETO_1 = 50.0
-LIMIAR_M2_REFORMA_TETO_2 = 70.0
-REFORMA_ATE_50M2 = 10_000.0
-REFORMA_ATE_70M2 = 15_000.0
+LIMIAR_VALOR_POPULAR = 200_000.0
+LIMIAR_VALOR_ALTO_PADRAO = 1_500_000.0
+LIMIAR_M2_POPULAR_MIN = 50.0
+REFORMA_POPULAR_MIN = 10_000.0
+REFORMA_POPULAR_RS_POR_M2 = 200.0
+REFORMA_MEDIO_MIN = 15_000.0
+REFORMA_MEDIO_RS_POR_M2 = 500.0
+REFORMA_ALTO_MIN = 30_000.0
+REFORMA_ALTO_RS_POR_M2 = 1_000.0
+REFORMA_FALLBACK_SEM_AREA_POPULAR = 10_000.0
+REFORMA_FALLBACK_SEM_AREA_MEDIO = 30_000.0
+REFORMA_FALLBACK_SEM_AREA_ALTO = 80_000.0
 PCT_LEILOEIRO = 0.05
 PCT_ITBI = 0.03
 PCT_REGISTRO = 0.02
@@ -224,6 +230,38 @@ def _valor_mercado_de_cache(
     return vmed, vmax, vmin
 
 
+def _cache_row_elegivel_para_simulacao(c: dict[str, Any]) -> bool:
+    raw = c.get("metadados_json")
+    md: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        md = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                md = j
+        except json.JSONDecodeError:
+            md = {}
+    if str(md.get("modo_cache") or "").strip().lower() == "terrenos":
+        return False
+    if md.get("apenas_referencia") is True:
+        return False
+    if md.get("uso_simulacao") is False:
+        return False
+    return True
+
+
+def _escolher_cache_pos_cache(
+    cache_rows_ordenadas: list[dict[str, Any]],
+) -> tuple[Optional[dict[str, Any]], str]:
+    for c in cache_rows_ordenadas:
+        if _cache_row_elegivel_para_simulacao(c):
+            return c, "principal_simulacao"
+    if cache_rows_ordenadas:
+        return cache_rows_ordenadas[0], "fallback_primeiro_cache"
+    return None, "sem_cache_carregado"
+
+
 @dataclass
 class RoiPosCacheResultado:
     ok: bool
@@ -231,27 +269,55 @@ class RoiPosCacheResultado:
     payload: dict[str, Any]
 
 
-def _custo_reforma_pos_cache(area_m2: float, *, sem_reforma: bool = False) -> float:
+def _segmento_reforma_por_valor_venda(valor_venda: float) -> str:
+    try:
+        v = float(valor_venda)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v > 0 and v <= LIMIAR_VALOR_POPULAR:
+        return "popular"
+    if v > LIMIAR_VALOR_ALTO_PADRAO:
+        return "alto"
+    return "medio"
+
+
+def _custo_reforma_pos_cache(
+    area_m2: float,
+    valor_venda: float,
+    *,
+    sem_reforma: bool = False,
+) -> float:
     """
     Só a reforma (R$) para o agente pós-cache, sem desocupação.
-    - ``sem_reforma`` (terreno/lote): 0
-    - sem área (>0) não aplicável: 0; até 50 m²: 10.000; até 70 m²: 15.000; acima: 500 × m².
+    - ``sem_reforma`` (terreno/lote): 0.
+    - popular (<=200k): mínimo 10k; até 50 m² => 10k; acima => max(10k, 200*m²).
+    - médio (>200k até 1,5M): max(15k, 500*m²).
+    - alto (>1,5M): max(30k, 1.000*m²).
+    - sem área útil/total (>0): fallback por segmento (popular 10k, médio 30k, alto 80k).
     """
     if sem_reforma:
         return 0.0
-    a = float(area_m2)
+    seg = _segmento_reforma_por_valor_venda(valor_venda)
+    a = float(area_m2 or 0.0)
     if a <= 0.0:
-        return 0.0
-    if a <= LIMIAR_M2_REFORMA_TETO_1:
-        return REFORMA_ATE_50M2
-    if a <= LIMIAR_M2_REFORMA_TETO_2:
-        return REFORMA_ATE_70M2
-    return REFORMA_RS_POR_M2 * a
+        if seg == "popular":
+            return REFORMA_FALLBACK_SEM_AREA_POPULAR
+        if seg == "alto":
+            return REFORMA_FALLBACK_SEM_AREA_ALTO
+        return REFORMA_FALLBACK_SEM_AREA_MEDIO
+    if seg == "popular":
+        if a <= LIMIAR_M2_POPULAR_MIN:
+            return REFORMA_POPULAR_MIN
+        return max(REFORMA_POPULAR_MIN, REFORMA_POPULAR_RS_POR_M2 * a)
+    if seg == "alto":
+        return max(REFORMA_ALTO_MIN, REFORMA_ALTO_RS_POR_M2 * a)
+    return max(REFORMA_MEDIO_MIN, REFORMA_MEDIO_RS_POR_M2 * a)
 
 
-def _custo_fixos(area_m2: float, *, sem_reforma: bool = False) -> float:
-    c = _custo_reforma_pos_cache(area_m2, sem_reforma=sem_reforma)
-    if area_m2 > LIMIAR_M2_DESOC:
+def _custo_fixos(area_m2: float, valor_venda: float, *, sem_reforma: bool = False) -> float:
+    c = _custo_reforma_pos_cache(area_m2, valor_venda, sem_reforma=sem_reforma)
+    a = float(area_m2 or 0.0)
+    if (not sem_reforma) and a > LIMIAR_M2_DESOC:
         c += DESOCUPACAO_ACIMA_100M2
     return c
 
@@ -300,7 +366,7 @@ def metricas_lucro_roi_pos_cache(
     com 6% corretagem s/ venda e IR 15% s/ lucro bruto (PF, sobre lucro positivo).
     Chaves nulas se não houver lance/valor.
     """
-    C_fix = _custo_fixos(area_m2, sem_reforma=sem_reforma)
+    C_fix = _custo_fixos(area_m2, valor_venda, sem_reforma=sem_reforma)
     r = _taxa_total(aplica_5_leiloeiro=aplica_5_leiloeiro)
     out: dict[str, Any] = {
         "roi_projetado": None,
@@ -391,10 +457,12 @@ def estimar_e_gravar_roi_pos_cache(
     if not ordem:
         return RoiPosCacheResultado(False, "sem cache vinculado", {})
 
-    pid = ordem[0]
-    c = cache_media_bairro_repo.buscar_por_id(pid, client)
+    cache_rows = cache_media_bairro_repo.buscar_por_ids(client, ordem)
+    by_id = {str(c.get("id") or "").strip(): c for c in cache_rows if c.get("id")}
+    ordenadas = [by_id[i] for i in ordem if i in by_id]
+    c, origem_cache = _escolher_cache_pos_cache(ordenadas)
     if not c:
-        return RoiPosCacheResultado(False, "cache id não carregou", {"cache_id": pid})
+        return RoiPosCacheResultado(False, "cache id não carregou", {"cache_ids": ordem[:5]})
 
     area = _area_m2_imovel(row)
     v_merc, v_max, v_min = _valor_mercado_de_cache(c, area)
@@ -402,13 +470,13 @@ def estimar_e_gravar_roi_pos_cache(
         return RoiPosCacheResultado(
             False,
             "cache sem valor_medio_venda (nem preco_m2×área)",
-            {"cache_id": pid},
+            {"cache_id": c.get("id")},
         )
 
     aplica5 = aplica_comissao_leiloeiro(row)
     sem_reforma = imovel_sem_reforma_pos_cache(row)
     lance = _lance_referencia_brl(row)
-    custo_reforma = round(_custo_reforma_pos_cache(area, sem_reforma=sem_reforma), 2)
+    custo_reforma = round(_custo_reforma_pos_cache(area, v_merc, sem_reforma=sem_reforma), 2)
 
     m_comp: dict[str, Any] = {}
     if lance > 0:
@@ -432,6 +500,13 @@ def estimar_e_gravar_roi_pos_cache(
         "lucro_liquido_projetado": m_comp.get("lucro_liquido_projetado"),
         "roi_liquido_projetado": m_comp.get("roi_liquido_projetado"),
     }
+    if origem_cache != "principal_simulacao":
+        logger.info(
+            "ROI pós-cache: sem cache principal elegível; usando fallback `%s` (cache=%s) leilao=%s",
+            origem_cache,
+            str(c.get("id") or "")[:12],
+            lid[:12],
+        )
     if leilao_imoveis_repo.leilao_tem_indicadores_simulacao_gravados(row.get("operacao_simulacao_json")):
         for k in leilao_imoveis_repo.COLUNAS_INDICADORES_SOMENTE_SIMULACAO:
             payload.pop(k, None)

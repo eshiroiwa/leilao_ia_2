@@ -24,6 +24,7 @@ from functools import lru_cache
 from typing import Optional
 
 from leilao_ia_v2.services.geo_medicao import haversine_km
+from geopy.exc import GeocoderServiceError, GeocoderTimedOut, GeocoderUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def _geocode_cached(query: str) -> Optional[tuple[float, float]]:
         loc = _get_geocoder().geocode(query, country_codes="br")
         if loc:
             return (loc.latitude, loc.longitude)
-    except Exception:
+    except (GeocoderTimedOut, GeocoderUnavailable, GeocoderServiceError, ValueError, TypeError):
         logger.debug("Nominatim falhou para query: %s", query, exc_info=True)
     return None
 
@@ -90,7 +91,7 @@ def _geocode_structured_cached(
         loc = _get_geocoder().geocode(q, country_codes="br")
         if loc:
             return (loc.latitude, loc.longitude)
-    except Exception:
+    except (GeocoderTimedOut, GeocoderUnavailable, GeocoderServiceError, ValueError, TypeError):
         logger.debug("Nominatim structured falhou: %s", q, exc_info=True)
     return None
 

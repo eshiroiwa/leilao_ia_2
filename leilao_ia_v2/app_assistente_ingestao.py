@@ -402,15 +402,41 @@ def _parse_csv_uuids_ids_anuncios(raw: Any) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+_CACHES_UI_BAG_KEY = "_caches_ui_bundle_v1"
+
+
+def _assinatura_caches_row(row: dict[str, Any]) -> tuple[str, str, list[str]]:
+    iid = str(row.get("id") or "").strip()
+    ordem = _ids_cache_media_do_row(row)
+    sig = "|".join(ordem)
+    return iid, sig, ordem
+
+
 def _carregar_caches_e_anuncios_ui(
     row: dict[str, Any],
+    *,
+    usar_cache_sessao: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """
     Devolve caches na ordem de ``cache_media_bairro_ids`` e mapa id→anúncio
     (união dos anúncios referenciados por esses caches).
     """
-    ordem = _ids_cache_media_do_row(row)
+    iid, sig, ordem = _assinatura_caches_row(row)
+    if usar_cache_sessao and iid:
+        bag_raw = st.session_state.get(_CACHES_UI_BAG_KEY)
+        bag: dict[str, Any] = bag_raw if isinstance(bag_raw, dict) else {}
+        cached = bag.get(iid)
+        if isinstance(cached, dict) and str(cached.get("sig") or "") == sig:
+            caches_c = cached.get("caches")
+            ads_map_c = cached.get("ads_map")
+            if isinstance(caches_c, list) and isinstance(ads_map_c, dict):
+                return caches_c, ads_map_c
     if not ordem:
+        if usar_cache_sessao and iid:
+            bag_raw = st.session_state.get(_CACHES_UI_BAG_KEY)
+            if isinstance(bag_raw, dict) and iid in bag_raw:
+                del bag_raw[iid]
+                st.session_state[_CACHES_UI_BAG_KEY] = bag_raw
         return [], {}
     cli = get_supabase_client()
     rows = cache_media_bairro_repo.buscar_por_ids(cli, ordem)
@@ -421,6 +447,15 @@ def _carregar_caches_e_anuncios_ui(
         todos_ids.update(_parse_csv_uuids_ids_anuncios(c.get("anuncios_ids")))
     ads_list = anuncios_mercado_repo.buscar_por_ids(cli, list(todos_ids)) if todos_ids else []
     ads_map = {str(a.get("id") or ""): a for a in ads_list if a.get("id")}
+    if usar_cache_sessao and iid:
+        bag_raw = st.session_state.get(_CACHES_UI_BAG_KEY)
+        bag: dict[str, Any] = bag_raw if isinstance(bag_raw, dict) else {}
+        bag[iid] = {"sig": sig, "caches": ordenados, "ads_map": ads_map}
+        # Evita crescimento sem limite caso o utilizador percorra muitos imóveis na sessão.
+        if len(bag) > 30:
+            for k in list(bag.keys())[:-30]:
+                del bag[k]
+        st.session_state[_CACHES_UI_BAG_KEY] = bag
     return ordenados, ads_map
 
 
@@ -438,7 +473,7 @@ def _refazer_calculo_simulacao_leilao(client: Any, leilao_id: str) -> tuple[bool
         return False, "Leilão não encontrado."
     doc0 = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
     inp = doc0.inputs
-    caches, ads_map = _carregar_caches_e_anuncios_ui(row)
+    caches, ads_map = _carregar_caches_e_anuncios_ui(row, usar_cache_sessao=False)
     try:
         doc = calcular_simulacao(row_leilao=row, inp=inp, caches_ordenados=caches, ads_por_id=ads_map)
         leilao_imoveis_repo.atualizar_operacao_simulacao_json(iid, doc.model_dump(mode="json"), client)

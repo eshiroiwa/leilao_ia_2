@@ -122,7 +122,7 @@ def _buscar_coordenadas_extracao(extn: ExtracaoEditalLLM) -> Optional[tuple[floa
         else:
             logger.info("Geocodificação sem resultado para logradouro=%r cidade=%r", logr[:80], cid)
         return coords
-    except Exception:
+    except (RuntimeError, ValueError, TypeError):
         logger.exception("Falha na geocodificação (Nominatim)")
         return None
 
@@ -240,11 +240,18 @@ def executar_ingestao_edital(
         markdown, fc_meta = firecrawl_edital.scrape_url_markdown(
             url, ignorar_cache=ignorar_cache_firecrawl
         )
-    except Exception as e:
+    except (RuntimeError, ValueError, TimeoutError) as e:
         logger.exception("Falha no scrape Firecrawl/cache")
         log_parts.append(f"ERRO scrape: {e}")
         log_parts.append(traceback.format_exc())
         raise UrlInvalidaIngestaoError(str(e)) from e
+    except Exception as e:
+        logger.exception("Falha inesperada no scrape Firecrawl/cache")
+        log_parts.append("ERRO scrape inesperado (ver log técnico).")
+        log_parts.append(traceback.format_exc())
+        raise UrlInvalidaIngestaoError(
+            "Falha interna ao obter conteúdo do edital (ver log técnico)."
+        ) from e
 
     log_parts.append(f"Markdown obtido: {len(markdown)} caracteres (fonte={fc_meta.get('fonte')})")
 
@@ -262,10 +269,16 @@ def executar_ingestao_edital(
 
     try:
         ext, metricas = extracao_edital_llm.extrair_edital_de_markdown(markdown, url)
-    except Exception as e:
+    except (RuntimeError, ValueError) as e:
         logger.exception("Falha na extração LLM")
         log_parts.append(f"ERRO LLM: {e}")
         raise UrlInvalidaIngestaoError(f"Extração do edital falhou: {e}") from e
+    except Exception as e:
+        logger.exception("Falha inesperada na extração LLM")
+        log_parts.append("ERRO LLM inesperado (ver log técnico).")
+        raise UrlInvalidaIngestaoError(
+            "Extração do edital falhou por erro interno (ver log técnico)."
+        ) from e
 
     if (ext.url_leilao or "").strip() != url.strip():
         ext = ext.model_copy(update={"url_leilao": url})

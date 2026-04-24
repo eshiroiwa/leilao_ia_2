@@ -11,30 +11,35 @@ from leilao_ia_v2.services.roi_pos_cache_leilao import (
 )
 
 
-def test_custo_reforma_faixas():
-    assert _custo_reforma_pos_cache(0.0) == 0.0
-    assert _custo_reforma_pos_cache(30.0) == 10_000.0
-    assert _custo_reforma_pos_cache(50.0) == 10_000.0
-    assert _custo_reforma_pos_cache(60.0) == 15_000.0
-    assert _custo_reforma_pos_cache(70.0) == 15_000.0
-    assert _custo_reforma_pos_cache(80.0) == 80.0 * 500.0
+def test_custo_reforma_segmentada_por_valor_e_area():
+    assert _custo_reforma_pos_cache(30.0, 180_000.0) == 10_000.0
+    assert _custo_reforma_pos_cache(50.0, 200_000.0) == 10_000.0
+    assert _custo_reforma_pos_cache(80.0, 180_000.0) == 16_000.0
+    assert _custo_reforma_pos_cache(80.0, 900_000.0) == 40_000.0
+    assert _custo_reforma_pos_cache(80.0, 2_000_000.0) == 80_000.0
+
+
+def test_custo_reforma_sem_area_fallback_por_segmento():
+    assert _custo_reforma_pos_cache(0.0, 180_000.0) == 10_000.0
+    assert _custo_reforma_pos_cache(0.0, 900_000.0) == 30_000.0
+    assert _custo_reforma_pos_cache(0.0, 2_000_000.0) == 80_000.0
 
 
 def test_custo_fixos_80m2_sem_desoc():
-    assert _custo_fixos(80.0) == 80.0 * 500.0
+    assert _custo_fixos(80.0, 900_000.0) == 80.0 * 500.0
 
 
 def test_custo_fixos_120m2_inclui_desoc():
-    assert _custo_fixos(120.0) == 120.0 * 500.0 + 10_000.0
+    assert _custo_fixos(120.0, 900_000.0) == 120.0 * 500.0 + 10_000.0
 
 
 def test_custo_reforma_zero_quando_sem_reforma():
-    assert _custo_reforma_pos_cache(80.0, sem_reforma=True) == 0.0
+    assert _custo_reforma_pos_cache(80.0, 900_000.0, sem_reforma=True) == 0.0
 
 
 def test_custo_fixos_terreno_reforma_zero_desoc_somente_acima_100m2():
-    assert _custo_fixos(80.0, sem_reforma=True) == 0.0
-    assert _custo_fixos(120.0, sem_reforma=True) == 10_000.0
+    assert _custo_fixos(80.0, 900_000.0, sem_reforma=True) == 0.0
+    assert _custo_fixos(120.0, 900_000.0, sem_reforma=True) == 0.0
 
 
 def test_imovel_sem_reforma_terreno_e_lote():

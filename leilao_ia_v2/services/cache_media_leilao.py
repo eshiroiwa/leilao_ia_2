@@ -64,6 +64,14 @@ CACHE_AMOSTRAS_PRINCIPAL_MAX = 10
 CACHE_AMOSTRAS_LOTE_REFERENCIA = 10
 
 
+def _float_positivo(v: Any) -> float | None:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x > 0 else None
+
+
 def _filtrar_amostras_so_terreno(amostras: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for a in amostras:
@@ -449,12 +457,22 @@ def _montar_payload_cache(
     faixa_andar = str(andar) if andar is not None else "-"
     logr_ch = slug_vivareal(str(leilao.get("endereco") or ""))[:80] or "-"
 
-    vals = [float(a["valor_venda"]) for a in amostras]
+    vals: list[float] = []
     pm2s: list[float] = []
+    descartadas_metricas = 0
     for a in amostras:
-        v, ar = float(a["valor_venda"]), float(a["area_construida_m2"])
-        if ar > 0:
-            pm2s.append(v / ar)
+        v = _float_positivo(a.get("valor_venda"))
+        ar = _float_positivo(a.get("area_construida_m2"))
+        if v is None or ar is None:
+            descartadas_metricas += 1
+            continue
+        vals.append(v)
+        pm2s.append(v / ar)
+    if descartadas_metricas:
+        logger.warning(
+            "Cache métricas: %s amostra(s) inválida(s) ignoradas (valor/área <=0 ou não numéricos)",
+            descartadas_metricas,
+        )
 
     ref_flag = 1 if apenas_referencia else 0
     sim_flag = 1 if uso_simulacao else 0

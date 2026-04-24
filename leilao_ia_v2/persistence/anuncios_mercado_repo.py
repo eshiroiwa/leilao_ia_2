@@ -16,6 +16,27 @@ _BATCH = 50
 _LISTAGEM_MAX = 900
 
 
+def _executar_write_seguro(
+    query: Any,
+    *,
+    op_nome: str,
+    tabela: str = TABELA_ANUNCIOS_MERCADO,
+) -> Any:
+    resp = query.execute()
+    if resp is None:
+        raise RuntimeError(f"Supabase {op_nome} retornou resposta nula ({tabela}).")
+    if not hasattr(resp, "data"):
+        logger.warning("Supabase %s sem atributo data (%s).", op_nome, tabela)
+    return resp
+
+
+def _to_float(v: Any) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def upsert_lote(client: Client, linhas: list[dict[str, Any]]) -> int:
     """
     Insere ou atualiza anúncios em lote (``on_conflict=url_anuncio``).
@@ -26,10 +47,12 @@ def upsert_lote(client: Client, linhas: list[dict[str, Any]]) -> int:
         return 0
     agora = datetime.now(timezone.utc).isoformat()
     norm: list[dict[str, Any]] = []
+    descartadas = 0
     for raw in linhas:
         r = dict(raw)
         r["url_anuncio"] = str(r.get("url_anuncio") or "").strip()
         if not r["url_anuncio"]:
+            descartadas += 1
             continue
         r["portal"] = str(r.get("portal") or "vivareal.com.br").strip()[:200]
         r["tipo_imovel"] = str(r.get("tipo_imovel") or "desconhecido").strip()
@@ -43,9 +66,15 @@ def upsert_lote(client: Client, linhas: list[dict[str, Any]]) -> int:
         r.setdefault("metadados_json", {})
         if not isinstance(r["metadados_json"], dict):
             r["metadados_json"] = {}
-        a = float(r["area_construida_m2"])
-        v = float(r["valor_venda"])
-        r["preco_m2"] = r.get("preco_m2") if r.get("preco_m2") is not None else round(v / a, 2)
+        a = _to_float(r.get("area_construida_m2"))
+        v = _to_float(r.get("valor_venda"))
+        if a is None or v is None or a <= 0.0 or v <= 0.0:
+            descartadas += 1
+            continue
+        r["area_construida_m2"] = a
+        r["valor_venda"] = v
+        preco_m2_in = _to_float(r.get("preco_m2"))
+        r["preco_m2"] = round(preco_m2_in, 2) if (preco_m2_in is not None and preco_m2_in > 0) else round(v / a, 2)
         r["ultima_coleta_em"] = agora
         r.setdefault("primeiro_visto_em", agora)
         norm.append(r)
@@ -55,8 +84,11 @@ def upsert_lote(client: Client, linhas: list[dict[str, Any]]) -> int:
 
     for i in range(0, len(norm), _BATCH):
         batch = norm[i : i + _BATCH]
-        client.table(TABELA_ANUNCIOS_MERCADO).upsert(batch, on_conflict="url_anuncio").execute()
-    logger.info("Supabase: upsert anuncios_mercado count=%s", len(norm))
+        _executar_write_seguro(
+            client.table(TABELA_ANUNCIOS_MERCADO).upsert(batch, on_conflict="url_anuncio"),
+            op_nome="upsert",
+        )
+    logger.info("Supabase: upsert anuncios_mercado count=%s descartadas=%s", len(norm), descartadas)
     return len(norm)
 
 
@@ -96,9 +128,12 @@ def atualizar_geolocalizacao(
     latitude: float,
     longitude: float,
 ) -> None:
-    client.table(TABELA_ANUNCIOS_MERCADO).update(
-        {"latitude": latitude, "longitude": longitude}
-    ).eq("id", str(anuncio_id)).execute()
+    _executar_write_seguro(
+        client.table(TABELA_ANUNCIOS_MERCADO)
+        .update({"latitude": latitude, "longitude": longitude})
+        .eq("id", str(anuncio_id)),
+        op_nome="update geolocalizacao",
+    )
 
 
 def buscar_por_ids(client: Client, ids: list[str]) -> list[dict[str, Any]]:
@@ -195,11 +230,19 @@ def atualizar_campos(
         p["valor_venda"] = base_v
         if base_a > 0:
             p["preco_m2"] = round(base_v / base_a, 2)
-    client.table(TABELA_ANUNCIOS_MERCADO).update(p).eq("id", iid).execute()
+        else:
+            p["preco_m2"] = None
+    _executar_write_seguro(
+        client.table(TABELA_ANUNCIOS_MERCADO).update(p).eq("id", iid),
+        op_nome="update campos",
+    )
 
 
 def apagar_por_id(client: Client, anuncio_id: str) -> None:
     iid = str(anuncio_id or "").strip()
     if not iid:
         return
-    client.table(TABELA_ANUNCIOS_MERCADO).delete().eq("id", iid).execute()
+    _executar_write_seguro(
+        client.table(TABELA_ANUNCIOS_MERCADO).delete().eq("id", iid),
+        op_nome="delete",
+    )
