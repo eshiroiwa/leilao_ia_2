@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -214,7 +215,12 @@ def listar_para_dashboard(
     Dados enriquecidos para o painel inicial: simulação, relatório de mercado, datas e cache.
     Ordena por ``edital_coletado_em`` (mais recente primeiro) — a UI agrega e reordena.
     """
-    lim = max(1, min(int(limite or 400), 500))
+    max_lim_env_raw = str(os.getenv("LEILAO_IA_V2_DASHBOARD_MAX_ROWS", "2000") or "2000").strip()
+    try:
+        max_lim_env = max(200, min(int(max_lim_env_raw), 10000))
+    except Exception:
+        max_lim_env = 2000
+    lim = max(1, min(int(limite or 400), max_lim_env))
     resp = (
         client.table(TABELA_LEILAO_IMOVEIS)
         .select(

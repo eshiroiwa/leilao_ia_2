@@ -339,7 +339,7 @@ def geocodificar_endereco(
     bairro+cidade (evita ponto genérico longe do bairro em cidades grandes).
     Depois: rua estruturada → texto livre → bairro (se ainda não tentado) → só cidade.
     """
-    logr = logradouro.strip()
+    logr = _sanear_logradouro_para_geocodificacao(logradouro, cidade, bairro, estado)
     bai = bairro.strip()
     cid = cidade.strip()
     uf = estado.strip()
@@ -575,6 +575,41 @@ def _limpar_logradouro(logr: str, cidade: str = "", bairro: str = "") -> str:
             s = s[:len(s) - len(ctx)].strip().rstrip(" -,")
             s_lower = _slug_texto(s)
     return s
+
+
+def _normalizar_numero_imovel_notacao_br(logr: str) -> str:
+    """
+    Normaliza número de imóvel em notação brasileira com separador de milhar.
+    Ex.: ``2.200`` -> ``2200``.
+    """
+    s = str(logr or "")
+    return re.sub(r"\b(\d{1,3}(?:\.\d{3})+)\b", lambda m: m.group(1).replace(".", ""), s)
+
+
+def _sanear_logradouro_para_geocodificacao(logr: str, cidade: str = "", bairro: str = "", uf: str = "") -> str:
+    """
+    Remove caudas de contexto (bairro/cidade/UF) e normaliza números antes de geocodificar.
+    """
+    s = _limpar_logradouro(logr, cidade, bairro)
+    if not s:
+        return ""
+    partes = [p.strip(" ,") for p in re.split(r"\s+-\s+", s) if p.strip(" ,")]
+    if len(partes) >= 2:
+        trailing = _slug_texto(" ".join(partes[1:]))
+        cidade_slug = _slug_texto(cidade)
+        bairro_slug = _slug_texto(bairro)
+        uf_slug = _slug_texto(uf)
+        if (
+            (cidade_slug and cidade_slug in trailing)
+            or (bairro_slug and bairro_slug in trailing)
+            or (uf_slug and uf_slug in trailing)
+        ):
+            s = partes[0]
+    uf_norm = str(uf or "").strip()
+    if uf_norm:
+        s = re.sub(rf"(?i)[,\\s-]+{re.escape(uf_norm)}$", "", s).strip(" ,-")
+    s = _normalizar_numero_imovel_notacao_br(s)
+    return s.strip()
 
 
 # ---------------------------------------------------------------------------

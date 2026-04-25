@@ -188,6 +188,34 @@ def test_rua_sem_numero_tenta_bairro_antes_da_rua():
     m_struct.assert_not_called()
 
 
+def test_sanear_logradouro_para_geocodificacao_remove_cauda_contexto():
+    s = geo._sanear_logradouro_para_geocodificacao(
+        "Avenida Mário Fonseca Viana, 2.200 - ANGICOS Vespasiano - MG",
+        cidade="Vespasiano",
+        bairro="Angicos",
+        uf="MG",
+    )
+    assert "vespasiano" not in s.lower()
+    assert "angicos" not in s.lower()
+    assert "mg" not in s.lower().split()
+    assert "2200" in s
+
+
+def test_geocodificar_endereco_sanear_antes_de_structured():
+    with patch.object(geo, "_geocode_structured_by_provider", return_value=(-19.7, -43.9)) as m_struct:
+        r = geo.geocodificar_endereco(
+            logradouro="Avenida Mário Fonseca Viana, 2.200 - ANGICOS Vespasiano - MG",
+            bairro="Angicos",
+            cidade="Vespasiano",
+            estado="MG",
+            permitir_fallback_bairro=False,
+            permitir_fallback_centro_cidade=False,
+        )
+    assert r == (-19.7, -43.9)
+    args, _ = m_struct.call_args
+    assert args[0] == "Avenida Mário Fonseca Viana, 2200"
+
+
 def test_melhor_logradouro_captura_endereco_rotulo_chaves():
     bloco = """
     https://www.chavesnamao.com.br/imovel/x

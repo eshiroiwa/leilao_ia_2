@@ -1270,7 +1270,8 @@ def _render_aba_simulacao() -> None:
         with c_llm_c:
             st.caption(
                 "Requer coluna `relatorio_mercado_contexto_json` (SQL `010_relatorio_mercado_contexto_json.sql`). "
-                "O download do HTML usa o que estiver salvo, sem nova LLM."
+                "O download do HTML usa o que estiver salvo, sem nova LLM. "
+                "Para usar modelo dedicado neste relatório, defina `OPENAI_MODEL_RELATORIO_MERCADO` no `.env`."
             )
     elif rid and cli is None:
         st.caption("Configure o Supabase para gravar ou regenerar a análise de mercado.")
@@ -1478,8 +1479,10 @@ def _html_analise_mercado_ctx_painel(row: dict[str, Any]) -> str:
             continue
         lis = "".join(f"<li>{html.escape(t)}</li>" for t in topicos)
         tit = html.escape((c.titulo or c.id).strip())
+        ev = html.escape(str(getattr(c, "evidencia", "") or "").strip())
+        ev_html = f'<div class="sim-mercado-ctx-ev">{ev}</div>' if ev else ""
         blocos.append(
-            f'<div class="sim-mercado-ctx-card"><div class="sim-mercado-ctx-tit">{tit}</div><ul>{lis}</ul></div>'
+            f'<div class="sim-mercado-ctx-card"><div class="sim-mercado-ctx-tit">{tit}</div>{ev_html}<ul>{lis}</ul></div>'
         )
     if not blocos:
         return ""
@@ -5416,6 +5419,13 @@ def _dash_fmt_pct_frac(v: Any) -> str:
 
 
 def _dash_status_card(x: Any) -> tuple[str, str]:
+    sema = str(getattr(x, "semaforo_decisao", "") or "").strip().lower()
+    if sema == "comprar":
+        return "Comprar", "ok"
+    if sema == "negociar lance":
+        return "Negociar lance", "warn"
+    if sema == "evitar":
+        return "Evitar", "muted"
     rb = getattr(x, "roi_bruto", None)
     ll = getattr(x, "lucro_liq", None)
     if rb is not None and float(rb) >= 0.5:
@@ -5429,7 +5439,12 @@ def _dash_status_card(x: Any) -> tuple[str, str]:
 
 def _dash_html_metricas_decisao(x: Any) -> str:
     rb = _dash_fmt_pct_frac(getattr(x, "roi_bruto", None))
+    rb_c = _dash_fmt_pct_frac(getattr(x, "roi_conservador", None))
+    rb_a = _dash_fmt_pct_frac(getattr(x, "roi_agressivo", None))
     ll = _dash_fmt_brl(getattr(x, "lucro_liq", None))
+    ll_c = _dash_fmt_brl(getattr(x, "lucro_conservador", None))
+    ll_a = _dash_fmt_brl(getattr(x, "lucro_agressivo", None))
+    ef_cap = _dash_fmt_pct_frac(getattr(x, "retorno_por_capital", None))
     data_txt = "Sem data"
     d0 = getattr(x, "prox_data", None)
     if d0 is not None:
@@ -5438,16 +5453,47 @@ def _dash_html_metricas_decisao(x: Any) -> str:
     endereco = html.escape((getattr(x, "endereco", None) or "Endereço não informado").strip()[:96])
     praca = html.escape((getattr(x, "praca_label", None) or "Praça").strip() or "Praça")
     resumo = html.escape(_dash_txt_card_resumo_local(x).replace("\n", " · "))
+    score_exp = html.escape(str(getattr(x, "score_explicacao", "") or "").strip())
+    roi_src = html.escape(str(getattr(x, "roi_origem", "—") or "—"))
+    conf = int(getattr(x, "confianca_operacional", 0) or 0)
+    conf_txt = f"{conf}%"
+    qrel = int(getattr(x, "qualidade_relatorio_score", 0) or 0)
+    qrel_txt = f"{qrel}/100"
+    exp_rel = bool(getattr(x, "relatorio_expirado", False))
+    exp_rel_txt = "Expirado" if exp_rel else "Atual"
+    sema_j = html.escape(str(getattr(x, "semaforo_justificativa", "") or "").strip())
+    tempo_cons = getattr(x, "tempo_venda_conservador_meses", None)
+    tempo_cons_txt = f"{float(tempo_cons):.0f}m" if tempo_cons is not None else "—"
+    haircut = getattr(x, "haircut_venda_conservador_pct", None)
+    haircut_txt = f"{float(haircut) * 100:.1f}%" if haircut is not None else "—"
+    comp_caixa = getattr(x, "capital_comprometido_pct", None)
+    comp_caixa_txt = f"{float(comp_caixa):.1f}%" if comp_caixa is not None else "—"
+    score_line = ""
+    if score_exp:
+        score_line = f'<div class="dash-op-end" style="margin-top:0.25rem">Score: {score_exp}</div>'
+    sema_line = ""
+    if sema_j:
+        sema_line = f'<div class="dash-op-end" style="margin-top:0.2rem">Decisão: {sema_j}</div>'
     return (
         '<div class="dash-op-card-body">'
         f'<div class="dash-op-top"><span class="dash-op-pill {st_cls}">{html.escape(st_txt)}</span>'
         f'<span class="dash-op-date">{praca} · {data_txt}</span></div>'
         f'<div class="dash-op-title">{resumo}</div>'
         f'<div class="dash-op-end">{endereco}</div>'
+        f"{score_line}"
+        f"{sema_line}"
         '<div class="sim-fin-sec"><div class="sim-res-grid">'
         f'<div class="sim-res-card"><div class="sim-res-lbl">ROI bruto</div><div class="sim-res-val {st_cls}">{rb}</div></div>'
         f'<div class="sim-res-card sim-res-card--accent"><div class="sim-res-lbl">Lucro líquido</div><div class="sim-res-val">{ll}</div></div>'
-        f'<div class="sim-res-card"><div class="sim-res-lbl">Status</div><div class="sim-res-val {st_cls}">{html.escape(st_txt)}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Retorno/capital</div><div class="sim-res-val">{ef_cap}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">ROI C/B/A</div><div class="sim-res-val">{rb_c} · {rb} · {rb_a}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Lucro C/B/A</div><div class="sim-res-val">{ll_c} · {ll} · {ll_a}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Qualidade relatório</div><div class="sim-res-val">{qrel_txt}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Validade relatório</div><div class="sim-res-val">{exp_rel_txt}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Cenário cons. (tempo/haircut)</div><div class="sim-res-val">{tempo_cons_txt} · {haircut_txt}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Comprometimento caixa</div><div class="sim-res-val">{comp_caixa_txt}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Origem ROI</div><div class="sim-res-val">{roi_src}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Confiança operacional</div><div class="sim-res-val">{conf_txt}</div></div>'
         "</div></div></div>"
     )
 
@@ -5624,6 +5670,11 @@ def _render_painel_inicial() -> None:
             return
 
     st.session_state.setdefault("_dash_dia_filtro", None)
+    st.session_state.setdefault("_dash_perfil_score", "balanceado")
+    st.session_state.setdefault("_dash_perfil_risco", "balanceado")
+    st.session_state.setdefault("dash_hibrido_caixa_ativo", False)
+    st.session_state.setdefault("dash_caixa_disponivel_brl", 0.0)
+    st.session_state.setdefault("dash_caixa_reserva_brl", 0.0)
 
     filtros_validos = ("priorizados", "prox7", "sem_sim", "sem_mercado", "sem_cache")
     if "_dash_filtros_rapidos" not in st.session_state:
@@ -5634,9 +5685,79 @@ def _render_painel_inicial() -> None:
         st.session_state["_dash_filtros_rapidos"] = [f for f in lst if f in filtros_validos]
     filtros_ativos = list(st.session_state.get("_dash_filtros_rapidos") or [])
 
-    d_total = processar_rows_dashboard(rows)
+    c_pf_score, c_pf_risco = st.columns(2, gap="small")
+    with c_pf_score:
+        perfil_score = str(
+            st.segmented_control(
+                "Perfil de estratégia",
+                options=["conservador", "balanceado", "agressivo"],
+                key="dash_perfil_score",
+                help="Ajusta pesos do score de prioridade (ROI, lucro e urgência temporal).",
+            )
+            or st.session_state.get("dash_perfil_score")
+            or "balanceado"
+        )
+    with c_pf_risco:
+        perfil_risco = str(
+            st.segmented_control(
+                "Perfil de risco",
+                options=["conservador", "balanceado", "agressivo"],
+                key="dash_perfil_risco",
+                help="Ajusta a sensibilidade C/B/A (cenários conservador, base e agressivo).",
+            )
+            or st.session_state.get("dash_perfil_risco")
+            or "balanceado"
+        )
+
+    c_hib, c_hib_caixa, c_hib_res = st.columns([1, 1, 1], gap="small")
+    with c_hib:
+        hibrido_ativo = bool(
+            st.checkbox(
+                "Modo híbrido (caixa)",
+                key="dash_hibrido_caixa_ativo",
+                help="Quando ativo, score e semáforo ajustam exigência conforme o capital comprometido por operação.",
+            )
+        )
+    with c_hib_caixa:
+        caixa_disponivel_brl = float(
+            st.number_input(
+                "Caixa disponível (R$)",
+                min_value=0.0,
+                step=50_000.0,
+                value=float(st.session_state.get("dash_caixa_disponivel_brl") or 0.0),
+                key="dash_caixa_disponivel_brl",
+                disabled=not hibrido_ativo,
+            )
+        )
+    with c_hib_res:
+        caixa_reserva_brl = float(
+            st.number_input(
+                "Reserva mínima (R$)",
+                min_value=0.0,
+                step=25_000.0,
+                value=float(st.session_state.get("dash_caixa_reserva_brl") or 0.0),
+                key="dash_caixa_reserva_brl",
+                disabled=not hibrido_ativo,
+            )
+        )
+
+    d_total = processar_rows_dashboard(
+        rows,
+        perfil_score=perfil_score,
+        perfil_risco=perfil_risco,
+        hibrido_ativo=hibrido_ativo,
+        caixa_disponivel_brl=caixa_disponivel_brl,
+        caixa_reserva_brl=caixa_reserva_brl,
+    )
     rows_filtrados = filtrar_rows_dashboard(rows, filtros_ativos)
-    d = processar_rows_dashboard(rows_filtrados)
+    d = processar_rows_dashboard(
+        rows_filtrados,
+        perfil_score=perfil_score,
+        perfil_risco=perfil_risco,
+        hibrido_ativo=hibrido_ativo,
+        caixa_disponivel_brl=caixa_disponivel_brl,
+        caixa_reserva_brl=caixa_reserva_brl,
+    )
     if "_dash_cal_ym" not in st.session_state:
         st.session_state["_dash_cal_ym"] = (d.agora.year, d.agora.month)
 
@@ -5684,9 +5805,19 @@ def _render_painel_inicial() -> None:
     filtro_iso = st.session_state.get("_dash_dia_filtro")
     if filtro_iso:
         d_alvo = date.fromisoformat(str(filtro_iso))
-        prox_s, top_s, pnd_s = agregar_listas_por_dia(rows_filtrados, d_alvo)
+        prox_s, top_s, pnd_s = agregar_listas_por_dia(
+            rows_filtrados,
+            d_alvo,
+            perfil_score=perfil_score,
+            perfil_risco=perfil_risco,
+            hibrido_ativo=hibrido_ativo,
+            caixa_disponivel_brl=caixa_disponivel_brl,
+            caixa_reserva_brl=caixa_reserva_brl,
+        )
     else:
-        prox_s, top_s, pnd_s = d.proximos, d.top_lucro, d.pendentes
+        prox_s = d.proximos
+        top_s = d.eficiencia_capital if d.eficiencia_capital else d.top_lucro
+        pnd_s = d.pendentes
 
     def _is_prioritario_card(x: Any) -> bool:
         try:
@@ -5777,7 +5908,7 @@ def _render_painel_inicial() -> None:
         with st.container(border=True):
             st.markdown(
                 '<span class="dc-badge" style="display:block;margin:0.1rem 0 0.4rem 0.05rem">'
-                "Maior lucro líquido projetado</span>",
+                "Melhor retorno por capital imobilizado</span>",
                 unsafe_allow_html=True,
             )
             for i, x in enumerate(top_s[:8]):

@@ -22,3 +22,14 @@ def test_normalizar_preenche_todos_os_cards():
 def test_parse_invalido_retorna_vazio():
     doc = parse_relatorio_mercado_contexto_json({"versao": 99, "cards": "nope"})
     assert doc.cards == [] or all(not c.topicos for c in doc.cards)
+
+
+def test_normalizar_preserva_evidencia_card():
+    raw = {
+        "versao": 1,
+        "cards": [
+            {"id": "populacao", "titulo": "Pop", "topicos": ["a"], "evidencia": "Base: 10 amostras."},
+        ],
+    }
+    doc = normalizar_documento_mercado(raw)
+    assert doc.cards[0].evidencia == "Base: 10 amostras."

@@ -30,6 +30,26 @@ from leilao_ia_v2.services.extracao_edital_llm import (
 logger = logging.getLogger(__name__)
 
 
+def _resolver_modelo_relatorio_mercado(modelo: Optional[str] = None) -> str:
+    """
+    Resolve o modelo com prioridade:
+    1) parâmetro explícito da chamada
+    2) OPENAI_MODEL_RELATORIO_MERCADO (override dedicado)
+    3) OPENAI_CHAT_MODEL (padrão global existente)
+    4) fallback local
+    """
+    m_arg = str(modelo or "").strip()
+    if m_arg:
+        return m_arg
+    m_rel = str(os.getenv("OPENAI_MODEL_RELATORIO_MERCADO", "") or "").strip()
+    if m_rel:
+        return m_rel
+    m_chat = str(os.getenv("OPENAI_CHAT_MODEL", "") or "").strip()
+    if m_chat:
+        return m_chat
+    return "gpt-4o-mini"
+
+
 def _extrair_json_objeto(texto: str) -> str:
     texto = (texto or "").strip()
     if not texto:
@@ -152,6 +172,7 @@ def montar_texto_entrada_contexto(
         "bom sinal de liquidez.\n"
         "Mencione **bairros concorrentes** típicos na mesma cidade/região quando fizer sentido.\n"
         "Sobre **condomínios fechados de casas**: indique se é comum na região ou no bairro, quando aplicável.\n"
+        "Sempre que possível, explicite a base de inferência em linguagem curta (ex.: amostra, faixa de preço, cobertura do bairro).\n"
     )
     return "\n".join(linhas)
 
@@ -181,7 +202,7 @@ def gerar_contexto_mercado_relatorio_llm(
 
     Devolve (documento normalizado, métricas).
     """
-    mid = modelo or os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+    mid = _resolver_modelo_relatorio_mercado(modelo)
     ids_lista = ", ".join(f'"{x}"' for x in CARD_IDS_ORDEM)
     system = (
         "Você é analista imobiliário no Brasil. Produza um JSON com o campo `cards` (array) e `disclaimer` (string).\n"

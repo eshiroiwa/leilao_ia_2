@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import statistics
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -535,6 +536,10 @@ def _montar_payload_cache(
             "Cache métricas: %s amostra(s) inválida(s) ignoradas (valor/área <=0 ou não numéricos)",
             descartadas_metricas,
         )
+    preco_m2_media = round(sum(pm2s) / len(pm2s), 4) if pm2s else 0.0
+    valor_media = round(sum(vals) / len(vals), 2) if vals else 0.0
+    preco_m2_mediana = round(float(statistics.median(pm2s)), 4) if pm2s else 0.0
+    valor_mediana = round(float(statistics.median(vals)), 2) if vals else 0.0
 
     ref_flag = 1 if apenas_referencia else 0
     sim_flag = 1 if uso_simulacao else 0
@@ -560,6 +565,11 @@ def _montar_payload_cache(
         "uso_simulacao": bool(uso_simulacao),
         "apenas_referencia": bool(apenas_referencia),
         "tipo_casa_segmento": tipo_casa_segmento_meta or tipo_segmento,
+        # Estatística robusta (mediana) para reduzir efeito de outliers no mercado.
+        "preco_m2_mediana_amostra": preco_m2_mediana,
+        "valor_mediana_venda_amostra": valor_mediana,
+        "preco_m2_media_amostra": preco_m2_media,
+        "valor_media_venda_amostra": valor_media,
     }
     if metadados_extras:
         for k, v in metadados_extras.items():
@@ -580,8 +590,9 @@ def _montar_payload_cache(
         "lat_ref": lat0,
         "lon_ref": lon0,
         "chave_segmento": chave_segmento,
-        "preco_m2_medio": round(sum(pm2s) / len(pm2s), 4) if pm2s else 0.0,
-        "valor_medio_venda": round(sum(vals) / len(vals), 2) if vals else 0.0,
+        # Mantém o nome das colunas legado, mas com agregado robusto.
+        "preco_m2_medio": preco_m2_mediana if pm2s else 0.0,
+        "valor_medio_venda": valor_mediana if vals else 0.0,
         "maior_valor_venda": max(vals) if vals else None,
         "menor_valor_venda": min(vals) if vals else None,
         "n_amostras": len(amostras),

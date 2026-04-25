@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from supabase import Client
@@ -22,6 +23,13 @@ from leilao_ia_v2.schemas.relatorio_mercado_contexto import (
 from leilao_ia_v2.services.contexto_mercado_relatorio_llm import (
     gerar_contexto_mercado_relatorio_llm,
     montar_texto_entrada_contexto,
+)
+from leilao_ia_v2.services.relatorio_mercado_inteligencia import (
+    assinatura_cache_principal,
+    avaliar_validade_relatorio,
+    calcular_qualidade_relatorio,
+    evidencias_por_card,
+    extrair_sinais_objetivos_por_cards,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +134,47 @@ def garantir_contexto_mercado_relatorio(
         n_anuncios_resolvidos=n_res,
     )
     doc, metricas = gerar_contexto_mercado_relatorio_llm(texto)
+    ttl_horas_raw = str(os.getenv("RELATORIO_MERCADO_TTL_HORAS", "168") or "168").strip()
+    try:
+        ttl_horas = max(24, min(int(ttl_horas_raw), 24 * 90))
+    except Exception:
+        ttl_horas = 168
+    qual = calcular_qualidade_relatorio(
+        cache_principal=cache_p,
+        ads_por_id=ads_por_id,
+        bairro_alvo=str(row.get("bairro") or ""),
+    )
+    ev_por = evidencias_por_card(qualidade=qual, bairro_alvo=str(row.get("bairro") or ""))
+    cards_enriquecidos = []
+    for c in doc.cards:
+        ev = str(ev_por.get(c.id) or "").strip()
+        tops = list(c.topicos or [])
+        if ev and not any("base:" in str(t).lower() for t in tops):
+            tops.append(ev)
+        cards_enriquecidos.append(c.model_copy(update={"evidencia": ev, "topicos": tops[:14]}))
+    sinais = extrair_sinais_objetivos_por_cards(cards_enriquecidos)
+    assinatura = assinatura_cache_principal(cache_p)
+    validade = avaliar_validade_relatorio(
+        gerado_em_iso=doc.gerado_em_iso,
+        ttl_horas=ttl_horas,
+        cache_principal_id=str((cache_p or {}).get("id") or ""),
+        assinatura_cache=assinatura,
+        cache_principal_atual=cache_p,
+    )
+    validade.update(
+        {
+            "cache_principal_id": str((cache_p or {}).get("id") or ""),
+            "assinatura_cache_principal": assinatura,
+        }
+    )
+    doc = doc.model_copy(
+        update={
+            "cards": cards_enriquecidos,
+            "sinais_decisao": sinais,
+            "qualidade": qual,
+            "validade": validade,
+        }
+    )
     payload = doc.model_dump(mode="json")
     leilao_imoveis_repo.atualizar_leilao_imovel(
         lid,

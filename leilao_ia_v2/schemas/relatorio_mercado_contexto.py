@@ -43,6 +43,38 @@ class RelatorioMercadoCard(BaseModel):
     id: str
     titulo: str = ""
     topicos: list[str] = Field(default_factory=list)
+    evidencia: str = ""
+
+
+class RelatorioMercadoSinaisDecisao(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    liquidez_bairro: int = Field(50, ge=0, le=100)
+    pressao_concorrencia: int = Field(50, ge=0, le=100)
+    fit_imovel_bairro: int = Field(50, ge=0, le=100)
+    resumo: str = ""
+
+
+class RelatorioMercadoQualidade(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    score_qualidade: int = Field(0, ge=0, le=100)
+    n_amostras_cache: int = 0
+    n_anuncios_resolvidos: int = 0
+    pct_mesmo_bairro: float = 0.0
+    pct_geo_valida: float = 0.0
+    notas: list[str] = Field(default_factory=list)
+
+
+class RelatorioMercadoValidade(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ttl_horas: int = 168
+    expirado: bool = False
+    horas_desde_geracao: float = 0.0
+    motivo: str = ""
+    cache_principal_id: str = ""
+    assinatura_cache_principal: str = ""
 
 
 class RelatorioMercadoContextoDocumento(BaseModel):
@@ -59,6 +91,9 @@ class RelatorioMercadoContextoDocumento(BaseModel):
         default="",
         description="Aviso curto sobre natureza aproximada das inferências.",
     )
+    sinais_decisao: RelatorioMercadoSinaisDecisao = Field(default_factory=RelatorioMercadoSinaisDecisao)
+    qualidade: RelatorioMercadoQualidade = Field(default_factory=RelatorioMercadoQualidade)
+    validade: RelatorioMercadoValidade = Field(default_factory=RelatorioMercadoValidade)
 
 
 def normalizar_documento_mercado(raw: Any) -> RelatorioMercadoContextoDocumento:
@@ -72,10 +107,17 @@ def normalizar_documento_mercado(raw: Any) -> RelatorioMercadoContextoDocumento:
         c = por_id.get(cid)
         if c is None:
             tit = CARD_TITULOS_PADRAO.get(cid, cid.replace("_", " ").title())
-            out_cards.append(RelatorioMercadoCard(id=cid, titulo=tit, topicos=[]))
+            out_cards.append(RelatorioMercadoCard(id=cid, titulo=tit, topicos=[], evidencia=""))
         else:
             tit = (c.titulo or "").strip() or CARD_TITULOS_PADRAO.get(cid, cid)
-            out_cards.append(RelatorioMercadoCard(id=cid, titulo=tit, topicos=list(c.topicos or [])[:14]))
+            out_cards.append(
+                RelatorioMercadoCard(
+                    id=cid,
+                    titulo=tit,
+                    topicos=list(c.topicos or [])[:14],
+                    evidencia=str(getattr(c, "evidencia", "") or "").strip(),
+                )
+            )
     return doc.model_copy(update={"cards": out_cards})
 
 

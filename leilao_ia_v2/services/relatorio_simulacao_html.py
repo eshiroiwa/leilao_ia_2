@@ -78,6 +78,7 @@ a.lei-top { color: var(--acc); word-break: break-all; }
 .rel-ctx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
 .rel-ctx-card { background: var(--card); border: 1px solid var(--bd); border-radius: 14px; padding: 14px 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.2); }
 .rel-ctx-card .rel-ctx-tit { font-size: 0.78rem; font-weight: 700; color: var(--acc); margin-bottom: 10px; line-height: 1.3; }
+.rel-ctx-card .rel-ctx-ev { font-size: 0.72rem; color: var(--muted); margin-bottom: 8px; line-height: 1.35; }
 .rel-ctx-card ul { margin: 0; padding-left: 1.1em; color: var(--txt); font-size: 0.86rem; line-height: 1.45; }
 .rel-ctx-card li { margin-bottom: 6px; }
 .rel-sim-cmp-paineis { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; align-items: start; }
@@ -145,7 +146,9 @@ def _html_secao_analise_mercado_ctx(row: dict[str, Any]) -> str:
             continue
         lis = "".join(f"<li>{html.escape(t)}</li>" for t in topicos)
         tit = html.escape((c.titulo or c.id).strip())
-        blocos.append(f'<div class="rel-ctx-card"><div class="rel-ctx-tit">{tit}</div><ul>{lis}</ul></div>')
+        ev = html.escape(str(getattr(c, "evidencia", "") or "").strip())
+        ev_html = f'<div class="rel-ctx-ev">{ev}</div>' if ev else ""
+        blocos.append(f'<div class="rel-ctx-card"><div class="rel-ctx-tit">{tit}</div>{ev_html}<ul>{lis}</ul></div>')
     if not blocos:
         return ""
     return (

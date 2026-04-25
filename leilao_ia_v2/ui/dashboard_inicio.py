@@ -10,9 +10,10 @@ Prioridade estratégica:
 from __future__ import annotations
 
 import html
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,13 +22,28 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
     parse_operacao_simulacao_json,
     parse_simulacoes_modalidades_json,
 )
+from leilao_ia_v2.schemas.relatorio_mercado_contexto import parse_relatorio_mercado_contexto_json
+from leilao_ia_v2.services.relatorio_mercado_inteligencia import extrair_sinais_objetivos_por_cards
 
 _TZ_SP = ZoneInfo("America/Sao_Paulo")
 
 # Oportunidades no painel inicial: com simulação gravada, só entra com ROI bruto > 40 %; sem simulação entra sempre.
 _ROI_BRUTO_MIN_OPORTUNIDADES = 0.4
-_ROI_PRIORIDADE = 0.5
-_LUCRO_PRIORIDADE = 500_000.0
+_ROI_PRIORIDADE = float(os.getenv("DASHBOARD_ROI_PRIORIDADE", "0.5") or "0.5")
+_LUCRO_PRIORIDADE = float(os.getenv("DASHBOARD_LUCRO_PRIORIDADE", "500000") or "500000")
+
+
+def _float_env(nome: str, default: float, *, min_v: float | None = None, max_v: float | None = None) -> float:
+    raw = str(os.getenv(nome, str(default)) or str(default)).strip()
+    try:
+        v = float(raw)
+    except Exception:
+        v = float(default)
+    if min_v is not None:
+        v = max(float(min_v), v)
+    if max_v is not None:
+        v = min(float(max_v), v)
+    return float(v)
 
 
 @dataclass
@@ -42,11 +58,33 @@ class _RowOut:
     prox_data: date | None
     lucro_liq: float | None
     roi_bruto: float | None
+    roi_liquido: float | None
+    roi_origem: str
     tem_simulacao: bool
     tem_mercado_llm: bool
     tem_cache: bool
+    confianca_operacional: int
+    capital_imobilizado: float | None
+    retorno_por_capital: float | None
+    lucro_conservador: float | None
+    lucro_agressivo: float | None
+    roi_conservador: float | None
+    roi_agressivo: float | None
+    tempo_venda_conservador_meses: float | None
+    haircut_venda_conservador_pct: float | None
+    liquidez_bairro_score: int
+    pressao_concorrencia_score: int
+    fit_imovel_bairro_score: int
+    qualidade_relatorio_score: int
+    relatorio_expirado: bool
+    hibrido_ativo: bool
+    capital_comprometido_pct: float | None
+    caixa_util_brl: float | None
+    semaforo_decisao: str
+    semaforo_justificativa: str
     praca_label: str
     score_prioridade: float
+    score_explicacao: str = ""
     url_foto_imovel: str | None = None
 
 
@@ -64,6 +102,7 @@ class DashboardDados:
     roi_medio_priorizados: float | None
     priorizados_lista: list[_RowOut] = field(default_factory=list)
     top_lucro: list[_RowOut] = field(default_factory=list)
+    eficiencia_capital: list[_RowOut] = field(default_factory=list)
     proximos: list[_RowOut] = field(default_factory=list)
     pendentes: list[_RowOut] = field(default_factory=list)
     lembretes: list[str] = field(default_factory=list)
@@ -425,6 +464,243 @@ def _roi_bruto_de_row(row: dict[str, Any]) -> float | None:
     return None
 
 
+def _roi_liquido_de_row(row: dict[str, Any]) -> float | None:
+    try:
+        doc = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
+        if doc.outputs and doc.outputs.roi_liquido is not None:
+            return float(doc.outputs.roi_liquido)
+    except Exception:
+        pass
+    try:
+        b = parse_simulacoes_modalidades_json(
+            row.get("simulacoes_modalidades_json"), legado_operacao=row.get("operacao_simulacao_json")
+        )
+        v = b.vista
+        if v.outputs and v.outputs.roi_liquido is not None:
+            return float(v.outputs.roi_liquido)
+    except Exception:
+        pass
+    if not _tem_simulacao(row):
+        try:
+            rv = row.get("roi_liquido_projetado")
+            if rv is not None and float(rv) == float(rv):
+                return float(rv)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _capital_imobilizado_de_row(row: dict[str, Any]) -> float | None:
+    try:
+        doc = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
+        if doc.outputs and doc.outputs.investimento_cash_ate_momento_venda is not None:
+            v = float(doc.outputs.investimento_cash_ate_momento_venda)
+            if v > 0:
+                return v
+    except Exception:
+        pass
+    try:
+        b = parse_simulacoes_modalidades_json(
+            row.get("simulacoes_modalidades_json"), legado_operacao=row.get("operacao_simulacao_json")
+        )
+        v = b.vista
+        if v.outputs and v.outputs.investimento_cash_ate_momento_venda is not None:
+            x = float(v.outputs.investimento_cash_ate_momento_venda)
+            if x > 0:
+                return x
+    except Exception:
+        pass
+    if not _tem_simulacao(row):
+        try:
+            ll = row.get("lucro_liquido_projetado")
+            rb = row.get("roi_projetado")
+            llf = float(ll) if ll is not None else 0.0
+            rbf = float(rb) if rb is not None else 0.0
+            if llf > 0 and rbf > 0:
+                return llf / rbf
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    return None
+
+
+def _tempo_estimado_venda_meses_row(row: dict[str, Any]) -> float:
+    try:
+        doc = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
+        t = float(doc.inputs.tempo_estimado_venda_meses or 12.0)
+        return max(1.0, min(120.0, t))
+    except Exception:
+        return 12.0
+
+
+def _doc_relatorio_mercado_row(row: dict[str, Any]):
+    raw = row.get("relatorio_mercado_contexto_json")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            import json
+
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    return parse_relatorio_mercado_contexto_json(raw if isinstance(raw, dict) else {})
+
+
+def _ttl_relatorio_horas() -> int:
+    raw = str(os.getenv("RELATORIO_MERCADO_TTL_HORAS", "168") or "168").strip()
+    try:
+        return max(24, min(int(raw), 24 * 90))
+    except Exception:
+        return 168
+
+
+def _status_validade_relatorio_row(row: dict[str, Any]) -> tuple[bool, str]:
+    raw = row.get("relatorio_mercado_contexto_json")
+    if not raw:
+        return False, ""
+    doc = _doc_relatorio_mercado_row(row)
+    if not str(doc.gerado_em_iso or "").strip():
+        return False, ""
+    ttl_h = _ttl_relatorio_horas()
+    try:
+        dt = datetime.fromisoformat(str(doc.gerado_em_iso or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        horas = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 3600.0
+    except Exception:
+        horas = float(ttl_h + 1)
+    expirado = bool(getattr(doc.validade, "expirado", False)) or horas > float(ttl_h)
+    motivo = str(getattr(doc.validade, "motivo", "") or "").strip()
+    if not motivo and expirado:
+        motivo = f"Relatório de mercado desatualizado ({horas:.0f}h > TTL {ttl_h}h)."
+    return expirado, motivo
+
+
+def _sinais_mercado_row(row: dict[str, Any]) -> tuple[int, int, int, int]:
+    doc = _doc_relatorio_mercado_row(row)
+    cards = list(doc.cards or [])
+    tem_conteudo = any((c.topicos or []) or str(getattr(c, "evidencia", "") or "").strip() for c in cards)
+    fallback = extrair_sinais_objetivos_por_cards(cards) if cards else {
+        "liquidez_bairro": 50,
+        "pressao_concorrencia": 50,
+        "fit_imovel_bairro": 50,
+    }
+    liq = int(getattr(doc.sinais_decisao, "liquidez_bairro", 0) or 0) or int(fallback["liquidez_bairro"])
+    prs = int(getattr(doc.sinais_decisao, "pressao_concorrencia", 0) or 0) or int(fallback["pressao_concorrencia"])
+    fit = int(getattr(doc.sinais_decisao, "fit_imovel_bairro", 0) or 0) or int(fallback["fit_imovel_bairro"])
+    qual = int(getattr(doc.qualidade, "score_qualidade", 0) or 0)
+    if qual <= 0:
+        qual = 55 if tem_conteudo else 0
+    return (
+        max(0, min(100, liq)),
+        max(0, min(100, prs)),
+        max(0, min(100, fit)),
+        max(0, min(100, qual)),
+    )
+
+
+def _ajuste_conservador_por_mercado(
+    *,
+    roi_cons: float | None,
+    lucro_cons: float | None,
+    tempo_base_meses: float,
+    liquidez: int,
+    pressao: int,
+    fit: int,
+    qualidade: int,
+) -> tuple[float | None, float | None, float, float]:
+    haircut = 0.0
+    haircut += max(0.0, (55.0 - float(liquidez)) * 0.0035)
+    haircut += max(0.0, (float(pressao) - 55.0) * 0.0028)
+    haircut += max(0.0, (50.0 - float(fit)) * 0.0025)
+    if qualidade < 50:
+        haircut += 0.03
+    haircut = max(0.0, min(0.22, haircut))
+    meses_extra = max(0.0, (55.0 - float(liquidez)) / 8.0) + max(0.0, (float(pressao) - 55.0) / 10.0)
+    if qualidade < 50:
+        meses_extra += 1.0
+    tempo_cons = max(1.0, float(tempo_base_meses) + round(meses_extra))
+    fator_tempo = float(tempo_base_meses) / tempo_cons if tempo_cons > 0 else 1.0
+    fator = max(0.45, (1.0 - haircut) * fator_tempo)
+    roi_out = (float(roi_cons) * fator) if roi_cons is not None else None
+    lucro_out = (float(lucro_cons) * fator) if lucro_cons is not None else None
+    return roi_out, lucro_out, tempo_cons, haircut
+
+
+def _semaforo_decisao(o: "_RowOut") -> tuple[str, str]:
+    rb = o.roi_conservador if o.roi_conservador is not None else o.roi_bruto
+    ef = o.retorno_por_capital
+    roi_buy = _float_env("DASHBOARD_SEMAFORO_ROI_COMPRAR", 0.45, min_v=0.0, max_v=3.0)
+    ef_buy = _float_env("DASHBOARD_SEMAFORO_EFICIENCIA_COMPRAR", 0.35, min_v=0.0, max_v=3.0)
+    qual_buy = _float_env("DASHBOARD_SEMAFORO_QUALIDADE_COMPRAR", 65.0, min_v=0.0, max_v=100.0)
+    liq_buy = _float_env("DASHBOARD_SEMAFORO_LIQUIDEZ_COMPRAR_MIN", 55.0, min_v=0.0, max_v=100.0)
+    conc_buy_max = _float_env("DASHBOARD_SEMAFORO_CONCORRENCIA_COMPRAR_MAX", 60.0, min_v=0.0, max_v=100.0)
+    roi_neg = _float_env("DASHBOARD_SEMAFORO_ROI_NEGOCIAR", 0.25, min_v=0.0, max_v=3.0)
+    ef_neg = _float_env("DASHBOARD_SEMAFORO_EFICIENCIA_NEGOCIAR", 0.18, min_v=0.0, max_v=3.0)
+    qual_neg = _float_env("DASHBOARD_SEMAFORO_QUALIDADE_NEGOCIAR", 45.0, min_v=0.0, max_v=100.0)
+    comp = float(o.capital_comprometido_pct or 0.0) if o.capital_comprometido_pct is not None else 0.0
+    if o.hibrido_ativo:
+        if comp > 35.0:
+            roi_buy += 0.12
+            ef_buy += 0.12
+            qual_buy += 18
+            liq_buy += 8
+            conc_buy_max -= 8
+            roi_neg += 0.05
+            ef_neg += 0.05
+            qual_neg += 10
+        elif comp > 20.0:
+            roi_buy += 0.05
+            ef_buy += 0.05
+            qual_buy += 10
+            liq_buy += 4
+            conc_buy_max -= 4
+            roi_neg += 0.02
+            ef_neg += 0.02
+            qual_neg += 4
+        if comp > 50.0:
+            return "Evitar", f"Comprometimento de caixa muito alto ({comp:.1f}%)."
+    if (
+        rb is not None
+        and rb >= roi_buy
+        and ef is not None
+        and ef >= ef_buy
+        and o.qualidade_relatorio_score >= qual_buy
+        and not o.relatorio_expirado
+        and o.liquidez_bairro_score >= liq_buy
+        and o.pressao_concorrencia_score <= conc_buy_max
+    ):
+        if o.hibrido_ativo and comp > 0:
+            return "Comprar", f"Risco/liquidez equilibrados com comprometimento de caixa em {comp:.1f}%."
+        return "Comprar", "Risco/liquidez equilibrados para execução."
+    if rb is not None and rb >= roi_neg and ef is not None and ef >= ef_neg and o.qualidade_relatorio_score >= qual_neg:
+        if o.hibrido_ativo and comp > 0:
+            return "Negociar lance", f"Oportunidade existe, mas requer margem de segurança (caixa {comp:.1f}%)."
+        return "Negociar lance", "Oportunidade existe, mas requer margem de segurança maior."
+    motivo = "Baixo retorno ajustado ao risco/liquidez."
+    if o.relatorio_expirado:
+        motivo = "Relatório de mercado desatualizado; regenere antes de decidir."
+    return "Evitar", motivo
+
+
+def _sensibilidade_risco(o: "_RowOut", *, perfil: str = "balanceado") -> tuple[float, float, float]:
+    """
+    Multiplicadores (conservador, base, agressivo) para ROI/lucro
+    a partir da confiança operacional e da origem dos números.
+    """
+    p = _parametros_risco_por_perfil(perfil)
+    conf = max(0, min(100, int(o.confianca_operacional or 0)))
+    penal = float(p["base_penal"]) + ((100 - conf) / 100.0) * float(p["faixa_conf"])
+    if o.roi_origem == "pós-cache":
+        penal += float(p["penal_origem_pos_cache"])
+    if not o.tem_cache:
+        penal += float(p["penal_sem_cache"])
+    if not o.tem_mercado_llm:
+        penal += float(p["penal_sem_mercado"])
+    penal = max(float(p["penal_min"]), min(float(p["penal_max"]), penal))
+    conservador = max(0.5, 1.0 - penal)
+    agressivo = min(1.30, 1.0 + penal * float(p["ganho_agressivo"]))
+    return conservador, 1.0, agressivo
+
+
 def _url_foto_imovel_row(r: dict[str, Any]) -> str | None:
     u = str(r.get("url_foto_imovel") or "").strip()
     if u.startswith("http://") or u.startswith("https://"):
@@ -446,35 +722,172 @@ def _e_prioritario(o: _RowOut) -> bool:
     return (rb is not None and rb >= _ROI_PRIORIDADE) or (ll is not None and ll >= _LUCRO_PRIORIDADE)
 
 
-def _score_prioridade(o: _RowOut, *, hoje: date) -> float:
+def _pesos_score_por_perfil(perfil: str) -> dict[str, float]:
+    p = str(perfil or "").strip().lower()
+    if p == "conservador":
+        return {"roi": 95.0, "lucro": 6.0, "urgencia": 2.0, "prioritario": 90.0}
+    if p == "agressivo":
+        return {"roi": 140.0, "lucro": 8.0, "urgencia": 2.8, "prioritario": 140.0}
+    return {"roi": 120.0, "lucro": 7.0, "urgencia": 2.4, "prioritario": 120.0}
+
+
+def _parametros_risco_por_perfil(perfil: str) -> dict[str, float]:
+    p = str(perfil or "").strip().lower()
+    if p == "conservador":
+        return {
+            "base_penal": 0.14,
+            "faixa_conf": 0.20,
+            "penal_origem_pos_cache": 0.07,
+            "penal_sem_cache": 0.07,
+            "penal_sem_mercado": 0.04,
+            "penal_min": 0.12,
+            "penal_max": 0.44,
+            "ganho_agressivo": 0.35,
+        }
+    if p == "agressivo":
+        return {
+            "base_penal": 0.08,
+            "faixa_conf": 0.13,
+            "penal_origem_pos_cache": 0.03,
+            "penal_sem_cache": 0.04,
+            "penal_sem_mercado": 0.02,
+            "penal_min": 0.06,
+            "penal_max": 0.32,
+            "ganho_agressivo": 0.60,
+        }
+    return {
+        "base_penal": 0.10,
+        "faixa_conf": 0.16,
+        "penal_origem_pos_cache": 0.05,
+        "penal_sem_cache": 0.05,
+        "penal_sem_mercado": 0.03,
+        "penal_min": 0.08,
+        "penal_max": 0.40,
+        "ganho_agressivo": 0.45,
+    }
+
+
+def _score_prioridade(o: _RowOut, *, hoje: date, perfil: str = "balanceado") -> tuple[float, str]:
     score = 0.0
-    rb = o.roi_bruto
-    ll = o.lucro_liq
+    partes: list[str] = []
+    w = _pesos_score_por_perfil(perfil)
+    rb = o.roi_conservador if o.roi_conservador is not None else o.roi_bruto
+    ll = o.lucro_conservador if o.lucro_conservador is not None else o.lucro_liq
     if rb is not None:
-        score += min(max(float(rb), 0.0), 1.5) * 120.0
+        s_roi = min(max(float(rb), 0.0), 1.5) * float(w["roi"])
+        score += s_roi
+        partes.append(f"ROI +{s_roi:.1f}")
     if ll is not None:
-        score += min(max(float(ll), 0.0) / 100_000.0, 25.0) * 7.0
+        s_lucro = min(max(float(ll), 0.0) / 100_000.0, 25.0) * float(w["lucro"])
+        score += s_lucro
+        partes.append(f"Lucro +{s_lucro:.1f}")
     if o.prox_data:
         dias = (o.prox_data - hoje).days
         if dias >= 0:
-            score += max(0.0, (60.0 - float(dias)) * 2.4)
+            s_tempo = max(0.0, (60.0 - float(dias)) * float(w["urgencia"]))
+            score += s_tempo
+            if s_tempo > 0:
+                partes.append(f"Urgência +{s_tempo:.1f}")
         else:
-            score -= min(25.0, abs(float(dias)) * 0.6)
+            s_passado = min(25.0, abs(float(dias)) * 0.6)
+            score -= s_passado
+            partes.append(f"Praça passada -{s_passado:.1f}")
     if _e_prioritario(o):
-        score += 120.0
+        s_pri = float(w["prioritario"])
+        score += s_pri
+        partes.append(f"Prioritário +{s_pri:.0f}")
     if not o.tem_simulacao:
         score -= 10.0
+        partes.append("Sem simulação -10")
     if not o.tem_mercado_llm:
         score -= 8.0
-    return round(score, 2)
+        partes.append("Sem mercado LLM -8")
+    if o.retorno_por_capital is not None:
+        w_ef = _float_env("DASHBOARD_SCORE_PESO_EFICIENCIA_CAPITAL", 24.0, min_v=0.0, max_v=80.0)
+        s_ef = min(max(float(o.retorno_por_capital), 0.0), 2.0) * w_ef
+        score += s_ef
+        partes.append(f"Eficiência capital +{s_ef:.1f}")
+    w_liq = _float_env("DASHBOARD_SCORE_PESO_LIQUIDEZ", 20.0, min_v=0.0, max_v=80.0)
+    w_conc = _float_env("DASHBOARD_SCORE_PESO_CONCORRENCIA", 18.0, min_v=0.0, max_v=80.0)
+    w_fit = _float_env("DASHBOARD_SCORE_PESO_FIT", 14.0, min_v=0.0, max_v=60.0)
+    w_qual = _float_env("DASHBOARD_SCORE_PESO_QUALIDADE_RELATORIO", 12.0, min_v=0.0, max_v=60.0)
+    p_exp = _float_env("DASHBOARD_SCORE_PENALIDADE_RELATORIO_EXPIRADO", 8.0, min_v=0.0, max_v=40.0)
+    s_liq = ((float(o.liquidez_bairro_score) - 50.0) / 50.0) * w_liq
+    score += s_liq
+    if abs(s_liq) >= 0.2:
+        partes.append(f"Liquidez bairro {s_liq:+.1f}")
+    s_conc = -((float(o.pressao_concorrencia_score) - 50.0) / 50.0) * w_conc
+    score += s_conc
+    if abs(s_conc) >= 0.2:
+        partes.append(f"Pressão concorrência {s_conc:+.1f}")
+    s_fit = ((float(o.fit_imovel_bairro_score) - 50.0) / 50.0) * w_fit
+    score += s_fit
+    if abs(s_fit) >= 0.2:
+        partes.append(f"Fit imóvel-bairro {s_fit:+.1f}")
+    s_qual = ((float(o.qualidade_relatorio_score) - 50.0) / 50.0) * w_qual
+    score += s_qual
+    if abs(s_qual) >= 0.2:
+        partes.append(f"Qualidade relatório {s_qual:+.1f}")
+    if o.relatorio_expirado:
+        score -= p_exp
+        partes.append(f"Relatório expirado -{p_exp:.0f}")
+    if o.hibrido_ativo and o.capital_comprometido_pct is not None:
+        pct_ref = _float_env("DASHBOARD_HIBRIDO_FAIXA_CAIXA_CONFORTO_PCT", 20.0, min_v=5.0, max_v=60.0)
+        k_pen = _float_env("DASHBOARD_SCORE_PENALIDADE_CAIXA_POR_PONTO", 0.70, min_v=0.0, max_v=3.0)
+        excesso = max(0.0, float(o.capital_comprometido_pct) - pct_ref)
+        p_cx = min(30.0, excesso * k_pen)
+        if p_cx > 0:
+            score -= p_cx
+            partes.append(f"Caixa -{p_cx:.1f}")
+    explicacao = " · ".join(partes[:6])
+    return round(score, 2), explicacao
 
 
-def _row_to_out(r: dict[str, Any], *, hoje: date) -> _RowOut:
+def _row_to_out(
+    r: dict[str, Any],
+    *,
+    hoje: date,
+    perfil_risco: str = "balanceado",
+    hibrido_ativo: bool = False,
+    caixa_disponivel_brl: float | None = None,
+    caixa_reserva_brl: float = 0.0,
+) -> _RowOut:
     iid = str(r.get("id") or "")
     d, pl = _proxima_data_e_praca(r, hoje=hoje)
     cids = r.get("cache_media_bairro_ids") or []
     ncache = len(cids) if isinstance(cids, (list, tuple)) else 0
-    return _RowOut(
+    tem_sim = _tem_simulacao(r)
+    tem_merc = _tem_mercado_llm(r)
+    confianca = 40
+    if ncache > 0:
+        confianca += 25
+    if tem_merc:
+        confianca += 15
+    if tem_sim:
+        confianca += 20
+    confianca = max(0, min(100, int(confianca)))
+    ll = _lucro_liquido_de_row(r)
+    rb = _roi_bruto_de_row(r)
+    rl = _roi_liquido_de_row(r)
+    cap = _capital_imobilizado_de_row(r)
+    ret_cap = (ll / cap) if (ll is not None and cap is not None and cap > 0) else None
+    caixa_util = None
+    comprometido_pct = None
+    if hibrido_ativo:
+        try:
+            caixa_total = float(caixa_disponivel_brl or 0.0)
+            reserva = float(caixa_reserva_brl or 0.0)
+            caixa_util_calc = max(0.0, caixa_total - reserva)
+            caixa_util = caixa_util_calc
+            if caixa_util_calc > 0 and cap is not None and cap > 0:
+                comprometido_pct = (float(cap) / float(caixa_util_calc)) * 100.0
+        except Exception:
+            caixa_util = 0.0
+            comprometido_pct = None
+    liq, prs, fit, qual = _sinais_mercado_row(r)
+    rel_exp, _rel_motivo = _status_validade_relatorio_row(r)
+    tempo_base = _tempo_estimado_venda_meses_row(r)
+    out = _RowOut(
         id=iid,
         cidade=str(r.get("cidade") or "—")[:32],
         estado=str(r.get("estado") or "")[:3],
@@ -483,22 +896,86 @@ def _row_to_out(r: dict[str, Any], *, hoje: date) -> _RowOut:
         url=str(r.get("url_leilao") or "")[:120],
         endereco=str(r.get("endereco") or "")[:60],
         prox_data=d,
-        lucro_liq=_lucro_liquido_de_row(r),
-        roi_bruto=_roi_bruto_de_row(r),
-        tem_simulacao=_tem_simulacao(r),
-        tem_mercado_llm=_tem_mercado_llm(r),
+        lucro_liq=ll,
+        roi_bruto=rb,
+        roi_liquido=rl,
+        roi_origem=("simulação gravada" if tem_sim else "pós-cache"),
+        tem_simulacao=tem_sim,
+        tem_mercado_llm=tem_merc,
         tem_cache=ncache > 0,
+        confianca_operacional=confianca,
+        capital_imobilizado=cap,
+        retorno_por_capital=ret_cap,
+        lucro_conservador=None,
+        lucro_agressivo=None,
+        roi_conservador=None,
+        roi_agressivo=None,
+        tempo_venda_conservador_meses=None,
+        haircut_venda_conservador_pct=None,
+        liquidez_bairro_score=liq,
+        pressao_concorrencia_score=prs,
+        fit_imovel_bairro_score=fit,
+        qualidade_relatorio_score=qual,
+        relatorio_expirado=rel_exp,
+        hibrido_ativo=bool(hibrido_ativo),
+        capital_comprometido_pct=round(float(comprometido_pct), 2) if comprometido_pct is not None else None,
+        caixa_util_brl=round(float(caixa_util), 2) if caixa_util is not None else None,
+        semaforo_decisao="",
+        semaforo_justificativa="",
         praca_label=pl,
         score_prioridade=0.0,
         url_foto_imovel=_url_foto_imovel_row(r),
     )
+    m_cons, _, m_agr = _sensibilidade_risco(out, perfil=perfil_risco)
+    lucro_cons_base = (ll * m_cons) if ll is not None else None
+    roi_cons_base = (rb * m_cons) if rb is not None else None
+    roi_cons_aj, lucro_cons_aj, tempo_cons, haircut = _ajuste_conservador_por_mercado(
+        roi_cons=roi_cons_base,
+        lucro_cons=lucro_cons_base,
+        tempo_base_meses=tempo_base,
+        liquidez=liq,
+        pressao=prs,
+        fit=fit,
+        qualidade=qual,
+    )
+    out.lucro_conservador = lucro_cons_aj
+    out.lucro_agressivo = (ll * m_agr) if ll is not None else None
+    out.roi_conservador = roi_cons_aj
+    out.roi_agressivo = (rb * m_agr) if rb is not None else None
+    out.tempo_venda_conservador_meses = tempo_cons
+    out.haircut_venda_conservador_pct = haircut
+    sema, sema_j = _semaforo_decisao(out)
+    out.semaforo_decisao = sema
+    out.semaforo_justificativa = sema_j
+    return out
 
 
-def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
+def processar_rows_dashboard(
+    rows: list[dict[str, Any]],
+    *,
+    perfil_score: str = "balanceado",
+    perfil_risco: str = "balanceado",
+    hibrido_ativo: bool = False,
+    caixa_disponivel_brl: float | None = None,
+    caixa_reserva_brl: float = 0.0,
+) -> DashboardDados:
     hoje = datetime.now(_TZ_SP).date()
-    outs = [_row_to_out(r, hoje=hoje) for r in rows if r.get("id")]
+    outs = [
+        _row_to_out(
+            r,
+            hoje=hoje,
+            perfil_risco=perfil_risco,
+            hibrido_ativo=hibrido_ativo,
+            caixa_disponivel_brl=caixa_disponivel_brl,
+            caixa_reserva_brl=caixa_reserva_brl,
+        )
+        for r in rows
+        if r.get("id")
+    ]
     for i, o in enumerate(outs):
-        outs[i].score_prioridade = _score_prioridade(o, hoje=hoje)
+        s, e = _score_prioridade(o, hoje=hoje, perfil=perfil_score)
+        outs[i].score_prioridade = s
+        outs[i].score_explicacao = e
     op = [x for x in outs if _elegivel_oportunidades_roi(x)]
     sem_sim = [x for x in outs if not x.tem_simulacao]
     sem_merc = [x for x in outs if not x.tem_mercado_llm]
@@ -523,6 +1000,11 @@ def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
         key=lambda z: (z.lucro_liq or 0.0, z.score_prioridade),
         reverse=True,
     )[:6]
+    ef_cap = sorted(
+        [x for x in op if x.retorno_por_capital is not None],
+        key=lambda z: (z.retorno_por_capital or 0.0, z.score_prioridade),
+        reverse=True,
+    )[:8]
     proximos = sorted(
         [x for x in com_data if x.prox_data and x.prox_data >= hoje and "(passada)" not in (x.praca_label or "")],
         key=lambda z: (z.prox_data or hoje, -z.score_prioridade, z.cidade),
@@ -585,6 +1067,7 @@ def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
         ),
         priorizados_lista=priorizados_lista,
         top_lucro=top_l,
+        eficiencia_capital=ef_cap,
         proximos=proximos,
         pendentes=pendentes,
         lembretes=lembretes,
@@ -595,6 +1078,12 @@ def processar_rows_dashboard(rows: list[dict[str, Any]]) -> DashboardDados:
 def agregar_listas_por_dia(
     rows: list[dict[str, Any]],
     dia: date,
+    *,
+    perfil_score: str = "balanceado",
+    perfil_risco: str = "balanceado",
+    hibrido_ativo: bool = False,
+    caixa_disponivel_brl: float | None = None,
+    caixa_reserva_brl: float = 0.0,
 ) -> tuple[list[_RowOut], list[_RowOut], list[_RowOut]]:
     """
     Recalcula as três colunas (próximos, top lucro, pendências) somente com leilões
@@ -605,8 +1094,17 @@ def agregar_listas_por_dia(
     for r in rows:
         if not r.get("id"):
             continue
-        o = _row_to_out(r, hoje=hoje)
-        o.score_prioridade = _score_prioridade(o, hoje=hoje)
+        o = _row_to_out(
+            r,
+            hoje=hoje,
+            perfil_risco=perfil_risco,
+            hibrido_ativo=hibrido_ativo,
+            caixa_disponivel_brl=caixa_disponivel_brl,
+            caixa_reserva_brl=caixa_reserva_brl,
+        )
+        s, e = _score_prioridade(o, hoje=hoje, perfil=perfil_score)
+        o.score_prioridade = s
+        o.score_explicacao = e
         if o.prox_data == dia:
             outs_dia.append(o)
     if not outs_dia:
@@ -614,10 +1112,16 @@ def agregar_listas_por_dia(
     op_dia = [x for x in outs_dia if _elegivel_oportunidades_roi(x)]
     com_data = [x for x in op_dia if x.prox_data is not None]
     top_l = sorted(
-        [x for x in op_dia if x.lucro_liq is not None],
-        key=lambda z: (z.lucro_liq or 0.0, z.score_prioridade),
+        [x for x in op_dia if x.retorno_por_capital is not None],
+        key=lambda z: (z.retorno_por_capital or 0.0, z.score_prioridade),
         reverse=True,
     )[:8]
+    if not top_l:
+        top_l = sorted(
+            [x for x in op_dia if x.lucro_liq is not None],
+            key=lambda z: (z.lucro_liq or 0.0, z.score_prioridade),
+            reverse=True,
+        )[:8]
     proximos = sorted(
         com_data, key=lambda z: (-z.score_prioridade, z.cidade, z.bairro),
     )[:8]
