@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import statistics
@@ -61,6 +62,9 @@ _TIPOS_RESIDENCIAIS_POOL: tuple[str, ...] = ("casa", "sobrado", "casa_condominio
 # Política de composição dos caches gravados (UI lê ``volume_amostras_baixo`` em ``metadados_json``).
 CACHE_MONTE_MIN_EXIGIDO = 1
 CACHE_VOLUME_BAIXO_LIMITE = 5
+# Distribuição de metragem para liquidez (aviso de outlier da região).
+LIQ_METRAGEM_MIN_AMOSTRAS = 20
+LIQ_METRAGEM_MAX_FIRECRAWL_CREDITOS = 4
 # Padrões quando não há contexto Streamlit (testes, scripts). A UI usa ``get_busca_mercado_parametros()``.
 CACHE_AMOSTRAS_PRINCIPAL_MAX = 10
 CACHE_AMOSTRAS_LOTE_REFERENCIA = 10
@@ -191,6 +195,96 @@ def _deduplicar_amostras_similares(amostras: list[dict[str, Any]]) -> tuple[list
     return out, n_dup_url, n_dup_fuzzy
 
 
+def _indices_outliers_mad_log(valores: list[float], *, z_limite: float = 3.5) -> set[int]:
+    """
+    Detecta outliers usando z-score robusto (MAD) no domínio logarítmico.
+    """
+    if len(valores) < 6:
+        return set()
+    logs = [math.log(float(v)) for v in valores if v > 0]
+    if len(logs) != len(valores):
+        return set()
+    med = float(statistics.median(logs))
+    desvios = [abs(x - med) for x in logs]
+    mad = float(statistics.median(desvios))
+    if mad <= 0:
+        return set()
+    out: set[int] = set()
+    for i, x in enumerate(logs):
+        z = 0.6745 * (x - med) / mad
+        if abs(z) > float(z_limite):
+            out.add(i)
+    return out
+
+
+def _remover_extremos_estatisticos(
+    amostras: list[dict[str, Any]],
+    linhas: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Remove extremos fortes de preço absoluto e preço/m² para reduzir distorção do cache.
+    Só aplica quando há volume suficiente e mantém no mínimo 4 amostras para não matar cobertura.
+    """
+    if len(amostras) < 6:
+        return amostras, 0
+    idx_validos: list[int] = []
+    valores: list[float] = []
+    pm2s: list[float] = []
+    for i, a in enumerate(amostras):
+        v = _float_positivo(a.get("valor_venda"))
+        ar = _float_positivo(a.get("area_construida_m2"))
+        if v is None or ar is None:
+            continue
+        idx_validos.append(i)
+        valores.append(float(v))
+        pm2s.append(float(v) / float(ar))
+    if len(idx_validos) < 6:
+        return amostras, 0
+
+    out_val = _indices_outliers_mad_log(valores)
+    out_pm2 = _indices_outliers_mad_log(pm2s)
+
+    med_val = float(statistics.median(valores))
+    med_pm2 = float(statistics.median(pm2s))
+    out_ratio_val: set[int] = set()
+    out_ratio_pm2: set[int] = set()
+    if med_val > 0:
+        for j, v in enumerate(valores):
+            ratio = v / med_val
+            if abs(v - med_val) >= 200_000 and (ratio < 0.45 or ratio > 1.90):
+                out_ratio_val.add(j)
+    if med_pm2 > 0:
+        for j, vpm2 in enumerate(pm2s):
+            ratio_pm2 = vpm2 / med_pm2
+            if ratio_pm2 < 0.50 or ratio_pm2 > 2.00:
+                out_ratio_pm2.add(j)
+
+    out_local = out_val | out_pm2 | out_ratio_val | out_ratio_pm2
+    if not out_local:
+        return amostras, 0
+
+    idx_drop = {idx_validos[j] for j in out_local}
+    n_drop = len(idx_drop)
+    n_keep = len(amostras) - n_drop
+    if n_keep < 4:
+        if linhas is not None:
+            linhas.append(
+                "  saneamento_extremos: detectados outliers, mas removidos=0 para preservar volume mínimo (4)."
+            )
+        return amostras, 0
+
+    filtradas = [a for i, a in enumerate(amostras) if i not in idx_drop]
+    if linhas is not None:
+        linhas.append(
+            "  saneamento_extremos: "
+            f"outliers_valor_mad={len(out_val)} | outliers_preco_m2_mad={len(out_pm2)} | "
+            f"outliers_valor_ratio={len(out_ratio_val)} | outliers_preco_m2_ratio={len(out_ratio_pm2)} | "
+            f"removidos={n_drop} | "
+            f"restantes={len(filtradas)}"
+        )
+    return filtradas, n_drop
+
+
 def _sanear_amostras_para_cache(amostras: list[dict[str, Any]], linhas: list[str] | None = None) -> list[dict[str, Any]]:
     n0 = len(amostras)
     if n0 == 0:
@@ -198,13 +292,14 @@ def _sanear_amostras_para_cache(amostras: list[dict[str, Any]], linhas: list[str
     sem_incons = [a for a in amostras if not _preco_anuncio_inconsistente(a)]
     n_inc = n0 - len(sem_incons)
     dedup, n_dup_url, n_dup_fuzzy = _deduplicar_amostras_similares(sem_incons)
-    if linhas is not None and (n_inc > 0 or n_dup_url > 0 or n_dup_fuzzy > 0):
+    sem_extremos, n_out = _remover_extremos_estatisticos(dedup, linhas)
+    if linhas is not None and (n_inc > 0 or n_dup_url > 0 or n_dup_fuzzy > 0 or n_out > 0):
         linhas.append(
             "  saneamento_amostras: "
             f"incons_preco={n_inc} | dup_url={n_dup_url} | dup_similar={n_dup_fuzzy} | "
-            f"restantes={len(dedup)}"
+            f"outliers={n_out} | restantes={len(sem_extremos)}"
         )
-    return dedup
+    return sem_extremos
 
 
 def _filtrar_amostras_so_terreno(amostras: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -226,6 +321,359 @@ def _parse_extra(leilao: dict[str, Any]) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _percentil_linear(xs: list[float], p: float) -> float:
+    """Percentil com interpolação linear (0..1)."""
+    if not xs:
+        return 0.0
+    if len(xs) == 1:
+        return float(xs[0])
+    ys = sorted(float(v) for v in xs)
+    q = max(0.0, min(1.0, float(p)))
+    idx = q * (len(ys) - 1)
+    lo = int(math.floor(idx))
+    hi = int(math.ceil(idx))
+    if lo == hi:
+        return ys[lo]
+    frac = idx - lo
+    return ys[lo] + (ys[hi] - ys[lo]) * frac
+
+
+def _analise_liquidez_metragem(
+    area_imovel_m2: float,
+    areas_amostra: list[float],
+    *,
+    min_amostras: int = LIQ_METRAGEM_MIN_AMOSTRAS,
+) -> dict[str, Any]:
+    vals = [float(v) for v in areas_amostra if float(v) > 0]
+    n = len(vals)
+    base: dict[str, Any] = {
+        "n_amostras_area": n,
+        "min_amostras_recomendado": int(min_amostras),
+        "area_imovel_m2": float(area_imovel_m2 or 0.0),
+        "fit_metragem_score": 0,
+        "alerta_outlier_metragem": False,
+        "mensagem_alerta": "",
+        "faixa_tipica_m2": None,
+        "status": "sem_dados",
+    }
+    if area_imovel_m2 <= 0:
+        base["status"] = "sem_area_imovel"
+        return base
+    if n < 5:
+        base["status"] = "amostra_insuficiente"
+        base["mensagem_alerta"] = "Amostra insuficiente para avaliar outlier de metragem."
+        return base
+    p10 = _percentil_linear(vals, 0.10)
+    p25 = _percentil_linear(vals, 0.25)
+    p50 = _percentil_linear(vals, 0.50)
+    p75 = _percentil_linear(vals, 0.75)
+    p90 = _percentil_linear(vals, 0.90)
+    iqr = max(0.0, p75 - p25)
+    lim_inf = max(0.0, p25 - 1.5 * iqr)
+    lim_sup = p75 + 1.5 * iqr
+    area = float(area_imovel_m2)
+    # Percentil aproximado (rank médio).
+    menores = sum(1 for v in vals if v < area)
+    iguais = sum(1 for v in vals if v == area)
+    pct = ((menores + 0.5 * iguais) / n) * 100.0 if n > 0 else 0.0
+    fit = max(0, min(100, int(round(100.0 - abs(pct - 50.0) * 2.0))))
+    out_moderado = area < p10 or area > p90
+    out_forte = area < lim_inf or area > lim_sup
+    alerta = bool(out_moderado or out_forte)
+    msg = ""
+    if alerta:
+        cls = "forte" if out_forte else "moderado"
+        msg = (
+            f"Metragem {cls} fora do padrão local (imóvel={area:.1f}m²; "
+            f"faixa típica P10-P90={p10:.1f}-{p90:.1f}m²). Liquidez pode ser menor."
+        )
+    base.update(
+        {
+            "status": "ok",
+            "p10_area_m2": round(p10, 2),
+            "p25_area_m2": round(p25, 2),
+            "p50_area_m2": round(p50, 2),
+            "p75_area_m2": round(p75, 2),
+            "p90_area_m2": round(p90, 2),
+            "limite_iqr_inf_m2": round(lim_inf, 2),
+            "limite_iqr_sup_m2": round(lim_sup, 2),
+            "percentil_area_imovel": round(pct, 2),
+            "fit_metragem_score": int(fit),
+            "outlier_moderado_p10_p90": bool(out_moderado),
+            "outlier_forte_iqr": bool(out_forte),
+            "alerta_outlier_metragem": bool(alerta),
+            "mensagem_alerta": msg,
+            "faixa_tipica_m2": f"{round(p10, 1)}-{round(p90, 1)}",
+            "amostra_fraca": bool(n < int(min_amostras)),
+        }
+    )
+    return base
+
+
+def _coletar_metricas_para_analise_liquidez(
+    client: Client,
+    *,
+    cache_ids: list[str],
+    lat0: float,
+    lon0: float,
+    raio_km: float,
+    tipo_l: str,
+    cidade: str,
+    estado_sigla: str,
+    bairro: str,
+    leilao_id: str,
+    estado_raw: str,
+    ignorar_cache_firecrawl: bool,
+    max_chamadas_api_firecrawl: int | None = None,
+) -> tuple[list[dict[str, float]], int, str]:
+    """
+    Coleta métricas para análise de liquidez (área/pm2/distância/tipo).
+    Prioriza anúncios dos caches já gravados; se amostra fraca, faz até 1 rodada Firecrawl sem faixa de área.
+    """
+    usados_fc = 0
+    origem = "caches_vinculados"
+    ids_limpos = [str(x).strip() for x in (cache_ids or []) if str(x).strip()]
+    metricas: list[dict[str, float]] = []
+    tipos = list(_TIPOS_RESIDENCIAIS_POOL) if tipo_l in _TIPOS_CASA_SOBRADO else [tipo_l]
+    tset = {str(t).strip().lower() for t in tipos if str(t).strip()}
+
+    if ids_limpos:
+        rows_c = cache_media_bairro_repo.buscar_por_ids(client, ids_limpos)
+        ads_ids: list[str] = []
+        seen_ads: set[str] = set()
+        for c in rows_c:
+            md = _metadados_cache_como_dict(c.get("metadados_json"))
+            if str(md.get("modo_cache") or "").strip().lower() == "terrenos":
+                continue
+            ids_c = _parse_csv_anuncio_ids(c.get("anuncios_ids"))
+            for aid in ids_c:
+                if aid not in seen_ads:
+                    seen_ads.add(aid)
+                    ads_ids.append(aid)
+        if ads_ids:
+            ads = anuncios_mercado_repo.buscar_por_ids(client, ads_ids)
+            if tset:
+                ads = [a for a in ads if str(a.get("tipo_imovel") or "").strip().lower() in tset]
+            ads = _filtrar_amostras(
+                ads,
+                lat0,
+                lon0,
+                area_ref=0.0,
+                raio_km=raio_km,
+                aplicar_faixa_area_edital=False,
+            )
+            ads = _apos_filtro_geo_excluir_listagem_sinc_lance(ads, None, None)
+            ads = [a for a in ads if not _preco_anuncio_inconsistente(a)]
+            ads, _, _ = _deduplicar_amostras_similares(ads)
+            for a in ads:
+                ar = _float_positivo(a.get("area_construida_m2"))
+                vv = _float_positivo(a.get("valor_venda"))
+                if ar is None or vv is None:
+                    continue
+                la, lo = coords_de_anuncio(a)
+                dist = float(haversine_km(lat0, lon0, float(la), float(lo))) if (la is not None and lo is not None) else 1e9
+                metricas.append(
+                    {
+                        "area_m2": float(ar),
+                        "preco_m2": float(vv) / float(ar),
+                        "dist_km": float(dist),
+                        "tipo_eq": 1.0 if str(a.get("tipo_imovel") or "").strip().lower() == str(tipo_l).strip().lower() else 0.0,
+                    }
+                )
+
+    if len(metricas) < LIQ_METRAGEM_MIN_AMOSTRAS:
+        orc = max(0, int(max_chamadas_api_firecrawl or LIQ_METRAGEM_MAX_FIRECRAWL_CREDITOS))
+        teto = min(orc, LIQ_METRAGEM_MAX_FIRECRAWL_CREDITOS)
+        pode_fc = teto > 0
+        if pode_fc:
+            n_fc, n_api = _uma_coleta_firecrawl_search(
+                client,
+                cidade=cidade,
+                estado_raw=estado_raw,
+                bairro=bairro,
+                tipo_imovel=tipo_l,
+                area_ref=0.0,
+                leilao_id=leilao_id,
+                ignorar_cache_firecrawl=ignorar_cache_firecrawl,
+                max_chamadas_api=teto,
+                frase_busca_override=None,
+            )
+            usados_fc += int(n_api or 0)
+            if int(n_fc or 0) > 0:
+                origem = "caches_vinculados+firecrawl_extra"
+                cand = anuncios_mercado_repo.listar_por_cidade_estado_tipos(
+                    client,
+                    cidade=cidade,
+                    estado_sigla=estado_sigla,
+                    tipos_imovel=tipos,
+                )
+                cand = _filtrar_amostras(
+                    cand,
+                    lat0,
+                    lon0,
+                    area_ref=0.0,
+                    raio_km=raio_km,
+                    aplicar_faixa_area_edital=False,
+                )
+                cand = [a for a in cand if not _preco_anuncio_inconsistente(a)]
+                cand, _, _ = _deduplicar_amostras_similares(cand)
+                metricas = []
+                for a in cand:
+                    ar = _float_positivo(a.get("area_construida_m2"))
+                    vv = _float_positivo(a.get("valor_venda"))
+                    if ar is None or vv is None:
+                        continue
+                    la, lo = coords_de_anuncio(a)
+                    dist = float(haversine_km(lat0, lon0, float(la), float(lo))) if (la is not None and lo is not None) else 1e9
+                    metricas.append(
+                        {
+                            "area_m2": float(ar),
+                            "preco_m2": float(vv) / float(ar),
+                            "dist_km": float(dist),
+                            "tipo_eq": 1.0 if str(a.get("tipo_imovel") or "").strip().lower() == str(tipo_l).strip().lower() else 0.0,
+                        }
+                    )
+
+    return metricas, usados_fc, origem
+
+
+def _pm2_imovel_referencia(leilao: dict[str, Any], area_imovel_m2: float) -> float | None:
+    if area_imovel_m2 <= 0:
+        return None
+    for k in ("valor_avaliacao", "valor_mercado_estimado", "valor_arrematacao", "valor_lance_1_praca", "valor_lance_2_praca"):
+        v = _float_positivo(leilao.get(k))
+        if v is not None and v > 0:
+            return float(v) / float(area_imovel_m2)
+    return None
+
+
+def _analise_fit_multidimensional(
+    area_imovel_m2: float,
+    pm2_imovel: float | None,
+    metricas_amostra: list[dict[str, float]],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "fit_multidimensional_score": 0,
+        "alerta_outlier_multidimensional": False,
+        "mensagem_alerta_multidimensional": "",
+        "status_multidimensional": "sem_dados",
+    }
+    if area_imovel_m2 <= 0:
+        out["status_multidimensional"] = "sem_area_imovel"
+        return out
+    areas = [float(m.get("area_m2") or 0.0) for m in metricas_amostra if float(m.get("area_m2") or 0.0) > 0]
+    pm2s = [float(m.get("preco_m2") or 0.0) for m in metricas_amostra if float(m.get("preco_m2") or 0.0) > 0]
+    dists = [float(m.get("dist_km") or 0.0) for m in metricas_amostra if float(m.get("dist_km") or 0.0) < 1e8]
+    tipos = [float(m.get("tipo_eq") or 0.0) for m in metricas_amostra]
+    if len(areas) < 6 or len(pm2s) < 6:
+        out["status_multidimensional"] = "amostra_insuficiente"
+        return out
+
+    # Fit por área (percentil centralidade).
+    menores_a = sum(1 for v in areas if v < float(area_imovel_m2))
+    iguais_a = sum(1 for v in areas if v == float(area_imovel_m2))
+    pct_a = ((menores_a + 0.5 * iguais_a) / len(areas)) * 100.0
+    fit_a = max(0.0, min(100.0, 100.0 - abs(pct_a - 50.0) * 2.0))
+    p25_a = _percentil_linear(areas, 0.25)
+    p75_a = _percentil_linear(areas, 0.75)
+    iqr_a = max(0.0, p75_a - p25_a)
+    outlier_area_forte = float(area_imovel_m2) < max(0.0, p25_a - 1.5 * iqr_a) or float(area_imovel_m2) > (p75_a + 1.5 * iqr_a)
+
+    fit_pm2 = 50.0
+    outlier_pm2_forte = False
+    if pm2_imovel is not None and pm2_imovel > 0:
+        menores_p = sum(1 for v in pm2s if v < float(pm2_imovel))
+        iguais_p = sum(1 for v in pm2s if v == float(pm2_imovel))
+        pct_p = ((menores_p + 0.5 * iguais_p) / len(pm2s)) * 100.0
+        fit_pm2 = max(0.0, min(100.0, 100.0 - abs(pct_p - 50.0) * 2.0))
+        p25_p = _percentil_linear(pm2s, 0.25)
+        p75_p = _percentil_linear(pm2s, 0.75)
+        iqr_p = max(0.0, p75_p - p25_p)
+        outlier_pm2_forte = float(pm2_imovel) < max(0.0, p25_p - 1.5 * iqr_p) or float(pm2_imovel) > (p75_p + 1.5 * iqr_p)
+
+    # Quanto menor a mediana de distância das amostras, melhor representatividade local.
+    med_dist = float(statistics.median(dists)) if dists else 6.0
+    fit_dist = max(0.0, min(100.0, 100.0 - (med_dist / 6.0) * 100.0))
+    fit_tipo = 100.0 * (sum(tipos) / len(tipos)) if tipos else 50.0
+
+    fit_multi = (
+        0.45 * float(fit_a)
+        + 0.35 * float(fit_pm2)
+        + 0.15 * float(fit_dist)
+        + 0.05 * float(fit_tipo)
+    )
+    fit_multi = max(0.0, min(100.0, fit_multi))
+    alerta = bool(fit_multi < 45.0 or outlier_area_forte or outlier_pm2_forte)
+    msg = ""
+    if alerta:
+        msg = (
+            "Imóvel com fit multidimensional baixo no micro-mercado "
+            f"(score {fit_multi:.0f}/100). Liquidez potencialmente menor."
+        )
+    out.update(
+        {
+            "status_multidimensional": "ok",
+            "fit_multidimensional_score": int(round(fit_multi)),
+            "fit_area_score": int(round(fit_a)),
+            "fit_preco_m2_score": int(round(fit_pm2)),
+            "fit_distancia_local_score": int(round(fit_dist)),
+            "fit_tipo_score": int(round(fit_tipo)),
+            "outlier_area_forte": bool(outlier_area_forte),
+            "outlier_preco_m2_forte": bool(outlier_pm2_forte),
+            "alerta_outlier_multidimensional": bool(alerta),
+            "mensagem_alerta_multidimensional": msg,
+        }
+    )
+    return out
+
+
+def _persistir_analise_liquidez_metragem_leilao(
+    client: Client,
+    *,
+    leilao: dict[str, Any],
+    cache_ids: list[str],
+    lat0: float,
+    lon0: float,
+    raio_km: float,
+    tipo_l: str,
+    estado_sigla: str,
+    ignorar_cache_firecrawl: bool,
+    max_chamadas_api_firecrawl: int | None = None,
+) -> tuple[int, dict[str, Any]]:
+    cidade = str(leilao.get("cidade") or "").strip()
+    bairro = str(leilao.get("bairro") or "").strip()
+    estado_raw = str(leilao.get("estado") or "").strip()
+    lid = str(leilao.get("id") or "").strip()
+    area_imovel = _area_referencia_m2(leilao)
+    metricas, n_api, origem = _coletar_metricas_para_analise_liquidez(
+        client,
+        cache_ids=cache_ids,
+        lat0=float(lat0),
+        lon0=float(lon0),
+        raio_km=float(raio_km),
+        tipo_l=tipo_l,
+        cidade=cidade,
+        estado_sigla=estado_sigla,
+        bairro=bairro,
+        leilao_id=lid,
+        estado_raw=estado_raw,
+        ignorar_cache_firecrawl=ignorar_cache_firecrawl,
+        max_chamadas_api_firecrawl=max_chamadas_api_firecrawl,
+    )
+    analise = _analise_liquidez_metragem(area_imovel, [float(m.get("area_m2") or 0.0) for m in metricas])
+    pm2_ref = _pm2_imovel_referencia(leilao, area_imovel)
+    analise_multi = _analise_fit_multidimensional(area_imovel, pm2_ref, metricas)
+    for k, v in analise_multi.items():
+        analise[k] = v
+    analise["pm2_imovel_referencia"] = round(float(pm2_ref), 2) if pm2_ref is not None else None
+    analise["origem_amostras"] = origem
+    analise["raio_km"] = float(raio_km)
+    extra = _parse_extra(leilao)
+    extra["analise_liquidez_metragem"] = analise
+    leilao_imoveis_repo.atualizar_leilao_imovel(lid, {"leilao_extra_json": extra}, client)
+    return n_api, analise
 
 
 def _area_referencia_m2(leilao: dict[str, Any]) -> float:
@@ -960,6 +1408,81 @@ def _ordenar_amostras_priorizando_mesmo_bairro(
     return mesmos + outros
 
 
+def _metadados_anuncio_como_dict(a: dict[str, Any]) -> dict[str, Any]:
+    raw = a.get("metadados_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                return j
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _logradouro_tem_numero(logradouro: Any) -> bool:
+    s = str(logradouro or "").strip()
+    return bool(re.search(r"\d", s))
+
+
+def _penalidade_qualidade_geo_anuncio(a: dict[str, Any]) -> int:
+    """
+    Menor é melhor:
+    0 = coordenada com logradouro mais específico (com número);
+    1 = coordenada válida, mas logradouro pouco específico;
+    2 = coordenada de fallback aproximado (centroide/fallback);
+    3 = sem coordenadas.
+    """
+    la, lo = coords_de_anuncio(a)
+    if la is None or lo is None:
+        return 3
+    md = _metadados_anuncio_como_dict(a)
+    txt_md = " ".join(f"{k}:{v}" for k, v in md.items()).lower()
+    if "centroide" in txt_md or "fallback" in txt_md:
+        return 2
+    if _logradouro_tem_numero(a.get("logradouro")):
+        return 0
+    return 1
+
+
+def _ordenar_amostras_para_cache_principal(
+    amostras: list[dict[str, Any]],
+    *,
+    bairro_referencia: str,
+    lat0: float,
+    lon0: float,
+    area_ref: float,
+) -> list[dict[str, Any]]:
+    """
+    Ordenação estável para o cache principal:
+    1) mesmo bairro
+    2) menor distância real ao imóvel
+    3) melhor qualidade de geolocalização (desempate de distância)
+    4) menor delta de área quando há área de referência
+    """
+    b_ref = _bairro_normalizado_para_match(bairro_referencia)
+
+    def _key(a: dict[str, Any]) -> tuple[float, float, float, float]:
+        b = _bairro_normalizado_para_match(a.get("bairro"))
+        bairro_pen = 0.0 if (b_ref and b and b == b_ref) else 1.0
+        la, lo = coords_de_anuncio(a)
+        if la is None or lo is None:
+            dist = 1e9
+        else:
+            dist = float(haversine_km(lat0, lon0, float(la), float(lo)))
+        q_geo = float(_penalidade_qualidade_geo_anuncio(a))
+        try:
+            ar = float(a.get("area_construida_m2") or 0.0)
+        except (TypeError, ValueError):
+            ar = 0.0
+        delta_a = abs(ar - float(area_ref)) if (area_ref > 0 and ar > 0) else 0.0
+        return (bairro_pen, dist, q_geo, delta_a)
+
+    return sorted(amostras, key=_key)
+
+
 def _ordenar_candidatos_priorizando_mesmo_bairro(
     candidatos: list[dict[str, Any]],
     bairro_leilao: str,
@@ -1019,8 +1542,11 @@ def _amostras_reuso_validas(
     tset = {t.strip().lower() for t in tipos_anuncio if str(t).strip()}
     if tset:
         ads_f = [a for a in ads if str(a.get("tipo_imovel") or "").strip().lower() in tset]
-        if not ads_f:
-            ads_f = ads
+        # Reuso só é permitido quando o segmento do cache está consistente.
+        # Se existir qualquer anúncio fora dos tipos esperados, força reconstrução
+        # para evitar perpetuar cache "contaminado" por classificação antiga.
+        if len(ads_f) != len(ads):
+            return None
     else:
         ads_f = ads
     amostras = _filtrar_amostras(
@@ -1245,9 +1771,12 @@ def _inserir_caches_residenciais_fatiados(
     if not amostras:
         return [], "Lista de amostras vazia."
     cap_p, cap_l = _caps_amostras_cache_mercado()
-    amostras_ordenadas = _ordenar_amostras_priorizando_mesmo_bairro(
+    amostras_ordenadas = _ordenar_amostras_para_cache_principal(
         amostras,
-        str(leilao.get("bairro") or ""),
+        bairro_referencia=str(leilao.get("bairro") or ""),
+        lat0=float(lat0),
+        lon0=float(lon0),
+        area_ref=_area_referencia_m2(leilao),
     )
     tc_o = normalizar_tipo_casa(leilao.get("tipo_casa"), tipo_l)
     tipo_casa_prim = str(tc_o) if tc_o else "-"
@@ -1658,6 +2187,30 @@ def resolver_cache_media_pos_ingestao(
         )
 
     leilao_imoveis_repo.definir_cache_media_bairro_ids(lid, novos, client)
+    try:
+        n_api_liq, analise_liq = _persistir_analise_liquidez_metragem_leilao(
+            client,
+            leilao=leilao,
+            cache_ids=novos,
+            lat0=lat0,
+            lon0=lon0,
+            raio_km=raio,
+            tipo_l=tipo_l,
+            estado_sigla=estado_sigla,
+            ignorar_cache_firecrawl=ignorar_cache_firecrawl,
+            max_chamadas_api_firecrawl=orcamento_fc,
+        )
+        n_fc_cache += int(n_api_liq or 0)
+        log_ok_extra = (
+            "Liquidez metragem: "
+            f"fit={analise_liq.get('fit_metragem_score', 0)} "
+            f"fit_multi={analise_liq.get('fit_multidimensional_score', 0)} "
+            f"amostras={analise_liq.get('n_amostras_area', 0)} "
+            f"alerta={bool(analise_liq.get('alerta_outlier_multidimensional', False) or analise_liq.get('alerta_outlier_metragem', False))}"
+        )
+    except Exception:
+        logger.exception("Falha ao persistir análise de liquidez por metragem (pos_ingestao)")
+        log_ok_extra = "Liquidez metragem: falha ao calcular/persistir."
 
     nseg = len(caches)
     msg = f"Aplicado(s) {nseg} segmento(s) de cache ao imóvel."
@@ -1677,6 +2230,7 @@ def resolver_cache_media_pos_ingestao(
         elif diag_terrenos.strip():
             log_ok.append("--- Terrenos ---")
             log_ok.append(diag_terrenos)
+    log_ok.append(log_ok_extra)
     log_diag_final = "\n".join(log_ok)
     _tentar_gravar_roi_pos_cache(client, lid)
     return ResultadoCriacaoCacheLeilao(
@@ -1858,11 +2412,36 @@ def criar_caches_media_para_leilao(
 
     novos = [c["id"] for c in caches]
     leilao_imoveis_repo.anexar_cache_media_bairro_ids(lid, novos, client)
+    try:
+        n_api_liq, analise_liq = _persistir_analise_liquidez_metragem_leilao(
+            client,
+            leilao=leilao,
+            cache_ids=novos,
+            lat0=lat0,
+            lon0=lon0,
+            raio_km=raio,
+            tipo_l=tipo_l,
+            estado_sigla=estado_sigla,
+            ignorar_cache_firecrawl=ignorar_cache_firecrawl,
+            max_chamadas_api_firecrawl=orcamento_fc,
+        )
+        n_fc_cache += int(n_api_liq or 0)
+        liq_line = (
+            "Liquidez metragem: "
+            f"fit={analise_liq.get('fit_metragem_score', 0)} "
+            f"fit_multi={analise_liq.get('fit_multidimensional_score', 0)} "
+            f"amostras={analise_liq.get('n_amostras_area', 0)} "
+            f"alerta={bool(analise_liq.get('alerta_outlier_multidimensional', False) or analise_liq.get('alerta_outlier_metragem', False))}"
+        )
+    except Exception:
+        logger.exception("Falha ao persistir análise de liquidez por metragem")
+        liq_line = "Liquidez metragem: falha ao calcular/persistir."
 
     log_ok: list[str] = [ctx_base, "--- Principal ---", diag_principal]
     if tipo_l in _TIPOS_CASA_SOBRADO and diag_terrenos.strip():
         log_ok.append("--- Terrenos ---")
         log_ok.append(diag_terrenos)
+    log_ok.append(liq_line)
 
     _tentar_gravar_roi_pos_cache(client, lid)
     return ResultadoCriacaoCacheLeilao(

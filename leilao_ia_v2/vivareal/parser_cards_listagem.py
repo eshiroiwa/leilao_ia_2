@@ -11,7 +11,7 @@ from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
 
 logger = logging.getLogger(__name__)
 
-_RE_URL_TERRENO = re.compile(r"/(?:lote-terreno|terreno|lote)/", re.IGNORECASE)
+_RE_URL_TERRENO = re.compile(r"/(?:lote-terreno|terreno|lote)(?:[-/]|$)", re.IGNORECASE)
 _RE_PRECO_BLOCO = re.compile(r"R\$\s*([\d.]+(?:,\d+)?)", re.IGNORECASE)
 
 

@@ -75,6 +75,12 @@ class _RowOut:
     liquidez_bairro_score: int
     pressao_concorrencia_score: int
     fit_imovel_bairro_score: int
+    fit_metragem_score: int
+    fit_multidimensional_score: int
+    alerta_outlier_metragem: bool
+    alerta_outlier_metragem_msg: str
+    alerta_outlier_multidimensional: bool
+    alerta_outlier_multidimensional_msg: str
     qualidade_relatorio_score: int
     relatorio_expirado: bool
     hibrido_ativo: bool
@@ -597,6 +603,40 @@ def _sinais_mercado_row(row: dict[str, Any]) -> tuple[int, int, int, int]:
     )
 
 
+def _analise_liquidez_metragem_row(row: dict[str, Any]) -> tuple[int, int, bool, str, bool, str]:
+    raw = row.get("leilao_extra_json")
+    ex: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        ex = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            import json
+
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                ex = j
+        except Exception:
+            ex = {}
+    ana = ex.get("analise_liquidez_metragem")
+    if not isinstance(ana, dict):
+        return 50, 50, False, "", False, ""
+    try:
+        fit = int(ana.get("fit_metragem_score", 50) or 50)
+    except Exception:
+        fit = 50
+    fit = max(0, min(100, fit))
+    try:
+        fit_multi = int(ana.get("fit_multidimensional_score", fit) or fit)
+    except Exception:
+        fit_multi = fit
+    fit_multi = max(0, min(100, fit_multi))
+    alerta = bool(ana.get("alerta_outlier_metragem", False))
+    msg = str(ana.get("mensagem_alerta", "") or "").strip()
+    alerta_multi = bool(ana.get("alerta_outlier_multidimensional", False))
+    msg_multi = str(ana.get("mensagem_alerta_multidimensional", "") or "").strip()
+    return fit, fit_multi, alerta, msg, alerta_multi, msg_multi
+
+
 def _ajuste_conservador_por_mercado(
     *,
     roi_cons: float | None,
@@ -885,6 +925,7 @@ def _row_to_out(
             caixa_util = 0.0
             comprometido_pct = None
     liq, prs, fit, qual = _sinais_mercado_row(r)
+    fit_m2, fit_multi, alerta_m2, alerta_m2_msg, alerta_multi, alerta_multi_msg = _analise_liquidez_metragem_row(r)
     rel_exp, _rel_motivo = _status_validade_relatorio_row(r)
     tempo_base = _tempo_estimado_venda_meses_row(r)
     out = _RowOut(
@@ -915,6 +956,12 @@ def _row_to_out(
         liquidez_bairro_score=liq,
         pressao_concorrencia_score=prs,
         fit_imovel_bairro_score=fit,
+        fit_metragem_score=fit_m2,
+        fit_multidimensional_score=fit_multi,
+        alerta_outlier_metragem=alerta_m2,
+        alerta_outlier_metragem_msg=alerta_m2_msg,
+        alerta_outlier_multidimensional=alerta_multi,
+        alerta_outlier_multidimensional_msg=alerta_multi_msg,
         qualidade_relatorio_score=qual,
         relatorio_expirado=rel_exp,
         hibrido_ativo=bool(hibrido_ativo),

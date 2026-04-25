@@ -274,6 +274,36 @@ def test_processar_dashboard_define_semaforo_decisao():
     assert d.proximos[0].semaforo_justificativa
 
 
+def test_processar_dashboard_ler_alerta_liquidez_metragem_de_leilao_extra():
+    hoje = datetime.now(_TZ_SP).date()
+    rows = [
+        {
+            **_row_base("a", (hoje + timedelta(days=2)).isoformat()),
+            "roi_projetado": 0.55,
+            "lucro_liquido_projetado": 220_000.0,
+            "leilao_extra_json": {
+                "analise_liquidez_metragem": {
+                    "fit_metragem_score": 31,
+                    "fit_multidimensional_score": 27,
+                    "alerta_outlier_metragem": True,
+                    "mensagem_alerta": "Metragem fora do padrão local.",
+                    "alerta_outlier_multidimensional": True,
+                    "mensagem_alerta_multidimensional": "Fit multidimensional baixo no micro-mercado.",
+                }
+            },
+        }
+    ]
+    d = processar_rows_dashboard(rows)
+    assert d.proximos
+    o = d.proximos[0]
+    assert o.fit_metragem_score == 31
+    assert o.fit_multidimensional_score == 27
+    assert o.alerta_outlier_metragem is True
+    assert "padrão local" in o.alerta_outlier_metragem_msg
+    assert o.alerta_outlier_multidimensional is True
+    assert "multidimensional" in o.alerta_outlier_multidimensional_msg
+
+
 def test_env_override_score_pesos_mercado_altera_ordenacao():
     hoje = datetime.now(_TZ_SP).date()
     rows = [

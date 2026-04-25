@@ -53,6 +53,68 @@ def test_sanear_amostras_remove_inconsistente_e_duplicado():
     assert out[0]["id"] == "id-1"
 
 
+def test_sanear_amostras_remove_outliers_extremos():
+    base_vals = [380_000, 395_000, 410_000, 420_000, 430_000, 445_000]
+    ads = [_anuncio(i + 1, -30.03 - i * 0.001, -51.22 - i * 0.001, 100.0, v) for i, v in enumerate(base_vals)]
+    alto = _anuncio(101, -30.05, -51.24, 100.0, 1_200_000)
+    baixo = _anuncio(102, -30.06, -51.25, 100.0, 97_000)
+    out = cml._sanear_amostras_para_cache(ads + [alto, baixo], [])
+    ids = {str(x.get("id")) for x in out}
+    assert "id-101" not in ids
+    assert "id-102" not in ids
+    assert len(out) == 6
+
+
+def test_sanear_amostras_nao_remove_outlier_com_poucas_amostras():
+    ads = [
+        _anuncio(1, -30.03, -51.22, 100.0, 380_000),
+        _anuncio(2, -30.031, -51.221, 100.0, 390_000),
+        _anuncio(3, -30.032, -51.222, 100.0, 410_000),
+        _anuncio(4, -30.033, -51.223, 100.0, 420_000),
+        _anuncio(5, -30.034, -51.224, 100.0, 1_200_000),
+    ]
+    out = cml._sanear_amostras_para_cache(ads, [])
+    assert len(out) == 5
+
+
+def test_analise_liquidez_metragem_detecta_outlier_forte():
+    areas = [70.0, 72.0, 74.0, 75.0, 78.0, 80.0, 82.0, 84.0, 86.0, 88.0]
+    a = cml._analise_liquidez_metragem(220.0, areas)
+    assert a["status"] == "ok"
+    assert a["alerta_outlier_metragem"] is True
+    assert a["outlier_forte_iqr"] is True
+    assert "Liquidez pode ser menor" in str(a.get("mensagem_alerta") or "")
+
+
+def test_analise_liquidez_metragem_sem_alerta_na_faixa_tipica():
+    areas = [70.0, 72.0, 74.0, 75.0, 78.0, 80.0, 82.0, 84.0, 86.0, 88.0]
+    a = cml._analise_liquidez_metragem(80.0, areas)
+    assert a["status"] == "ok"
+    assert a["alerta_outlier_metragem"] is False
+    assert int(a["fit_metragem_score"]) >= 60
+
+
+def test_analise_fit_multidimensional_detecta_outlier():
+    metricas = []
+    for i in range(30):
+        metricas.append(
+            {
+                "area_m2": 80.0 + float(i % 5),
+                "preco_m2": 4200.0 + float((i % 4) * 100),
+                "dist_km": 0.4 + float(i % 3) * 0.1,
+                "tipo_eq": 1.0,
+            }
+        )
+    out = cml._analise_fit_multidimensional(
+        area_imovel_m2=220.0,
+        pm2_imovel=12000.0,
+        metricas_amostra=metricas,
+    )
+    assert out["status_multidimensional"] == "ok"
+    assert out["alerta_outlier_multidimensional"] is True
+    assert int(out["fit_multidimensional_score"]) < 45
+
+
 def _anuncio_terreno(i, lat, lon, area_m2, valor):
     """Terreno no mesmo formato de listagem BD (área em ``area_construida_m2``)."""
     a = _anuncio(i, lat, lon, area_m2, valor)
@@ -123,6 +185,67 @@ def test_amostras_reuso_validas_exige_mesmo_bairro_minimo():
             raio_km=5.0,
             bairro_referencia="Feital",
             min_amostras_mesmo_bairro=2,
+        )
+    assert out is None
+
+
+def test_amostras_reuso_validas_nao_reusa_quando_tipo_nao_confere():
+    cli = MagicMock()
+    cache_row = {"anuncios_ids": "a1,a2,a3"}
+    ads = [
+        _anuncio(1, -30.031, -51.221, 88.0, 400_000),
+        _anuncio(2, -30.032, -51.220, 90.0, 410_000),
+        _anuncio(3, -30.030, -51.219, 92.0, 420_000),
+    ]
+    for i, a in enumerate(ads, start=1):
+        a["id"] = f"a{i}"
+        a["tipo_imovel"] = "casa"
+    with patch(
+        "leilao_ia_v2.services.cache_media_leilao.anuncios_mercado_repo.buscar_por_ids",
+        return_value=ads,
+    ):
+        out = cml._amostras_reuso_validas(
+            cli,
+            cache_row,
+            -30.03,
+            -51.22,
+            90.0,
+            ["terreno", "lote"],
+            raio_km=5.0,
+            bairro_referencia="Centro",
+            min_amostras_mesmo_bairro=0,
+        )
+    assert out is None
+
+
+def test_amostras_reuso_validas_nao_reusa_quando_cache_esta_misto():
+    cli = MagicMock()
+    cache_row = {"anuncios_ids": "a1,a2,a3"}
+    ads = [
+        _anuncio(1, -30.031, -51.221, 88.0, 400_000),
+        _anuncio(2, -30.032, -51.220, 90.0, 410_000),
+        _anuncio(3, -30.030, -51.219, 92.0, 420_000),
+    ]
+    ads[0]["id"] = "a1"
+    ads[0]["tipo_imovel"] = "terreno"
+    ads[1]["id"] = "a2"
+    ads[1]["tipo_imovel"] = "casa"
+    ads[2]["id"] = "a3"
+    ads[2]["tipo_imovel"] = "casa"
+    with patch(
+        "leilao_ia_v2.services.cache_media_leilao.anuncios_mercado_repo.buscar_por_ids",
+        return_value=ads,
+    ):
+        out = cml._amostras_reuso_validas(
+            cli,
+            cache_row,
+            -30.03,
+            -51.22,
+            90.0,
+            ["casa"],
+            raio_km=5.0,
+            bairro_referencia="Centro",
+            min_amostras_mesmo_bairro=0,
         )
     assert out is None
 
@@ -200,6 +323,57 @@ def test_ordenar_amostras_prioriza_mesmo_bairro():
     out = cml._ordenar_amostras_priorizando_mesmo_bairro(ads, "Feital")
     ids = [str(x.get("id")) for x in out]
     assert ids[:2] == ["a2", "a4"]
+
+
+def test_ordenar_amostras_para_cache_principal_prioriza_distancia_e_qualidade_geo():
+    ads = [
+        {
+            "id": "a1",
+            "bairro": "Centro",
+            "logradouro": "Rua X",
+            "latitude": -30.05,
+            "longitude": -51.25,
+            "area_construida_m2": 100.0,
+            "metadados_json": {},
+        },
+        {
+            "id": "a2",
+            "bairro": "Centro",
+            "logradouro": "Rua X, 123",  # mais específico
+            "latitude": -30.031,
+            "longitude": -51.221,
+            "area_construida_m2": 100.0,
+            "metadados_json": {},
+        },
+        {
+            "id": "a3",
+            "bairro": "Centro",
+            "logradouro": "Rua X",
+            "latitude": -30.031,
+            "longitude": -51.221,
+            "area_construida_m2": 100.0,
+            "metadados_json": {"origem_geo": "fallback_centroide_bairro"},
+        },
+        {
+            "id": "a4",
+            "bairro": "Outro",
+            "logradouro": "Rua X, 10",
+            "latitude": -30.031,
+            "longitude": -51.221,
+            "area_construida_m2": 100.0,
+            "metadados_json": {},
+        },
+    ]
+    out = cml._ordenar_amostras_para_cache_principal(
+        ads,
+        bairro_referencia="Centro",
+        lat0=-30.03,
+        lon0=-51.22,
+        area_ref=0.0,
+    )
+    ids = [str(x.get("id")) for x in out]
+    assert ids[:3] == ["a2", "a3", "a1"]
+    assert ids[-1] == "a4"
 
 
 def test_fatias_amostras_cache():
@@ -295,8 +469,8 @@ def test_resolver_pos_ingestao_reutiliza_cache_existente():
         "id": "reuse-uuid",
         "bairro": "Centro",
         "nome_cache": "Cache existente",
-        "n_amostras": 3,
-        "anuncios_ids": "a1,a2,a3",
+        "n_amostras": 4,
+        "anuncios_ids": "a1,a2,a3,a4",
         "metadados_json": {"modo_cache": "principal", "tipo_segmento": "apartamento"},
         "tipo_imovel": "apartamento",
     }
@@ -304,6 +478,7 @@ def test_resolver_pos_ingestao_reutiliza_cache_existente():
         _anuncio(1, -30.031, -51.221, 88.0, 400_000),
         _anuncio(2, -30.032, -51.220, 90.0, 410_000),
         _anuncio(3, -30.030, -51.219, 92.0, 420_000),
+        _anuncio(4, -30.029, -51.218, 91.0, 415_000),
     ]
     for i, a in enumerate(ads, start=1):
         a["id"] = f"a{i}"

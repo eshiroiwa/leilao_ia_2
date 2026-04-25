@@ -200,7 +200,9 @@ def _raw_extracao_ocultar(raw: Any) -> bool:
 def _leilao_extra_tem_conteudo(extra: Any) -> bool:
     if not isinstance(extra, dict) or not extra:
         return False
-    for v in extra.values():
+    for k, v in extra.items():
+        if str(k).strip().lower() == "analise_liquidez_metragem":
+            continue
         if v is None:
             continue
         if isinstance(v, str) and v.strip():
@@ -226,11 +228,14 @@ def _leilao_extra_scalar_txt(v: Any) -> str:
 def _leilao_extra_como_texto(extra: dict[str, Any]) -> str:
     """Representação em texto simples (sem JSON) para exibição na UI."""
     lines: list[str] = []
+    ocultar_chaves = {"analise_liquidez_metragem"}
 
     def walk(prefix: str, obj: Any) -> None:
         if isinstance(obj, dict):
             for k, val in obj.items():
                 key = str(k)
+                if key.strip().lower() in ocultar_chaves:
+                    continue
                 if isinstance(val, dict) and val:
                     lines.append(f"{prefix}{key}:")
                     walk(prefix + "  ", val)
@@ -387,7 +392,7 @@ def _render_cards_extracao(
             unsafe_allow_html=True,
         )
         st.html(
-            f'<div class="sim-res-col-scroll sim-card-html">{_html_sim_venda_lucros_tres_cards(o_sim)}</div>'
+            f'<div class="sim-res-col-scroll sim-card-html">{_html_sim_venda_lucros_tres_cards(o_sim, row)}</div>'
         )
         if leilao_imoveis_repo.leilao_tem_simulacao_utilizador_gravada(row):
             st.caption(
@@ -1038,8 +1043,78 @@ def _sim_val_class_lucro_bruto_liquido(o: SimulacaoOperacaoOutputs) -> tuple[str
     return cls_lb, cls_ll
 
 
-def _html_sim_venda_lucros_tres_cards(o: SimulacaoOperacaoOutputs) -> str:
-    """Mesmos três cards do painel financeiro da simulação: venda estimada, lucro bruto, lucro líquido."""
+def _analise_liquidez_metragem_row_ui(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("leilao_extra_json")
+    ex: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        ex = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                ex = j
+        except Exception:
+            ex = {}
+    ana = ex.get("analise_liquidez_metragem")
+    return ana if isinstance(ana, dict) else {}
+
+
+def _val_class_fit(score: Any) -> str:
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return "muted"
+    if s >= 65:
+        return "ok"
+    if s >= 45:
+        return "warn"
+    return "err"
+
+
+def _html_cards_outlier_operacao(row: dict[str, Any]) -> str:
+    ana = _analise_liquidez_metragem_row_ui(row)
+    if not ana:
+        return ""
+    fit_m = int(ana.get("fit_metragem_score", 0) or 0)
+    fit_md = int(ana.get("fit_multidimensional_score", 0) or 0)
+    n_am = int(ana.get("n_amostras_area", 0) or 0)
+    faixa = str(ana.get("faixa_tipica_m2", "") or "").strip() or "—"
+    st_m = str(ana.get("status", "") or "").strip() or "sem_dados"
+    st_md = str(ana.get("status_multidimensional", "") or "").strip() or "sem_dados"
+    al_m = bool(ana.get("alerta_outlier_metragem", False))
+    al_md = bool(ana.get("alerta_outlier_multidimensional", False))
+    if al_md or al_m:
+        status_txt = "Alerta"
+        cls_status = "warn"
+    elif st_m == "ok" and st_md == "ok":
+        status_txt = "OK"
+        cls_status = "ok"
+    else:
+        status_txt = "Sem dados"
+        cls_status = "muted"
+    c1 = _html_sim_res_card(
+        "Fit multidimensional",
+        f"{fit_md}/100" if st_md == "ok" else "—",
+        sub=f"Amostras {n_am}",
+        val_class=_val_class_fit(fit_md),
+    )
+    c2 = _html_sim_res_card(
+        "Fit metragem",
+        f"{fit_m}/100" if st_m == "ok" else "—",
+        sub=f"Faixa típica {faixa} m²",
+        val_class=_val_class_fit(fit_m),
+    )
+    c3 = _html_sim_res_card(
+        "Outlier da região",
+        status_txt,
+        sub=f"Status: {st_md if st_md != 'sem_dados' else st_m}",
+        val_class=cls_status,
+    )
+    return f'<div class="sim-fin-sec"><div class="sim-res-grid">{c1}{c2}{c3}</div></div>'
+
+
+def _html_sim_venda_lucros_tres_cards(o: SimulacaoOperacaoOutputs, row: dict[str, Any] | None = None) -> str:
+    """Cards do painel financeiro + cards objetivos de outlier quando disponíveis."""
     venda = _fmt_valor_campo("valor_venda", o.valor_venda_estimado)
     lucro_b = _fmt_valor_campo("valor_venda", o.lucro_bruto)
     roi_b = f"{(o.roi_bruto or 0) * 100:.2f} %" if o.roi_bruto is not None else "—"
@@ -1053,7 +1128,12 @@ def _html_sim_venda_lucros_tres_cards(o: SimulacaoOperacaoOutputs) -> str:
             _html_sim_res_card("Lucro líquido", lucro_l, sub=f"ROI líquido {roi_l}", val_class=cls_ll),
         ]
     )
-    return f'<div class="sim-fin-sec"><div class="sim-res-grid">{inner}</div></div>'
+    base_html = f'<div class="sim-fin-sec"><div class="sim-res-grid">{inner}</div></div>'
+    if isinstance(row, dict):
+        out_html = _html_cards_outlier_operacao(row)
+        if out_html:
+            return base_html + out_html
+    return base_html
 
 
 def _outputs_indicadores_operacao_ou_nada(
@@ -2432,13 +2512,15 @@ def _render_mapa_folium_row(
         center = [comp_coords[0][0], comp_coords[0][1]]
         zoom0 = 14
 
-    comp_coords = _agrupar_pontos_comparaveis_para_mapa(comp_coords)
-    if len(comp_coords) > _MAPA_MAX_PONTOS_COMPARAVEIS:
+    # Não agrupa coordenadas iguais aqui: deixar pontos individuais permite spiderfy no clique.
+    comp_coords_raw = list(comp_coords)
+    if len(comp_coords_raw) > _MAPA_MAX_PONTOS_COMPARAVEIS:
         st.caption(
-            f"Mapa otimizado: exibindo {_MAPA_MAX_PONTOS_COMPARAVEIS} de {len(comp_coords)} ponto(s) "
+            f"Mapa otimizado: exibindo {_MAPA_MAX_PONTOS_COMPARAVEIS} de {len(comp_coords_raw)} ponto(s) "
             "para manter fluidez."
         )
-        comp_coords = comp_coords[:_MAPA_MAX_PONTOS_COMPARAVEIS]
+        comp_coords_raw = comp_coords_raw[:_MAPA_MAX_PONTOS_COMPARAVEIS]
+    comp_coords = [(fa, fo, tip, url, stroke, fill, 1) for fa, fo, tip, url, stroke, fill in comp_coords_raw]
 
     m = folium.Map(
         location=center,
@@ -2467,6 +2549,7 @@ def _render_mapa_folium_row(
             overlay=True,
             control=True,
             spiderfyOnMaxZoom=True,
+            spiderfyOnEveryZoom=True,
             showCoverageOnHover=False,
             zoomToBoundsOnClick=True,
             maxClusterRadius=50,
@@ -2491,14 +2574,14 @@ def _render_mapa_folium_row(
             )
         else:
             pop = None
-        folium.CircleMarker(
+        marker_d = 16
+        icon_html = (
+            f'<div style="width:{marker_d}px;height:{marker_d}px;border-radius:50%;'
+            f'background:{fill};border:2px solid {stroke};opacity:0.9;box-sizing:border-box;"></div>'
+        )
+        folium.Marker(
             location=[fa, fo],
-            radius=8,
-            color=stroke,
-            weight=2,
-            fill=True,
-            fill_color=fill,
-            fill_opacity=0.82,
+            icon=folium.DivIcon(html=icon_html, icon_size=(marker_d, marker_d), icon_anchor=(marker_d // 2, marker_d // 2)),
             popup=pop,
             tooltip=folium.Tooltip(html.escape(tip_full), sticky=True),
         ).add_to(cluster_alvo)
@@ -3650,14 +3733,14 @@ def _render_mapa_resumo_leiloes(rows: list[dict[str, Any]], selected_id: str | N
             )
         else:
             pop = folium.Popup(titulo, max_width=320)
-        folium.CircleMarker(
+        marker_d = 14
+        icon_html = (
+            f'<div style="width:{marker_d}px;height:{marker_d}px;border-radius:50%;'
+            'background:#0ea5e9;border:2px solid #38bdf8;opacity:0.9;box-sizing:border-box;"></div>'
+        )
+        folium.Marker(
             location=[fa, fo],
-            radius=7,
-            color="#38bdf8",
-            weight=2,
-            fill=True,
-            fill_color="#0ea5e9",
-            fill_opacity=0.8,
+            icon=folium.DivIcon(html=icon_html, icon_size=(marker_d, marker_d), icon_anchor=(marker_d // 2, marker_d // 2)),
             popup=pop,
             tooltip=folium.Tooltip(titulo_tip, sticky=True),
         ).add_to(cluster)
@@ -5459,6 +5542,14 @@ def _dash_html_metricas_decisao(x: Any) -> str:
     conf_txt = f"{conf}%"
     qrel = int(getattr(x, "qualidade_relatorio_score", 0) or 0)
     qrel_txt = f"{qrel}/100"
+    fit_m2 = int(getattr(x, "fit_metragem_score", 0) or 0)
+    fit_m2_txt = f"{fit_m2}/100"
+    fit_multi = int(getattr(x, "fit_multidimensional_score", 0) or 0)
+    fit_multi_txt = f"{fit_multi}/100"
+    alerta_m2 = bool(getattr(x, "alerta_outlier_metragem", False))
+    alerta_m2_msg = html.escape(str(getattr(x, "alerta_outlier_metragem_msg", "") or "").strip())
+    alerta_multi = bool(getattr(x, "alerta_outlier_multidimensional", False))
+    alerta_multi_msg = html.escape(str(getattr(x, "alerta_outlier_multidimensional_msg", "") or "").strip())
     exp_rel = bool(getattr(x, "relatorio_expirado", False))
     exp_rel_txt = "Expirado" if exp_rel else "Atual"
     sema_j = html.escape(str(getattr(x, "semaforo_justificativa", "") or "").strip())
@@ -5474,6 +5565,13 @@ def _dash_html_metricas_decisao(x: Any) -> str:
     sema_line = ""
     if sema_j:
         sema_line = f'<div class="dash-op-end" style="margin-top:0.2rem">Decisão: {sema_j}</div>'
+    metragem_line = ""
+    if alerta_multi and alerta_multi_msg:
+        metragem_line = (
+            f'<div class="dash-op-end" style="margin-top:0.2rem;color:#fbbf24">Fit multidimensional: {alerta_multi_msg}</div>'
+        )
+    elif alerta_m2 and alerta_m2_msg:
+        metragem_line = f'<div class="dash-op-end" style="margin-top:0.2rem;color:#fbbf24">Metragem: {alerta_m2_msg}</div>'
     return (
         '<div class="dash-op-card-body">'
         f'<div class="dash-op-top"><span class="dash-op-pill {st_cls}">{html.escape(st_txt)}</span>'
@@ -5482,6 +5580,7 @@ def _dash_html_metricas_decisao(x: Any) -> str:
         f'<div class="dash-op-end">{endereco}</div>'
         f"{score_line}"
         f"{sema_line}"
+        f"{metragem_line}"
         '<div class="sim-fin-sec"><div class="sim-res-grid">'
         f'<div class="sim-res-card"><div class="sim-res-lbl">ROI bruto</div><div class="sim-res-val {st_cls}">{rb}</div></div>'
         f'<div class="sim-res-card sim-res-card--accent"><div class="sim-res-lbl">Lucro líquido</div><div class="sim-res-val">{ll}</div></div>'
@@ -5489,6 +5588,8 @@ def _dash_html_metricas_decisao(x: Any) -> str:
         f'<div class="sim-res-card"><div class="sim-res-lbl">ROI C/B/A</div><div class="sim-res-val">{rb_c} · {rb} · {rb_a}</div></div>'
         f'<div class="sim-res-card"><div class="sim-res-lbl">Lucro C/B/A</div><div class="sim-res-val">{ll_c} · {ll} · {ll_a}</div></div>'
         f'<div class="sim-res-card"><div class="sim-res-lbl">Qualidade relatório</div><div class="sim-res-val">{qrel_txt}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Fit metragem</div><div class="sim-res-val">{fit_m2_txt}</div></div>'
+        f'<div class="sim-res-card"><div class="sim-res-lbl">Fit multidimensional</div><div class="sim-res-val">{fit_multi_txt}</div></div>'
         f'<div class="sim-res-card"><div class="sim-res-lbl">Validade relatório</div><div class="sim-res-val">{exp_rel_txt}</div></div>'
         f'<div class="sim-res-card"><div class="sim-res-lbl">Cenário cons. (tempo/haircut)</div><div class="sim-res-val">{tempo_cons_txt} · {haircut_txt}</div></div>'
         f'<div class="sim-res-card"><div class="sim-res-lbl">Comprometimento caixa</div><div class="sim-res-val">{comp_caixa_txt}</div></div>'

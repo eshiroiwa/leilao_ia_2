@@ -65,3 +65,22 @@ Contatar](https://www.vivareal.com.br/imovel/apartamento-rua-beta-moema-xyz/)
     )
     assert len(rows) == 1
     assert rows[0]["valor_venda"] == 890_000.0
+
+
+def test_detecta_terreno_por_url_com_hifen_no_slug():
+    md = """
+Tamanho do imóvel 333 m²
+R$ 220.000
+
+Rua Consolação
+**Imóvel em Vila Esplanada**
+Contatar](https://www.vivareal.com.br/imovel/lote-terreno-vila-esplanada-sao-jose-do-rio-preto-333m2-venda-RS220000-id-2824095233/)
+"""
+    rows = extrair_cards_anuncios_vivareal_markdown(
+        md,
+        cidade_ref="São José do Rio Preto",
+        estado_ref="SP",
+        bairro_ref="Vila Esplanada",
+    )
+    assert len(rows) == 1
+    assert rows[0].get("_tipo_detectado") == "terreno"
