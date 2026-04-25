@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import statistics
 import uuid
 from collections import Counter
@@ -71,6 +72,139 @@ def _float_positivo(v: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return x if x > 0 else None
+
+
+def _host_url(u: str) -> str:
+    s = str(u or "").strip().lower()
+    if not s:
+        return ""
+    s = s.replace("https://", "").replace("http://", "")
+    return s.split("/", 1)[0].strip()
+
+
+def _url_canonica(u: str) -> str:
+    s = str(u or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"#.*$", "", s)
+    s = re.sub(r"\?.*$", "", s)
+    return s.rstrip("/").lower()
+
+
+def _parse_brl_num(txt: str) -> float | None:
+    s = str(txt or "").strip()
+    if not s:
+        return None
+    s = s.replace("R$", "").replace(" ", "")
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(".", "")
+    try:
+        v = float(s)
+    except Exception:
+        return None
+    return v if v > 0 else None
+
+
+def _extrair_preco_titulo_aprox(titulo: str) -> float | None:
+    t = str(titulo or "")
+    if not t:
+        return None
+    m = re.search(r"R\$\s*([\d\.\,]{4,})", t, flags=re.IGNORECASE)
+    if not m:
+        return None
+    return _parse_brl_num(m.group(1))
+
+
+def _extrair_preco_url_aprox(url: str) -> float | None:
+    u = str(url or "")
+    if not u:
+        return None
+    m = re.search(r"[-_/]RS(\d{5,10})(?:[-_/]|$)", u, flags=re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        v = float(m.group(1))
+    except Exception:
+        return None
+    return v if v > 0 else None
+
+
+def _preco_anuncio_inconsistente(a: dict[str, Any]) -> bool:
+    """
+    Detecta incoerência forte de preço entre ``valor_venda`` persistido e sinais do card (título/URL).
+    """
+    valor = _float_positivo(a.get("valor_venda"))
+    if valor is None:
+        return True
+    refs: list[float] = []
+    t = _extrair_preco_titulo_aprox(str(a.get("titulo") or ""))
+    if t is not None:
+        refs.append(t)
+    u = _extrair_preco_url_aprox(str(a.get("url_anuncio") or ""))
+    if u is not None:
+        refs.append(u)
+    if not refs:
+        return False
+    ref = float(statistics.median(refs))
+    if ref <= 0:
+        return False
+    ratio = valor / ref
+    diff = abs(valor - ref)
+    return diff >= 200_000 and (ratio < 0.70 or ratio > 1.30)
+
+
+def _deduplicar_amostras_similares(amostras: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
+    """
+    Remove duplicados exatos por URL e duplicados muito parecidos (mesma origem + buckets de preço/área/geo).
+    """
+    out: list[dict[str, Any]] = []
+    seen_url: set[str] = set()
+    seen_fuzzy: set[tuple[Any, ...]] = set()
+    n_dup_url = 0
+    n_dup_fuzzy = 0
+    for a in amostras:
+        url0 = _url_canonica(str(a.get("url_anuncio") or ""))
+        if url0 and url0 in seen_url:
+            n_dup_url += 1
+            continue
+        if url0:
+            seen_url.add(url0)
+        area = _float_positivo(a.get("area_construida_m2")) or 0.0
+        valor = _float_positivo(a.get("valor_venda")) or 0.0
+        la, lo = coords_de_anuncio(a)
+        geo_b = (round(float(la), 3), round(float(lo), 3)) if (la is not None and lo is not None) else ("", "")
+        fuzzy = (
+            _host_url(str(a.get("url_anuncio") or "")),
+            str(normalizar_tipo_imovel(a.get("tipo_imovel")) or "").lower(),
+            _bairro_normalizado_para_match(a.get("bairro")),
+            int(area / 15.0) if area > 0 else -1,
+            int(valor / 100_000.0) if valor > 0 else -1,
+            geo_b,
+        )
+        if fuzzy in seen_fuzzy:
+            n_dup_fuzzy += 1
+            continue
+        seen_fuzzy.add(fuzzy)
+        out.append(a)
+    return out, n_dup_url, n_dup_fuzzy
+
+
+def _sanear_amostras_para_cache(amostras: list[dict[str, Any]], linhas: list[str] | None = None) -> list[dict[str, Any]]:
+    n0 = len(amostras)
+    if n0 == 0:
+        return amostras
+    sem_incons = [a for a in amostras if not _preco_anuncio_inconsistente(a)]
+    n_inc = n0 - len(sem_incons)
+    dedup, n_dup_url, n_dup_fuzzy = _deduplicar_amostras_similares(sem_incons)
+    if linhas is not None and (n_inc > 0 or n_dup_url > 0 or n_dup_fuzzy > 0):
+        linhas.append(
+            "  saneamento_amostras: "
+            f"incons_preco={n_inc} | dup_url={n_dup_url} | dup_similar={n_dup_fuzzy} | "
+            f"restantes={len(dedup)}"
+        )
+    return dedup
 
 
 def _filtrar_amostras_so_terreno(amostras: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -898,6 +1032,7 @@ def _amostras_reuso_validas(
         aplicar_faixa_area_edital=aplicar_faixa_area_edital,
     )
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, None)
+    amostras = _sanear_amostras_para_cache(amostras, None)
     if int(min_amostras_mesmo_bairro or 0) > 0:
         n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro_referencia)
         if n_mesmo_bairro < int(min_amostras_mesmo_bairro):
@@ -968,6 +1103,7 @@ def _montar_amostras_para_tipos(
         candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
     )
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
+    amostras = _sanear_amostras_para_cache(amostras, linhas)
     n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
     linhas.append(f"bairro_alvo: '{bairro or '-'}' | amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})")
 
@@ -1005,6 +1141,7 @@ def _montar_amostras_para_tipos(
             candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
         )
         amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
+        amostras = _sanear_amostras_para_cache(amostras, linhas)
         n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
         linhas.append(
             f"após_geocode: amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})"
@@ -1057,6 +1194,7 @@ def _montar_amostras_para_tipos(
             candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
         )
         amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
+        amostras = _sanear_amostras_para_cache(amostras, linhas)
         n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
         linhas.append(
             f"após_firecrawl: amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})"
@@ -1069,6 +1207,7 @@ def _montar_amostras_para_tipos(
         linhas.append("Firecrawl Search: omitido (orçamento de chamadas API esgotado para esta rodada).")
 
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
+    amostras = _sanear_amostras_para_cache(amostras, linhas)
     n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
     if len(amostras) >= CACHE_MONTE_MIN_EXIGIDO:
         linhas.append(

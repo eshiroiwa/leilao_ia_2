@@ -32,6 +32,27 @@ def test_filtrar_amostras_tres_dentro_raio():
     assert len(out) == 3
 
 
+def test_preco_anuncio_inconsistente_detecta_titulo_divergente():
+    a = _anuncio(1, -30.03, -51.22, 100.0, 1_890_000)
+    a["titulo"] = "**R$ 2.790.000** CondomínioR$ 1.050]("
+    a["url_anuncio"] = "https://www.chavesnamao.com.br/imovel/x-RS2790000/id-1/"
+    assert cml._preco_anuncio_inconsistente(a) is True
+
+
+def test_sanear_amostras_remove_inconsistente_e_duplicado():
+    a1 = _anuncio(1, -30.03, -51.22, 100.0, 1_000_000)
+    a1["titulo"] = "**R$ 1.000.000**"
+    a2 = dict(a1)
+    a2["id"] = "id-2"
+    a2["url_anuncio"] = "https://www.vivareal.com.br/dup-2"
+    a2["area_construida_m2"] = 101.0
+    a3 = _anuncio(3, -30.04, -51.23, 95.0, 700_000)
+    a3["titulo"] = "**R$ 1.500.000**"  # inconsistente forte
+    out = cml._sanear_amostras_para_cache([a1, a2, a3], [])
+    assert len(out) == 1
+    assert out[0]["id"] == "id-1"
+
+
 def _anuncio_terreno(i, lat, lon, area_m2, valor):
     """Terreno no mesmo formato de listagem BD (área em ``area_construida_m2``)."""
     a = _anuncio(i, lat, lon, area_m2, valor)

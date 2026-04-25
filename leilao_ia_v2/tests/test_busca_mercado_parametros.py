@@ -10,13 +10,13 @@ from leilao_ia_v2.config.busca_mercado_parametros import (
 
 def test_parametros_padrao_fora_streamlit():
     p = get_busca_mercado_parametros()
-    assert p.area_fator_min == 0.65
-    assert p.area_fator_max == 1.45
-    assert p.raio_km == 10.0
-    assert p.min_amostras_cache == 3
-    assert p.max_firecrawl_creditos_analise == 15
-    assert p.cache_max_amostras_principal == 10
-    assert p.cache_max_amostras_lote == 10
+    assert p.area_fator_min == 0.75
+    assert p.area_fator_max == 1.30
+    assert p.raio_km == 6.0
+    assert p.min_amostras_cache == 4
+    assert p.max_firecrawl_creditos_analise == 12
+    assert p.cache_max_amostras_principal == 8
+    assert p.cache_max_amostras_lote == 8
 
 
 def test_parametros_de_chaves_planas():
@@ -68,4 +68,4 @@ def test_mensagem_com_dica_nao_duplica():
 
 def test_frozen_dataclass():
     p = BuscaMercadoParametros()
-    assert p.min_amostras_cache == 3
+    assert p.min_amostras_cache == 4

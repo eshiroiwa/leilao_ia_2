@@ -22,18 +22,18 @@ DICA_AJUSTES_BUSCA_SIDEBAR = (
 class BuscaMercadoParametros:
     """Fatores em relação à área de referência do edital (área útil ou total)."""
 
-    area_fator_min: float = 0.65
-    area_fator_max: float = 1.45
-    raio_km: float = 10.0
-    min_amostras_cache: int = 3
+    area_fator_min: float = 0.75
+    area_fator_max: float = 1.30
+    raio_km: float = 6.0
+    min_amostras_cache: int = 4
     #: Se True, a app mostra a frase do Firecrawl Search para confirmar/alterar antes de pesquisar.
     confirmar_frase_firecrawl_search: bool = False
     #: Teto de chamadas Firecrawl (search + scrapes) por **análise/ingestão** e por invocação de cache isolada.
-    max_firecrawl_creditos_analise: int = 15
+    max_firecrawl_creditos_analise: int = 12
     #: Máximo de anúncios no **cache principal** (simulação); o resto vai a caches de referência em lotes.
-    cache_max_amostras_principal: int = 10
+    cache_max_amostras_principal: int = 8
     #: Tamanho de cada **lote** de anúncios nos caches de referência (e terrenos em partes).
-    cache_max_amostras_lote: int = 10
+    cache_max_amostras_lote: int = 8
 
 
 def _clamp_int(v: Any, lo: int, hi: int, default: int) -> int:
@@ -74,25 +74,25 @@ def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametr
     """
     raw = sess.get("busca_mercado")
     d: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
-    amin_src = sess.get("bm_area_pct_min", d.get("area_pct_min", 65))
-    amax_src = sess.get("bm_area_pct_max", d.get("area_pct_max", 145))
-    raio_src = sess.get("bm_raio_km", d.get("raio_km", 10.0))
-    min_cache_src = sess.get("bm_min_amostras_cache", d.get("min_amostras_cache", 3))
-    max_fc_src = sess.get("bm_max_firecrawl_creditos", d.get("max_firecrawl_creditos_analise", 15))
-    cap_pri_src = sess.get("bm_cache_max_principal", d.get("cache_max_amostras_principal", 10))
-    cap_lote_src = sess.get("bm_cache_max_lote", d.get("cache_max_amostras_lote", 10))
+    amin_src = sess.get("bm_area_pct_min", d.get("area_pct_min", 75))
+    amax_src = sess.get("bm_area_pct_max", d.get("area_pct_max", 130))
+    raio_src = sess.get("bm_raio_km", d.get("raio_km", 6.0))
+    min_cache_src = sess.get("bm_min_amostras_cache", d.get("min_amostras_cache", 4))
+    max_fc_src = sess.get("bm_max_firecrawl_creditos", d.get("max_firecrawl_creditos_analise", 12))
+    cap_pri_src = sess.get("bm_cache_max_principal", d.get("cache_max_amostras_principal", 8))
+    cap_lote_src = sess.get("bm_cache_max_lote", d.get("cache_max_amostras_lote", 8))
     conf_fc_src = sess.get("bm_confirmar_frase_fc_search", d.get("confirmar_frase_firecrawl_search", False))
 
-    amin_p = _clamp_int(amin_src, 30, 120, 65)
-    amax_p = _clamp_int(amax_src, 80, 350, 145)
+    amin_p = _clamp_int(amin_src, 30, 120, 75)
+    amax_p = _clamp_int(amax_src, 80, 350, 130)
     if amin_p >= amax_p:
         amax_p = min(350, amin_p + 5)
 
-    raio = _clamp_float(raio_src, 0.5, 80.0, 10.0)
-    min_cache = _clamp_int(min_cache_src, 1, 25, 3)
-    max_fc = _clamp_int(max_fc_src, 1, 50, 15)
-    cap_pri = _clamp_int(cap_pri_src, 1, 50, 10)
-    cap_lote = _clamp_int(cap_lote_src, 1, 50, 10)
+    raio = _clamp_float(raio_src, 0.5, 80.0, 6.0)
+    min_cache = _clamp_int(min_cache_src, 1, 25, 4)
+    max_fc = _clamp_int(max_fc_src, 1, 50, 12)
+    cap_pri = _clamp_int(cap_pri_src, 1, 50, 8)
+    cap_lote = _clamp_int(cap_lote_src, 1, 50, 8)
     if cap_lote < 1:
         cap_lote = 1
     if cap_pri < 1:
@@ -145,12 +145,12 @@ def mensagem_com_dica_ajuste_busca(texto: str) -> str:
 def defaults_chaves_busca_mercado_session() -> dict[str, Any]:
     """Valores iniciais (``setdefault``) para chaves ``bm_*`` na sessão Streamlit."""
     return {
-        "bm_area_pct_min": 65,
-        "bm_area_pct_max": 145,
-        "bm_raio_km": 10.0,
-        "bm_min_amostras_cache": 3,
-        "bm_max_firecrawl_creditos": 15,
-        "bm_cache_max_principal": 10,
-        "bm_cache_max_lote": 10,
+        "bm_area_pct_min": 75,
+        "bm_area_pct_max": 130,
+        "bm_raio_km": 6.0,
+        "bm_min_amostras_cache": 4,
+        "bm_max_firecrawl_creditos": 12,
+        "bm_cache_max_principal": 8,
+        "bm_cache_max_lote": 8,
         "bm_confirmar_frase_fc_search": False,
     }
