@@ -16,8 +16,6 @@ from typing import Any, Optional
 from openai import BadRequestError, OpenAI
 
 from leilao_ia_v2.schemas.relatorio_mercado_contexto import (
-    CARD_IDS_ORDEM,
-    CARD_TITULOS_PADRAO,
     RelatorioMercadoContextoDocumento,
     normalizar_documento_mercado,
 )
@@ -178,14 +176,19 @@ def montar_texto_entrada_contexto(
 
 
 def _schema_instrucao_json() -> str:
-    cards_exemplo = [
-        {"id": cid, "titulo": CARD_TITULOS_PADRAO.get(cid, cid), "topicos": ["frase 1", "frase 2"]}
-        for cid in CARD_IDS_ORDEM
-    ]
     return json.dumps(
         {
-            "cards": cards_exemplo,
             "disclaimer": "Texto curto: análise aproximada; confirmar dados críticos com fontes locais.",
+            "insights_oportunidade": ["2 a 5 bullets com oportunidades específicas e acionáveis."],
+            "insights_risco": ["2 a 5 bullets com riscos de liquidez, precificação e execução."],
+            "checklist_diligencia": [
+                "4 a 7 checagens objetivas antes do lance (zoneamento, reforma, saída, documentos)."
+            ],
+            "dados_populacao_cidade": ["1 a 3 bullets com faixa populacional/porte da cidade, linguagem prudente."],
+            "informacoes_bairro": ["2 a 5 bullets com características práticas do bairro para decisão."],
+            "estrategia_sugerida": "Frase curta com estratégia de saída (ex.: revenda rápida, reforma+revenda, renda locatícia).",
+            "tese_acao": "Parágrafo curto com recomendação prática de decisão e condição de entrada.",
+            "cards": [],
         },
         ensure_ascii=False,
         indent=2,
@@ -203,14 +206,17 @@ def gerar_contexto_mercado_relatorio_llm(
     Devolve (documento normalizado, métricas).
     """
     mid = _resolver_modelo_relatorio_mercado(modelo)
-    ids_lista = ", ".join(f'"{x}"' for x in CARD_IDS_ORDEM)
     system = (
-        "Você é analista imobiliário no Brasil. Produza um JSON com o campo `cards` (array) e `disclaimer` (string).\n"
-        "Cada elemento de `cards` deve ter exatamente: `id` (uma das chaves abaixo), `titulo` (curto, pode repetir o tema), "
-        "`topicos` (array de strings, 2 a 6 itens, bullets curtos).\n"
-        f"Ordem desejada dos ids: {ids_lista}.\n"
-        "Inclua **todos** esses ids, nessa ordem, mesmo que algum card fique com tópicos mais genéricos.\n"
-        "Não use markdown no JSON. Não inclua chaves fora de `cards` e `disclaimer`.\n"
+        "Você é analista imobiliário no Brasil. Produza um JSON com os campos: "
+        "`cards` (array), `disclaimer` (string), `insights_oportunidade` (array), "
+        "`insights_risco` (array), `checklist_diligencia` (array), "
+        "`dados_populacao_cidade` (array), `informacoes_bairro` (array), "
+        "`estrategia_sugerida` (string) e `tese_acao` (string).\n"
+        "Foco principal: oportunidades, riscos, diligência e ação recomendada.\n"
+        "`cards` é opcional e pode vir vazio quando não agregar decisão.\n"
+        "Não use markdown no JSON. Mantenha os arrays de insights objetivos e acionáveis.\n"
+        "Evite suposições genéricas (ex.: 'pode', 'costuma', 'tende') nos campos "
+        "`dados_populacao_cidade` e `informacoes_bairro`; prefira frases assertivas e factuais.\n"
         "Exemplo de forma (substitua conteúdo pelos seus tópicos reais):\n"
         + _schema_instrucao_json()
     )
@@ -264,8 +270,6 @@ def gerar_contexto_mercado_relatorio_llm(
         raise ValueError(f"Resposta vazia (finish_reason={fr}).")
 
     data = json.loads(blob)
-    if "cards" not in data:
-        raise ValueError("JSON sem campo 'cards'.")
     agora = datetime.now(timezone.utc).isoformat()
     usage = getattr(comp, "usage", None)
     pt = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
@@ -281,6 +285,13 @@ def gerar_contexto_mercado_relatorio_llm(
         "custo_usd_estimado": custo,
         "cards": data.get("cards") or [],
         "disclaimer": str(data.get("disclaimer") or "").strip(),
+        "insights_oportunidade": data.get("insights_oportunidade") or [],
+        "insights_risco": data.get("insights_risco") or [],
+        "checklist_diligencia": data.get("checklist_diligencia") or [],
+        "dados_populacao_cidade": data.get("dados_populacao_cidade") or [],
+        "informacoes_bairro": data.get("informacoes_bairro") or [],
+        "estrategia_sugerida": str(data.get("estrategia_sugerida") or "").strip(),
+        "tese_acao": str(data.get("tese_acao") or "").strip(),
     }
     doc = normalizar_documento_mercado(doc_raw)
     doc = doc.model_copy(

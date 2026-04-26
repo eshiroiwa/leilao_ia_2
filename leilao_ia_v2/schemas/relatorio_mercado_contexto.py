@@ -94,13 +94,36 @@ class RelatorioMercadoContextoDocumento(BaseModel):
     sinais_decisao: RelatorioMercadoSinaisDecisao = Field(default_factory=RelatorioMercadoSinaisDecisao)
     qualidade: RelatorioMercadoQualidade = Field(default_factory=RelatorioMercadoQualidade)
     validade: RelatorioMercadoValidade = Field(default_factory=RelatorioMercadoValidade)
+    insights_oportunidade: list[str] = Field(default_factory=list)
+    insights_risco: list[str] = Field(default_factory=list)
+    checklist_diligencia: list[str] = Field(default_factory=list)
+    dados_populacao_cidade: list[str] = Field(default_factory=list)
+    informacoes_bairro: list[str] = Field(default_factory=list)
+    contexto_minimo: list[str] = Field(default_factory=list)
+    estrategia_sugerida: str = ""
+    tese_acao: str = ""
 
 
 def normalizar_documento_mercado(raw: Any) -> RelatorioMercadoContextoDocumento:
     """Valida e completa cards faltantes com tópicos vazios."""
     if not isinstance(raw, dict) or not raw:
         return RelatorioMercadoContextoDocumento()
-    doc = RelatorioMercadoContextoDocumento.model_validate(raw)
+    # Tolerância para respostas de LLM parcialmente fora do schema:
+    # se vier card sem `id` (ex.: apenas `title/topicos`), descartamos
+    # o item inválido para não abortar toda a análise.
+    raw_sanit = dict(raw)
+    cards_raw = raw_sanit.get("cards")
+    if isinstance(cards_raw, list):
+        cards_ok: list[dict[str, Any]] = []
+        for c in cards_raw:
+            if not isinstance(c, dict):
+                continue
+            cid = str(c.get("id") or "").strip()
+            if not cid:
+                continue
+            cards_ok.append(c)
+        raw_sanit["cards"] = cards_ok
+    doc = RelatorioMercadoContextoDocumento.model_validate(raw_sanit)
     por_id = {c.id: c for c in doc.cards}
     out_cards: list[RelatorioMercadoCard] = []
     for cid in CARD_IDS_ORDEM:
@@ -118,7 +141,27 @@ def normalizar_documento_mercado(raw: Any) -> RelatorioMercadoContextoDocumento:
                     evidencia=str(getattr(c, "evidencia", "") or "").strip(),
                 )
             )
-    return doc.model_copy(update={"cards": out_cards})
+    insights_oportunidade = [str(x).strip() for x in (doc.insights_oportunidade or []) if str(x).strip()][:8]
+    insights_risco = [str(x).strip() for x in (doc.insights_risco or []) if str(x).strip()][:8]
+    checklist_diligencia = [str(x).strip() for x in (doc.checklist_diligencia or []) if str(x).strip()][:10]
+    dados_populacao_cidade = [str(x).strip() for x in (doc.dados_populacao_cidade or []) if str(x).strip()][:6]
+    informacoes_bairro = [str(x).strip() for x in (doc.informacoes_bairro or []) if str(x).strip()][:8]
+    contexto_minimo = [str(x).strip() for x in (doc.contexto_minimo or []) if str(x).strip()][:6]
+    estrategia_sugerida = str(doc.estrategia_sugerida or "").strip()[:220]
+    tese_acao = str(doc.tese_acao or "").strip()[:900]
+    return doc.model_copy(
+        update={
+            "cards": out_cards,
+            "insights_oportunidade": insights_oportunidade,
+            "insights_risco": insights_risco,
+            "checklist_diligencia": checklist_diligencia,
+            "dados_populacao_cidade": dados_populacao_cidade,
+            "informacoes_bairro": informacoes_bairro,
+            "contexto_minimo": contexto_minimo,
+            "estrategia_sugerida": estrategia_sugerida,
+            "tese_acao": tese_acao,
+        }
+    )
 
 
 def parse_relatorio_mercado_contexto_json(raw: Any) -> RelatorioMercadoContextoDocumento:

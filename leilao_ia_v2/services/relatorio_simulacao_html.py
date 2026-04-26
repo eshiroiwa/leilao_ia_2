@@ -81,6 +81,7 @@ a.lei-top { color: var(--acc); word-break: break-all; }
 .rel-ctx-card .rel-ctx-ev { font-size: 0.72rem; color: var(--muted); margin-bottom: 8px; line-height: 1.35; }
 .rel-ctx-card ul { margin: 0; padding-left: 1.1em; color: var(--txt); font-size: 0.86rem; line-height: 1.45; }
 .rel-ctx-card li { margin-bottom: 6px; }
+.rel-ctx-card p { margin: 0 0 6px 0; color: var(--txt); font-size: 0.86rem; line-height: 1.45; }
 .rel-sim-cmp-paineis { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; align-items: start; }
 @media (max-width: 900px) { .rel-sim-cmp-paineis { grid-template-columns: 1fr; } }
 .rel-sim-painel-slot { min-width: 0; }
@@ -127,7 +128,7 @@ def _leilao_extra_json_como_dict(row: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _html_secao_analise_mercado_ctx(row: dict[str, Any]) -> str:
-    """Bloco ``relatorio_mercado_contexto_json`` (cards com tópicos)."""
+    """Bloco decisional de ``relatorio_mercado_contexto_json``."""
     raw = row.get("relatorio_mercado_contexto_json")
     if isinstance(raw, str) and raw.strip():
         try:
@@ -137,24 +138,66 @@ def _html_secao_analise_mercado_ctx(row: dict[str, Any]) -> str:
     if not isinstance(raw, dict) or not raw:
         return ""
     doc = parse_relatorio_mercado_contexto_json(raw)
-    if not any((c.topicos or []) for c in doc.cards):
+    opp = [str(x).strip() for x in (doc.insights_oportunidade or []) if str(x).strip()]
+    risk = [str(x).strip() for x in (doc.insights_risco or []) if str(x).strip()]
+    checklist = [str(x).strip() for x in (doc.checklist_diligencia or []) if str(x).strip()]
+    pop_cidade = [str(x).strip() for x in (doc.dados_populacao_cidade or []) if str(x).strip()]
+    info_bairro = [str(x).strip() for x in (doc.informacoes_bairro or []) if str(x).strip()]
+    estrategia = str(doc.estrategia_sugerida or "").strip()
+    tese = str(doc.tese_acao or "").strip()
+    if not (opp or risk or checklist or pop_cidade or info_bairro or estrategia or tese):
         return ""
-    blocos: list[str] = []
-    for c in doc.cards:
-        topicos = [str(t).strip() for t in (c.topicos or []) if str(t).strip()]
-        if not topicos:
-            continue
-        lis = "".join(f"<li>{html.escape(t)}</li>" for t in topicos)
-        tit = html.escape((c.titulo or c.id).strip())
-        ev = html.escape(str(getattr(c, "evidencia", "") or "").strip())
-        ev_html = f'<div class="rel-ctx-ev">{ev}</div>' if ev else ""
-        blocos.append(f'<div class="rel-ctx-card"><div class="rel-ctx-tit">{tit}</div>{ev_html}<ul>{lis}</ul></div>')
-    if not blocos:
-        return ""
+    extras: list[str] = []
+    pop_merge = list(pop_cidade)
+    if not pop_merge:
+        pop_merge = ["Sem dado populacional assertivo disponível nesta execução."]
+    lis_pop = "".join(f"<li>{html.escape(t)}</li>" for t in pop_merge)
+    extras.append(
+        '<div class="rel-ctx-card"><div class="rel-ctx-tit">Contexto da cidade e população</div>'
+        f"<ul>{lis_pop}</ul></div>"
+    )
+    if info_bairro:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in info_bairro)
+    else:
+        lis = "<li>Sem achados adicionais objetivos do bairro nesta execução.</li>"
+    extras.append(
+        '<div class="rel-ctx-card"><div class="rel-ctx-tit">Informações do bairro</div>'
+        f"<ul>{lis}</ul></div>"
+    )
+    if risk:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in risk)
+        extras.append(
+            '<div class="rel-ctx-card"><div class="rel-ctx-tit">Alertas de risco</div>'
+            f"<ul>{lis}</ul></div>"
+        )
+    if opp:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in opp)
+        extras.append(
+            '<div class="rel-ctx-card"><div class="rel-ctx-tit">Insights de oportunidade</div>'
+            f"<ul>{lis}</ul></div>"
+        )
+    if estrategia or tese:
+        itens: list[str] = []
+        if estrategia:
+            itens.append(f"<li><strong>Estratégia sugerida:</strong> {html.escape(estrategia)}</li>")
+        if tese:
+            itens.append(f"<li>{html.escape(tese)}</li>")
+        lis = "".join(itens)
+        extras.append(
+            '<div class="rel-ctx-card"><div class="rel-ctx-tit">Tese e ação recomendada</div>'
+            f"<ul>{lis}</ul></div>"
+        )
+    if checklist:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in checklist)
+        extras.append(
+            '<div class="rel-ctx-card"><div class="rel-ctx-tit">Checklist de diligência</div>'
+            f"<ul>{lis}</ul></div>"
+        )
+    extra_grid = f'<div class="rel-ctx-grid">{"".join(extras)}</div>' if extras else ""
     return (
         '<div class="sec rel-ctx-sec">'
         '<h2 class="sec-h">Análise de mercado e bairro</h2>'
-        f'<div class="rel-ctx-grid">{"".join(blocos)}</div>'
+        f"{extra_grid}"
         "</div>"
     )
 

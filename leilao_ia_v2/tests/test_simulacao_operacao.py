@@ -4,6 +4,7 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
     SimulacaoOperacaoInputs,
 )
 from leilao_ia_v2.services.simulacao_operacao import REFORMA_RS_M2, calcular_simulacao, resolver_valor_venda_estimado
+from leilao_ia_v2.app_assistente_ingestao import _normalizar_selecao_modo_venda
 
 
 def test_calcular_lucro_roi_com_pct_leiloeiro_itbi():
@@ -139,6 +140,21 @@ def test_comissao_imobiliaria_valor_fixo_prevalece_sobre_pct():
     o = calcular_simulacao(row_leilao=row, inp=inp, caches_ordenados=[cache], ads_por_id={}).outputs
     assert o is not None
     assert o.comissao_imobiliaria_brl == 5_000.0
+
+
+def test_normalizar_selecao_modo_venda_aceita_label_dinamico_manual():
+    order = [
+        ModoValorVenda.CACHE_VALOR_MEDIO_VENDA.value,
+        ModoValorVenda.MANUAL.value,
+    ]
+    label_map = {
+        ModoValorVenda.CACHE_VALOR_MEDIO_VENDA.value: "Cache · valor médio — R$ 500.000,00",
+        ModoValorVenda.MANUAL.value: "Manual — R$ 350.000,00",
+    }
+    # Simula rótulo "antigo" retornado pelo widget após mudança do valor manual.
+    raw = "Manual — R$ 320.000,00"
+    out = _normalizar_selecao_modo_venda(raw, order, label_map)
+    assert out == ModoValorVenda.MANUAL.value
 
 
 def test_reforma_por_m2():

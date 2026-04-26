@@ -44,24 +44,6 @@ def test_relatorio_coluna_adicionais_vazia_mostra_aviso():
 
 
 def test_relatorio_inclui_secao_analise_mercado():
-    from leilao_ia_v2.schemas.relatorio_mercado_contexto import CARD_IDS_ORDEM, RelatorioMercadoCard
-
-    cards = [
-        RelatorioMercadoCard(id=cid, titulo=tit, topicos=["Ponto A.", "Ponto B."])
-        for cid, tit in [
-            ("populacao", "Pop"),
-            ("perfil_urbano", "Perfil"),
-            ("centralidade", "Central"),
-            ("classe_renda", "Renda"),
-            ("seguranca", "Seg"),
-            ("procura_imoveis", "Procura"),
-            ("bairros_concorrentes", "Concorrentes"),
-            ("condominios_fechados", "Condomínios"),
-            ("volume_anuncios", "Volume"),
-            ("ajuste_imovel_bairro", "Ajuste"),
-        ]
-    ]
-    assert len(cards) == len(CARD_IDS_ORDEM)
     row = {
         "id": "x",
         "endereco": "Rua Z",
@@ -75,12 +57,36 @@ def test_relatorio_inclui_secao_analise_mercado():
             "completion_tokens": 20,
             "custo_usd_estimado": 0.001,
             "disclaimer": "Aviso teste.",
-            "cards": [c.model_dump() for c in cards],
+            "cards": [],
+            "insights_oportunidade": ["Microregião com demanda constante."],
+            "insights_risco": ["Concorrência pode exigir ajuste de preço."],
+            "checklist_diligencia": ["Validar custo real de reforma."],
+            "dados_populacao_cidade": ["CURITIBA: faixa aproximada de 1,7 a 2,0 milhões de habitantes (estimativa de mercado)."],
+            "informacoes_bairro": ["Bairro com boa aderência para o público-alvo."],
+            "contexto_minimo": ["Contexto: Curitiba · Bairro X · tipo casa.", "Base comparável: 12 amostras."],
+            "estrategia_sugerida": "Revenda rápida com entrada disciplinada.",
+            "tese_acao": "Entrar apenas com margem de segurança para saída competitiva.",
         },
     }
     html = montar_html_relatorio_simulacao(row=row, caches=[], ads_map={}, doc=OperacaoSimulacaoDocumento())
     assert "Análise de mercado e bairro" in html
-    assert "Ponto A." in html
+    assert "Contexto da cidade e população" in html
+    assert "Insights de oportunidade" in html
+    assert "Alertas de risco" in html
+    assert "Checklist de diligência" in html
+    assert "População da cidade" not in html
+    assert "Informações do bairro" in html
+    assert "Tese e ação recomendada" in html
+    ordem = [
+        "Contexto da cidade e população",
+        "Informações do bairro",
+        "Alertas de risco",
+        "Insights de oportunidade",
+        "Tese e ação recomendada",
+        "Checklist de diligência",
+    ]
+    pos = [html.index(x) for x in ordem]
+    assert pos == sorted(pos)
     assert "Aviso teste." not in html
     assert "test-model" not in html
     assert "10 / 20" not in html

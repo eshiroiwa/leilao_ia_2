@@ -1534,13 +1534,24 @@ def _normalizar_selecao_modo_venda(
     for mv in modo_order:
         if label_map.get(mv) == s:
             return mv
+    # Em algumas versões/estados do Streamlit o selectbox pode devolver o texto
+    # renderizado. Como os rótulos incluem valores dinâmicos (ex.: "Manual — R$ ..."),
+    # o valor pode "envelhecer" entre reruns. Fazemos fallback por prefixo estável.
+    s_low = s.lower()
+    for mv in modo_order:
+        lb = str(label_map.get(mv) or "").strip()
+        if not lb:
+            continue
+        prefixo = lb.split("—", 1)[0].strip().lower()
+        if prefixo and s_low.startswith(prefixo):
+            return mv
     if modo_order:
         return modo_order[0]
     return ModoValorVenda.CACHE_VALOR_MEDIO_VENDA.value
 
 
 def _html_analise_mercado_ctx_painel(row: dict[str, Any]) -> str:
-    """HTML dos cards de ``relatorio_mercado_contexto_json`` (vazio se não houver tópicos)."""
+    """HTML decisional da análise de mercado (enxuto)."""
     raw = row.get("relatorio_mercado_contexto_json")
     if isinstance(raw, str) and raw.strip():
         try:
@@ -1550,23 +1561,70 @@ def _html_analise_mercado_ctx_painel(row: dict[str, Any]) -> str:
     if not isinstance(raw, dict) or not raw:
         return ""
     doc = parse_relatorio_mercado_contexto_json(raw)
-    if not any((c.topicos or []) for c in doc.cards):
+    opp = [str(x).strip() for x in (doc.insights_oportunidade or []) if str(x).strip()]
+    risk = [str(x).strip() for x in (doc.insights_risco or []) if str(x).strip()]
+    checklist = [str(x).strip() for x in (doc.checklist_diligencia or []) if str(x).strip()]
+    pop_cidade = [str(x).strip() for x in (doc.dados_populacao_cidade or []) if str(x).strip()]
+    info_bairro = [str(x).strip() for x in (doc.informacoes_bairro or []) if str(x).strip()]
+    estrategia = str(doc.estrategia_sugerida or "").strip()
+    tese = str(doc.tese_acao or "").strip()
+
+    if not (opp or risk or checklist or pop_cidade or info_bairro or estrategia or tese):
         return ""
-    blocos: list[str] = []
-    for c in doc.cards:
-        topicos = [str(t).strip() for t in (c.topicos or []) if str(t).strip()]
-        if not topicos:
-            continue
-        lis = "".join(f"<li>{html.escape(t)}</li>" for t in topicos)
-        tit = html.escape((c.titulo or c.id).strip())
-        ev = html.escape(str(getattr(c, "evidencia", "") or "").strip())
-        ev_html = f'<div class="sim-mercado-ctx-ev">{ev}</div>' if ev else ""
-        blocos.append(
-            f'<div class="sim-mercado-ctx-card"><div class="sim-mercado-ctx-tit">{tit}</div>{ev_html}<ul>{lis}</ul></div>'
+
+    extras: list[str] = []
+    pop_merge = list(pop_cidade)
+    if not pop_merge:
+        pop_merge = ["Sem dado populacional assertivo disponível nesta execução."]
+    lis_pop = "".join(f"<li>{html.escape(t)}</li>" for t in pop_merge)
+    extras.append(
+        '<div class="sim-mercado-ctx-card">'
+        '<div class="sim-mercado-ctx-tit">Contexto da cidade e população</div>'
+        f"<ul>{lis_pop}</ul></div>"
+    )
+    if info_bairro:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in info_bairro)
+    else:
+        lis = "<li>Sem achados adicionais objetivos do bairro nesta execução.</li>"
+    extras.append(
+        '<div class="sim-mercado-ctx-card">'
+        '<div class="sim-mercado-ctx-tit">Informações do bairro</div>'
+        f"<ul>{lis}</ul></div>"
+    )
+    if risk:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in risk)
+        extras.append(
+            '<div class="sim-mercado-ctx-card">'
+            '<div class="sim-mercado-ctx-tit">Alertas de risco</div>'
+            f"<ul>{lis}</ul></div>"
         )
-    if not blocos:
-        return ""
-    return f'<div class="sim-mercado-ctx-grid">{"".join(blocos)}</div>'
+    if opp:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in opp)
+        extras.append(
+            '<div class="sim-mercado-ctx-card">'
+            '<div class="sim-mercado-ctx-tit">Insights de oportunidade</div>'
+            f"<ul>{lis}</ul></div>"
+        )
+    if estrategia or tese:
+        itens: list[str] = []
+        if estrategia:
+            itens.append(f"<li><strong>Estratégia sugerida:</strong> {html.escape(estrategia)}</li>")
+        if tese:
+            itens.append(f"<li>{html.escape(tese)}</li>")
+        lis = "".join(itens)
+        extras.append(
+            '<div class="sim-mercado-ctx-card">'
+            '<div class="sim-mercado-ctx-tit">Tese e ação recomendada</div>'
+            f"<ul>{lis}</ul></div>"
+        )
+    if checklist:
+        lis = "".join(f"<li>{html.escape(t)}</li>" for t in checklist)
+        extras.append(
+            '<div class="sim-mercado-ctx-card">'
+            '<div class="sim-mercado-ctx-tit">Checklist de diligência</div>'
+            f"<ul>{lis}</ul></div>"
+        )
+    return f'<div class="sim-mercado-ctx-grid">{"".join(extras)}</div>'
 
 
 def _render_analise_mercado_abaixo_painel(row: dict[str, Any]) -> None:

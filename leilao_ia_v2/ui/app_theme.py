@@ -913,6 +913,12 @@ div[data-testid="stExpander"] details summary + div .sim-op-tight [data-testid="
   line-height: 1.42;
 }
 .sim-mercado-ctx-card li { margin-bottom: 0.22rem; }
+.sim-mercado-ctx-card p {
+  margin: 0 0 0.22rem 0;
+  font-size: 0.72rem;
+  color: #e8edf5;
+  line-height: 1.42;
+}
 .sim-lista-rodape {
   margin-top: 1.25rem;
   padding-top: 0.35rem;

@@ -6,6 +6,17 @@ from typing import Any
 
 from leilao_ia_v2.schemas.relatorio_mercado_contexto import RelatorioMercadoCard
 
+_POPULACAO_CIDADE_APROX: dict[str, str] = {
+    "sao jose do rio preto": "SAO JOSE DO RIO PRETO: faixa aproximada de 500 a 600 mil habitantes (estimativa de mercado).",
+    "são josé do rio preto": "SAO JOSE DO RIO PRETO: faixa aproximada de 500 a 600 mil habitantes (estimativa de mercado).",
+    "campinas": "CAMPINAS: faixa aproximada de 1,0 a 1,3 milhão de habitantes (estimativa de mercado).",
+    "ribeirao preto": "RIBEIRAO PRETO: faixa aproximada de 650 a 800 mil habitantes (estimativa de mercado).",
+    "ribeirão preto": "RIBEIRAO PRETO: faixa aproximada de 650 a 800 mil habitantes (estimativa de mercado).",
+    "curitiba": "CURITIBA: faixa aproximada de 1,7 a 2,0 milhões de habitantes (estimativa de mercado).",
+    "sao paulo": "SAO PAULO: faixa acima de 10 milhões de habitantes (estimativa de mercado).",
+    "são paulo": "SAO PAULO: faixa acima de 10 milhões de habitantes (estimativa de mercado).",
+}
+
 
 def _norm_txt(v: Any) -> str:
     return str(v or "").strip().lower()
@@ -68,6 +79,50 @@ def extrair_sinais_objetivos_por_cards(cards: list[RelatorioMercadoCard]) -> dic
         "pressao_concorrencia": int(round(press)),
         "fit_imovel_bairro": int(round(fit)),
         "resumo": resumo,
+    }
+
+
+def extrair_sinais_objetivos_decisao(
+    *,
+    insights_oportunidade: list[str],
+    insights_risco: list[str],
+    estrategia_sugerida: str,
+    tese_acao: str,
+) -> dict[str, Any]:
+    txt = " ".join(
+        [
+            *[str(x or "").strip().lower() for x in (insights_oportunidade or [])],
+            *[str(x or "").strip().lower() for x in (insights_risco or [])],
+            str(estrategia_sugerida or "").strip().lower(),
+            str(tese_acao or "").strip().lower(),
+        ]
+    )
+    liq = 50.0
+    press = 50.0
+    fit = 50.0
+    if any(k in txt for k in ("liquidez", "giro", "demanda ativa", "boa procura", "saída rápida")):
+        liq += 12
+    if any(k in txt for k in ("baixa liquidez", "saída lenta", "demora", "encalhe")):
+        liq -= 15
+    if any(k in txt for k in ("aderência", "compatível", "fit", "coerente")):
+        fit += 10
+    if any(k in txt for k in ("incompatível", "desalinhado", "fora do padrão")):
+        fit -= 12
+    if any(k in txt for k in ("concorrência elevada", "muita oferta", "disputa por preço")):
+        press += 12
+    if any(k in txt for k in ("oferta restrita", "baixa concorrência", "pouca oferta")):
+        press -= 10
+    liq = max(0.0, min(100.0, liq))
+    press = max(0.0, min(100.0, press))
+    fit = max(0.0, min(100.0, fit))
+    return {
+        "liquidez_bairro": int(round(liq)),
+        "pressao_concorrencia": int(round(press)),
+        "fit_imovel_bairro": int(round(fit)),
+        "resumo": (
+            f"Liquidez {liq:.0f}/100 · Pressão concorrencial {press:.0f}/100 · "
+            f"Fit imóvel-bairro {fit:.0f}/100"
+        ),
     }
 
 
@@ -217,4 +272,147 @@ def evidencias_por_card(
         "volume_anuncios": base,
         "ajuste_imovel_bairro": base,
     }
+
+
+def gerar_insights_decisao(
+    *,
+    row: dict[str, Any],
+    qualidade: dict[str, Any],
+    sinais: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Constrói insights acionáveis sem custo adicional de API.
+
+    Usa somente sinais, qualidade da base e contexto do imóvel para orientar
+    a decisão (oportunidade x risco x próximos passos).
+    """
+    liq = int(sinais.get("liquidez_bairro") or 50)
+    press = int(sinais.get("pressao_concorrencia") or 50)
+    fit = int(sinais.get("fit_imovel_bairro") or 50)
+    n = int(qualidade.get("n_amostras_cache") or 0)
+    pmb = float(qualidade.get("pct_mesmo_bairro") or 0.0)
+    pgeo = float(qualidade.get("pct_geo_valida") or 0.0)
+    score = int(qualidade.get("score_qualidade") or 0)
+    bairro = str(row.get("bairro") or "").strip() or "bairro do imóvel"
+    cidade = str(row.get("cidade") or "").strip() or "cidade"
+    tipo = str(row.get("tipo_imovel") or "").strip() or "imóvel"
+
+    oportunidades: list[str] = []
+    riscos: list[str] = []
+
+    if liq >= 60:
+        oportunidades.append(
+            f"Liquidez local favorável para {tipo} em {bairro}, reduzindo risco de saída lenta."
+        )
+    if fit >= 60:
+        oportunidades.append(
+            "Boa aderência imóvel-bairro; chance maior de aceitação pelo público típico da região."
+        )
+    if n >= 12 and pmb >= 55:
+        oportunidades.append(
+            f"Base comparável consistente ({n} amostras; {pmb:.0f}% no mesmo bairro), útil para precificação mais assertiva."
+        )
+    if 50 <= press <= 72:
+        oportunidades.append(
+            "Concorrência ativa sem saturação extrema, cenário propício para saída com preço competitivo."
+        )
+
+    if score < 55:
+        riscos.append(
+            "Qualidade da base comparável abaixo do ideal; decisão deve considerar margem de segurança maior."
+        )
+    if pmb < 45:
+        riscos.append(
+            "Cobertura baixa do mesmo bairro; risco de preço distorcido por micro-localizações diferentes."
+        )
+    if pgeo < 75:
+        riscos.append(
+            "Cobertura geográfica incompleta em parte dos comparáveis; proximidade real pode estar subestimada."
+        )
+    if fit < 45:
+        riscos.append(
+            "Aderência fraca imóvel-bairro; potencial de liquidez menor que o padrão local."
+        )
+    if liq < 50:
+        riscos.append(
+            "Sinais de liquidez moderada/baixa; saída pode exigir desconto maior para acelerar venda."
+        )
+    if press > 75:
+        riscos.append(
+            "Concorrência elevada no segmento; disputa por preço tende a comprimir margem de revenda."
+        )
+
+    if not oportunidades:
+        oportunidades.append(
+            f"{cidade} mantém demanda ativa em polos consolidados; oportunidade existe se a entrada vier com desconto disciplinado."
+        )
+    if not riscos:
+        riscos.append("Principais riscos operacionais parecem controlados, mas exigem validação documental e física do ativo.")
+
+    checklist = [
+        "Validar zoneamento e uso permitido (residencial/comercial/misto) antes do lance final.",
+        "Estimular vistoria técnica focada em elétrica, hidráulica e passivos estruturais de reforma.",
+        "Comparar ticket de saída com 3 a 5 anúncios realmente similares (tipo + raio + padrão).",
+        "Simular plano A (revenda) e plano B (locação) com margem líquida mínima alvo.",
+        "Confirmar documentação e eventuais pendências jurídicas que possam afetar prazo/custo.",
+    ]
+
+    if liq >= 65 and fit >= 60 and press <= 70:
+        estrategia = "Revenda rápida com preço de entrada disciplinado."
+        tese = (
+            "Cenário favorece giro de capital se a arrematação ficar abaixo da faixa-alvo local. "
+            "Priorizar execução enxuta e posicionamento competitivo na saída."
+        )
+    elif fit >= 55 and press > 70:
+        estrategia = "Revenda com diferenciação e margem protegida."
+        tese = (
+            "Existe mercado, porém competitivo. Entrar apenas com desconto que cubra atrito comercial, "
+            "tempo de exposição e eventual ajuste de preço na saída."
+        )
+    elif liq >= 50:
+        estrategia = "Estratégia híbrida: revenda com plano de locação como backup."
+        tese = (
+            "O ativo pode performar, mas a previsibilidade de saída não é plena. "
+            "A decisão melhora com plano B de renda para reduzir pressão de venda."
+        )
+    else:
+        estrategia = "Aquisição oportunística apenas com desconto robusto."
+        tese = (
+            "Com sinais de liquidez mais fracos, a operação só tende a compensar com entrada muito descontada "
+            "e horizonte de saída mais paciente."
+        )
+
+    return {
+        "insights_oportunidade": oportunidades[:5],
+        "insights_risco": riscos[:5],
+        "checklist_diligencia": checklist,
+        "estrategia_sugerida": estrategia,
+        "tese_acao": tese,
+    }
+
+
+def montar_contexto_minimo_decisao(
+    *,
+    row: dict[str, Any],
+    qualidade: dict[str, Any],
+) -> list[str]:
+    # Card removido do front para simplificar leitura; mantido apenas por compatibilidade.
+    return []
+
+
+def montar_contexto_populacao_bairro(
+    *,
+    row: dict[str, Any],
+    qualidade: dict[str, Any],
+) -> dict[str, list[str]]:
+    cidade = str(row.get("cidade") or "").strip()
+    chave = cidade.lower()
+    faixa_pop = _POPULACAO_CIDADE_APROX.get(chave)
+    pop_linhas: list[str] = []
+    if faixa_pop:
+        pop_linhas.append(faixa_pop)
+    elif cidade:
+        pop_linhas.append(f"{cidade.upper()}: sem estimativa de faixa populacional cadastrada no sistema.")
+    # Informações de bairro ficam a cargo do LLM (sem fallback numérico/genérico).
+    return {"dados_populacao_cidade": pop_linhas[:3], "informacoes_bairro": []}
 

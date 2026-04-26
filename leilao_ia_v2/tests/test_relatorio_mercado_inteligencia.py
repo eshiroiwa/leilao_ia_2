@@ -5,7 +5,11 @@ from leilao_ia_v2.services.relatorio_mercado_inteligencia import (
     assinatura_cache_principal,
     avaliar_validade_relatorio,
     calcular_qualidade_relatorio,
+    extrair_sinais_objetivos_decisao,
     extrair_sinais_objetivos_por_cards,
+    gerar_insights_decisao,
+    montar_contexto_minimo_decisao,
+    montar_contexto_populacao_bairro,
 )
 
 
@@ -57,4 +61,55 @@ def test_avaliar_validade_relatorio_expira_por_ttl():
     )
     assert v["expirado"] is True
     assert "TTL" in v["motivo"] or "ttl" in v["motivo"].lower()
+
+
+def test_gerar_insights_decisao_retorna_bloco_acionavel():
+    row = {"cidade": "São José do Rio Preto", "bairro": "Vila Esplanada", "tipo_imovel": "casa"}
+    qualidade = {
+        "score_qualidade": 74,
+        "n_amostras_cache": 16,
+        "pct_mesmo_bairro": 70.0,
+        "pct_geo_valida": 88.0,
+    }
+    sinais = {
+        "liquidez_bairro": 68,
+        "pressao_concorrencia": 62,
+        "fit_imovel_bairro": 66,
+    }
+    out = gerar_insights_decisao(row=row, qualidade=qualidade, sinais=sinais)
+    assert out["insights_oportunidade"]
+    assert out["insights_risco"]
+    assert out["checklist_diligencia"]
+    assert "estrategia_sugerida" in out and out["estrategia_sugerida"]
+    assert "tese_acao" in out and out["tese_acao"]
+
+
+def test_extrair_sinais_objetivos_decisao_reage_a_insights():
+    s = extrair_sinais_objetivos_decisao(
+        insights_oportunidade=["Boa liquidez e saída rápida na microrregião."],
+        insights_risco=["Concorrência elevada e muita oferta em parte da faixa."],
+        estrategia_sugerida="Revenda rápida com entrada disciplinada.",
+        tese_acao="Entrar com margem para competir no preço.",
+    )
+    assert 0 <= s["liquidez_bairro"] <= 100
+    assert 0 <= s["pressao_concorrencia"] <= 100
+    assert 0 <= s["fit_imovel_bairro"] <= 100
+
+
+def test_montar_contexto_minimo_decisao_retorna_linhas():
+    out = montar_contexto_minimo_decisao(
+        row={"cidade": "São José do Rio Preto", "bairro": "Vila Esplanada", "tipo_imovel": "casa"},
+        qualidade={"n_amostras_cache": 14, "score_qualidade": 77, "pct_mesmo_bairro": 64.0},
+    )
+    assert out == []
+
+
+def test_montar_contexto_populacao_bairro_retorna_cards():
+    out = montar_contexto_populacao_bairro(
+        row={"cidade": "São José do Rio Preto", "bairro": "Vila Esplanada", "tipo_imovel": "casa"},
+        qualidade={"n_amostras_cache": 14, "pct_mesmo_bairro": 64.0, "pct_geo_valida": 82.0},
+    )
+    assert out["dados_populacao_cidade"]
+    assert "SAO JOSE DO RIO PRETO: faixa aproximada de 500 a 600 mil habitantes (estimativa de mercado)." in out["dados_populacao_cidade"][0]
+    assert out["informacoes_bairro"] == []
 

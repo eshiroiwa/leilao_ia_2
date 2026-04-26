@@ -29,7 +29,11 @@ from leilao_ia_v2.services.relatorio_mercado_inteligencia import (
     avaliar_validade_relatorio,
     calcular_qualidade_relatorio,
     evidencias_por_card,
+    extrair_sinais_objetivos_decisao,
     extrair_sinais_objetivos_por_cards,
+    gerar_insights_decisao,
+    montar_contexto_minimo_decisao,
+    montar_contexto_populacao_bairro,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,7 +156,41 @@ def garantir_contexto_mercado_relatorio(
         if ev and not any("base:" in str(t).lower() for t in tops):
             tops.append(ev)
         cards_enriquecidos.append(c.model_copy(update={"evidencia": ev, "topicos": tops[:14]}))
-    sinais = extrair_sinais_objetivos_por_cards(cards_enriquecidos)
+    sinais_cards = extrair_sinais_objetivos_por_cards(cards_enriquecidos)
+    insights_auto = gerar_insights_decisao(row=row, qualidade=qual, sinais=sinais_cards)
+
+    def _merge_lista(a: list[str], b: list[str], limite: int) -> list[str]:
+        out: list[str] = []
+        for item in list(a or []) + list(b or []):
+            s = str(item or "").strip()
+            if not s:
+                continue
+            if s in out:
+                continue
+            out.append(s)
+            if len(out) >= limite:
+                break
+        return out
+
+    opp = _merge_lista(list(doc.insights_oportunidade or []), list(insights_auto["insights_oportunidade"]), 8)
+    risk = _merge_lista(list(doc.insights_risco or []), list(insights_auto["insights_risco"]), 8)
+    chk = _merge_lista(list(doc.checklist_diligencia or []), list(insights_auto["checklist_diligencia"]), 10)
+    estrategia = str(doc.estrategia_sugerida or "").strip() or str(insights_auto["estrategia_sugerida"])
+    tese = str(doc.tese_acao or "").strip() or str(insights_auto["tese_acao"])
+    ctx_min = montar_contexto_minimo_decisao(row=row, qualidade=qual)
+    ctx_pb_auto = montar_contexto_populacao_bairro(row=row, qualidade=qual)
+    pop = _merge_lista(list(doc.dados_populacao_cidade or []), list(ctx_pb_auto["dados_populacao_cidade"]), 6)
+    bairro_info = _merge_lista(list(doc.informacoes_bairro or []), list(ctx_pb_auto["informacoes_bairro"]), 8)
+
+    sinais = extrair_sinais_objetivos_decisao(
+        insights_oportunidade=opp,
+        insights_risco=risk,
+        estrategia_sugerida=estrategia,
+        tese_acao=tese,
+    )
+    if not opp and not risk:
+        sinais = sinais_cards
+
     assinatura = assinatura_cache_principal(cache_p)
     validade = avaliar_validade_relatorio(
         gerado_em_iso=doc.gerado_em_iso,
@@ -173,6 +211,14 @@ def garantir_contexto_mercado_relatorio(
             "sinais_decisao": sinais,
             "qualidade": qual,
             "validade": validade,
+            "insights_oportunidade": opp,
+            "insights_risco": risk,
+            "checklist_diligencia": chk,
+            "dados_populacao_cidade": pop,
+            "informacoes_bairro": bairro_info,
+            "contexto_minimo": ctx_min,
+            "estrategia_sugerida": estrategia,
+            "tese_acao": tese,
         }
     )
     payload = doc.model_dump(mode="json")
