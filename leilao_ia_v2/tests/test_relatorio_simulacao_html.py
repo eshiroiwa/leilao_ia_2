@@ -161,3 +161,31 @@ def test_relatorio_mapa_marcadores_uniao_anuncios_dos_caches():
     assert html.count('"lat":-22.01') == 1
     assert html.count('"lat":-22.02') == 1
     assert html.count('"lat":-22.03') == 1
+
+
+def test_relatorio_sem_analise_mercado_quando_flag_desligada():
+    row = {
+        "id": "x",
+        "endereco": "Rua Z",
+        "cidade": "Curitiba",
+        "estado": "PR",
+        "relatorio_mercado_contexto_json": {
+            "versao": 1,
+            "cards": [],
+            "insights_oportunidade": ["Teste"],
+            "insights_risco": ["Teste"],
+            "checklist_diligencia": ["Teste"],
+            "dados_populacao_cidade": ["CURITIBA: faixa aproximada..."],
+            "informacoes_bairro": ["Teste"],
+            "estrategia_sugerida": "Teste",
+            "tese_acao": "Teste",
+        },
+    }
+    html = montar_html_relatorio_simulacao(
+        row=row,
+        caches=[],
+        ads_map={},
+        doc=OperacaoSimulacaoDocumento(),
+        incluir_analise_mercado=False,
+    )
+    assert "Análise de mercado e bairro" not in html

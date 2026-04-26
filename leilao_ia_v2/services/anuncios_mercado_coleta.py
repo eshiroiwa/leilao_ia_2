@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 
 from supabase import Client
@@ -64,6 +66,97 @@ def _titulo_card_invalido(titulo: Any) -> bool:
     return False
 
 
+_UF_SLUGS: tuple[str, ...] = (
+    "ac",
+    "al",
+    "am",
+    "ap",
+    "ba",
+    "ce",
+    "df",
+    "es",
+    "go",
+    "ma",
+    "mg",
+    "ms",
+    "mt",
+    "pa",
+    "pb",
+    "pe",
+    "pi",
+    "pr",
+    "rj",
+    "rn",
+    "ro",
+    "rr",
+    "rs",
+    "sc",
+    "se",
+    "sp",
+    "to",
+)
+
+
+def _slug_fold(s: Any) -> str:
+    raw = str(s or "").strip().lower()
+    if not raw:
+        return ""
+    txt = "".join(
+        c for c in unicodedata.normalize("NFD", raw) if unicodedata.category(c) != "Mn"
+    )
+    txt = re.sub(r"[^a-z0-9]+", "-", txt).strip("-")
+    txt = re.sub(r"-{2,}", "-", txt)
+    return txt
+
+
+def _cidade_inferida_da_url(url: str) -> str:
+    """
+    Heurística conservadora:
+    - padrão com UF na URL (ex.: ``...-sp-franca-...``);
+    - padrão de ficha do Viva Real próximo ao trecho ``m2-venda/aluguel``.
+    """
+    u = str(url or "").strip().lower()
+    if not u:
+        return ""
+
+    # Ex.: chavesnamão/zap etc. ``...-sp-franca-vila-x-220m2-...``
+    uf_pat = "|".join(_UF_SLUGS)
+    m_uf = re.search(
+        rf"-(?:{uf_pat})-(?P<cidade>[a-z0-9]+(?:-[a-z0-9]+){{0,3}})-(?=[a-z0-9-]*?(?:\d+m2|rs\d|id-|venda|aluguel))",
+        u,
+        flags=re.IGNORECASE,
+    )
+    if m_uf:
+        return _slug_fold(m_uf.group("cidade"))
+
+    # VivaReal: captura o grupo imediatamente antes de ``m2-venda/aluguel``.
+    candidatos = list(
+        re.finditer(
+            r"-(?P<cidade>[a-z0-9]+(?:-[a-z0-9]+){0,4})-(?:com-[a-z0-9-]+-)?\d+m2-(?:venda|aluguel)-",
+            u,
+            flags=re.IGNORECASE,
+        )
+    )
+    if candidatos:
+        return _slug_fold(candidatos[-1].group("cidade"))
+    return ""
+
+
+def _url_indica_cidade_diferente(url: str, cidade_alvo: str) -> bool:
+    alvo = _slug_fold(cidade_alvo)
+    if not alvo:
+        return False
+    inferida = _cidade_inferida_da_url(url)
+    if not inferida:
+        return False
+    if inferida == alvo:
+        return False
+    # URLs podem trazer "bairro-cidade". Se terminar na cidade-alvo, aceitamos.
+    if inferida.endswith(f"-{alvo}") or alvo.endswith(f"-{inferida}"):
+        return False
+    return True
+
+
 def persistir_cards_anuncios_mercado(
     client: Client,
     cards: list[dict[str, Any]],
@@ -86,6 +179,9 @@ def persistir_cards_anuncios_mercado(
     linhas: list[dict[str, Any]] = []
     for card in cards:
         c = dict(card)
+        url_anuncio = str(c.get("url_anuncio") or "").strip()
+        if _url_indica_cidade_diferente(url_anuncio, cidade):
+            continue
         tipo_det = str(c.pop("_tipo_detectado", "") or "").strip().lower()
         tipo_base = str(tipo_imovel_fallback or "apartamento").strip().lower()
         if tipo_base in ("terreno", "lote"):
@@ -139,7 +235,7 @@ def persistir_cards_anuncios_mercado(
                 meta["exclusao_motivo"] = "listagem_sinc_lance_mercado"
         linhas.append(
             {
-                "url_anuncio": str(c.get("url_anuncio") or "").strip(),
+                "url_anuncio": url_anuncio,
                 "portal": str(c.get("portal") or "desconhecido").strip(),
                 "tipo_imovel": tipo_final,
                 "logradouro": str(c.get("logradouro") or "").strip(),

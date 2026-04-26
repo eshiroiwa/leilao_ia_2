@@ -145,7 +145,9 @@ def montar_frase_busca(leilao: dict[str, Any]) -> str:
         partes.append(f"na {rua}")
     if bai:
         partes.append(bai)
-    elif not rua and cid:
+    if cid:
+        # Mantém cidade explícita para reduzir ambiguidade em bairros homônimos
+        # e evitar resultados de municípios diferentes na busca web.
         partes.append(cid)
     if uf_f:
         partes.append(uf_f)

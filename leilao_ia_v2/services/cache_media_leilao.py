@@ -58,10 +58,44 @@ MAX_ANUNCIOS_GEOCODE = 50
 _TIPOS_CASA_SOBRADO: frozenset[str] = frozenset({"casa", "sobrado", "casa_condominio"})
 _TIPOS_TERRENO_BUSCA: tuple[str, ...] = ("terreno", "lote")
 _TIPOS_RESIDENCIAIS_POOL: tuple[str, ...] = ("casa", "sobrado", "casa_condominio")
+_UF_SLUGS: tuple[str, ...] = (
+    "ac",
+    "al",
+    "am",
+    "ap",
+    "ba",
+    "ce",
+    "df",
+    "es",
+    "go",
+    "ma",
+    "mg",
+    "ms",
+    "mt",
+    "pa",
+    "pb",
+    "pe",
+    "pi",
+    "pr",
+    "rj",
+    "rn",
+    "ro",
+    "rr",
+    "rs",
+    "sc",
+    "se",
+    "sp",
+    "to",
+)
 
 # Política de composição dos caches gravados (UI lê ``volume_amostras_baixo`` em ``metadados_json``).
 CACHE_MONTE_MIN_EXIGIDO = 1
 CACHE_VOLUME_BAIXO_LIMITE = 5
+CACHE_APOIO_ESCALA_MIN_AMOSTRAS = 3
+CACHE_APOIO_ESCALA_MENOR_MIN = 0.60
+CACHE_APOIO_ESCALA_MENOR_MAX = 0.95
+CACHE_APOIO_ESCALA_MAIOR_MIN = 1.05
+CACHE_APOIO_ESCALA_MAIOR_MAX = 1.60
 # Distribuição de metragem para liquidez (aviso de outlier da região).
 LIQ_METRAGEM_MIN_AMOSTRAS = 20
 LIQ_METRAGEM_MAX_FIRECRAWL_CREDITOS = 4
@@ -84,6 +118,74 @@ def _host_url(u: str) -> str:
         return ""
     s = s.replace("https://", "").replace("http://", "")
     return s.split("/", 1)[0].strip()
+
+
+def _slug_fold(s: Any) -> str:
+    raw = str(s or "").strip().lower()
+    if not raw:
+        return ""
+    txt = slug_vivareal(raw)
+    return "" if txt in ("", "-") else txt
+
+
+def _cidade_inferida_da_url(url: str) -> str:
+    u = str(url or "").strip().lower()
+    if not u:
+        return ""
+    uf_pat = "|".join(_UF_SLUGS)
+    m_uf = re.search(
+        rf"-(?:{uf_pat})-(?P<cidade>[a-z0-9]+(?:-[a-z0-9]+){{0,3}})-(?=[a-z0-9-]*?(?:\d+m2|rs\d|id-|venda|aluguel))",
+        u,
+        flags=re.IGNORECASE,
+    )
+    if m_uf:
+        return _slug_fold(m_uf.group("cidade"))
+    candidatos = list(
+        re.finditer(
+            r"-(?P<cidade>[a-z0-9]+(?:-[a-z0-9]+){0,4})-(?:com-[a-z0-9-]+-)?\d+m2-(?:venda|aluguel)-",
+            u,
+            flags=re.IGNORECASE,
+        )
+    )
+    if candidatos:
+        return _slug_fold(candidatos[-1].group("cidade"))
+    return ""
+
+
+def _url_indica_cidade_diferente_do_alvo(url: str, cidade_alvo: str) -> bool:
+    alvo = _slug_fold(cidade_alvo)
+    if not alvo:
+        return False
+    inferida = _cidade_inferida_da_url(url)
+    if not inferida:
+        return False
+    if inferida == alvo:
+        return False
+    if inferida.endswith(f"-{alvo}") or alvo.endswith(f"-{inferida}"):
+        return False
+    return True
+
+
+def _filtrar_candidatos_por_coerencia_url_cidade(
+    candidatos: list[dict[str, Any]],
+    cidade_alvo: str,
+    *,
+    linhas: list[str] | None = None,
+    etapa: str = "",
+) -> list[dict[str, Any]]:
+    if not candidatos:
+        return []
+    out = [
+        c
+        for c in candidatos
+        if not _url_indica_cidade_diferente_do_alvo(str(c.get("url_anuncio") or ""), cidade_alvo)
+    ]
+    if linhas is not None and len(out) != len(candidatos):
+        lbl = etapa or "coerencia_url_cidade"
+        linhas.append(
+            f"{lbl}: descartados_por_cidade_url={len(candidatos) - len(out)} (alvo={cidade_alvo or '-'})"
+        )
+    return out
 
 
 def _url_canonica(u: str) -> str:
@@ -1539,6 +1641,10 @@ def _amostras_reuso_validas(
     ads = anuncios_mercado_repo.buscar_por_ids(client, ids)
     if not ads:
         return None
+    cidade_ref = str((leilao or {}).get("cidade") or cache_row.get("cidade") or "").strip()
+    ads = _filtrar_candidatos_por_coerencia_url_cidade(ads, cidade_ref)
+    if not ads:
+        return None
     tset = {t.strip().lower() for t in tipos_anuncio if str(t).strip()}
     if tset:
         ads_f = [a for a in ads if str(a.get("tipo_imovel") or "").strip().lower() in tset]
@@ -1614,6 +1720,9 @@ def _montar_amostras_para_tipos(
         estado_sigla=estado_sigla,
         tipos_imovel=tipos,
     )
+    candidatos = _filtrar_candidatos_por_coerencia_url_cidade(
+        candidatos, cidade, linhas=linhas, etapa="query_bd_coerencia_cidade_url"
+    )
     linhas.append(
         _diagnostico_filtro_amostras(
             candidatos,
@@ -1651,6 +1760,9 @@ def _montar_amostras_para_tipos(
             cidade=cidade,
             estado_sigla=estado_sigla,
             tipos_imovel=tipos,
+        )
+        candidatos = _filtrar_candidatos_por_coerencia_url_cidade(
+            candidatos, cidade, linhas=linhas, etapa="apos_geocode_coerencia_cidade_url"
         )
         linhas.append(
             _diagnostico_filtro_amostras(
@@ -1704,6 +1816,9 @@ def _montar_amostras_para_tipos(
             cidade=cidade,
             estado_sigla=estado_sigla,
             tipos_imovel=tipos,
+        )
+        candidatos = _filtrar_candidatos_por_coerencia_url_cidade(
+            candidatos, cidade, linhas=linhas, etapa="apos_firecrawl_coerencia_cidade_url"
         )
         linhas.append(
             _diagnostico_filtro_amostras(
@@ -1910,6 +2025,197 @@ def _inserir_caches_terrenos_fatiados(
     return out, None
 
 
+def _selecionar_amostras_apoio_escala(
+    candidatos: list[dict[str, Any]],
+    *,
+    area_ref: float,
+    fator_min: float,
+    fator_max: float,
+    ids_excluir: set[str] | None = None,
+    min_amostras: int = CACHE_APOIO_ESCALA_MIN_AMOSTRAS,
+    limite: int = CACHE_AMOSTRAS_LOTE_REFERENCIA,
+) -> list[dict[str, Any]]:
+    if area_ref <= 0:
+        return []
+    lo = float(fator_min) * float(area_ref)
+    hi = float(fator_max) * float(area_ref)
+    excl = ids_excluir or set()
+    out: list[dict[str, Any]] = []
+    for a in candidatos:
+        aid = str(a.get("id") or "").strip()
+        if aid and aid in excl:
+            continue
+        ar = _float_positivo(a.get("area_construida_m2"))
+        if ar is None:
+            continue
+        if not (lo <= float(ar) <= hi):
+            continue
+        out.append(a)
+        if len(out) >= int(max(1, limite)):
+            break
+    if len(out) < int(max(1, min_amostras)):
+        return []
+    return out
+
+
+def _inserir_cache_apoio_escala(
+    client: Client,
+    leilao: dict[str, Any],
+    amostras: list[dict[str, Any]],
+    *,
+    lat0: float,
+    lon0: float,
+    geo_bucket: str,
+    tipo_l: str,
+    raio: float,
+    etiqueta: str,
+    fator_min: float,
+    fator_max: float,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    if not amostras:
+        return None, None
+    row = _montar_payload_cache(
+        leilao,
+        amostras,
+        lat0=lat0,
+        lon0=lon0,
+        geo_bucket=geo_bucket,
+        tipo_segmento=tipo_l,
+        modo="principal",
+        raio_km=raio,
+        uso_simulacao=False,
+        apenas_referencia=True,
+        tipo_casa_segmento_meta=f"apoio_escala_{etiqueta}",
+        tipo_imovel_cache=tipo_l,
+        tipo_casa_coluna="-",
+        nome_suffix=f"(apoio escala {etiqueta})",
+        metadados_extras={
+            **_meta_volume_e_papel(len(amostras), f"apoio_escala_{etiqueta}"),
+            "apoio_escala_fator_min": float(fator_min),
+            "apoio_escala_fator_max": float(fator_max),
+            "apoio_escala_area_ref_m2": float(_area_referencia_m2(leilao)),
+        },
+    )
+    cid = cache_media_bairro_repo.inserir(client, row)
+    if not cid:
+        return None, f"Falha ao inserir cache_media_bairro (apoio escala {etiqueta})."
+    return (
+        {
+            "id": cid,
+            "nome_cache": row.get("nome_cache"),
+            "n_amostras": len(amostras),
+            "modo": f"apoio_escala_{etiqueta}",
+        },
+        None,
+    )
+
+
+def _criar_caches_apoio_escala(
+    client: Client,
+    leilao: dict[str, Any],
+    *,
+    lat0: float,
+    lon0: float,
+    geo_bucket: str,
+    tipo_l: str,
+    estado_sigla: str,
+    cidade: str,
+    raio: float,
+    ids_excluir: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    if tipo_l in _TIPOS_TERRENO_BUSCA:
+        return [], "Apoio escala: omitido para terreno/lote."
+    area_ref = _area_referencia_m2(leilao)
+    if area_ref <= 0:
+        return [], "Apoio escala: omitido (área de referência ausente)."
+
+    tipos_principal = list(_TIPOS_RESIDENCIAIS_POOL) if tipo_l in _TIPOS_CASA_SOBRADO else [tipo_l]
+    candidatos = anuncios_mercado_repo.listar_por_cidade_estado_tipos(
+        client,
+        cidade=cidade,
+        estado_sigla=estado_sigla,
+        tipos_imovel=tipos_principal,
+    )
+    candidatos = _filtrar_candidatos_por_coerencia_url_cidade(candidatos, cidade)
+    candidatos = _filtrar_amostras(
+        candidatos,
+        lat0,
+        lon0,
+        area_ref=0.0,
+        raio_km=raio,
+        aplicar_faixa_area_edital=False,
+    )
+    candidatos = _apos_filtro_geo_excluir_listagem_sinc_lance(candidatos, leilao, None)
+    candidatos = _sanear_amostras_para_cache(candidatos, None)
+    cap_p, cap_l = _caps_amostras_cache_mercado()
+    lim_apoio = max(3, min(cap_l, cap_p))
+
+    out: list[dict[str, Any]] = []
+    logs: list[str] = []
+    base_ids = set(ids_excluir or set())
+    men = _selecionar_amostras_apoio_escala(
+        candidatos,
+        area_ref=area_ref,
+        fator_min=CACHE_APOIO_ESCALA_MENOR_MIN,
+        fator_max=CACHE_APOIO_ESCALA_MENOR_MAX,
+        ids_excluir=base_ids,
+        limite=lim_apoio,
+    )
+    c_men, err_men = _inserir_cache_apoio_escala(
+        client,
+        leilao,
+        men,
+        lat0=lat0,
+        lon0=lon0,
+        geo_bucket=geo_bucket,
+        tipo_l=tipo_l,
+        raio=raio,
+        etiqueta="menor",
+        fator_min=CACHE_APOIO_ESCALA_MENOR_MIN,
+        fator_max=CACHE_APOIO_ESCALA_MENOR_MAX,
+    )
+    if err_men:
+        return [], err_men
+    if c_men:
+        out.append(c_men)
+        logs.append(f"Apoio escala menor: n={len(men)} faixa={CACHE_APOIO_ESCALA_MENOR_MIN:.2f}-{CACHE_APOIO_ESCALA_MENOR_MAX:.2f}x")
+        for a in men:
+            aid = str(a.get("id") or "").strip()
+            if aid:
+                base_ids.add(aid)
+
+    mai = _selecionar_amostras_apoio_escala(
+        candidatos,
+        area_ref=area_ref,
+        fator_min=CACHE_APOIO_ESCALA_MAIOR_MIN,
+        fator_max=CACHE_APOIO_ESCALA_MAIOR_MAX,
+        ids_excluir=base_ids,
+        limite=lim_apoio,
+    )
+    c_mai, err_mai = _inserir_cache_apoio_escala(
+        client,
+        leilao,
+        mai,
+        lat0=lat0,
+        lon0=lon0,
+        geo_bucket=geo_bucket,
+        tipo_l=tipo_l,
+        raio=raio,
+        etiqueta="maior",
+        fator_min=CACHE_APOIO_ESCALA_MAIOR_MIN,
+        fator_max=CACHE_APOIO_ESCALA_MAIOR_MAX,
+    )
+    if err_mai:
+        return [], err_mai
+    if c_mai:
+        out.append(c_mai)
+        logs.append(f"Apoio escala maior: n={len(mai)} faixa={CACHE_APOIO_ESCALA_MAIOR_MIN:.2f}-{CACHE_APOIO_ESCALA_MAIOR_MAX:.2f}x")
+
+    if not logs:
+        logs.append("Apoio escala: sem amostra suficiente para criar cache auxiliar.")
+    return out, " | ".join(logs)
+
+
 def resolver_cache_media_pos_ingestao(
     client: Client,
     leilao_imovel_id: str,
@@ -2046,6 +2352,8 @@ def resolver_cache_media_pos_ingestao(
     n_fc_cache = 0
     diag_principal = ""
     diag_terrenos = ""
+    diag_apoio_escala = ""
+    ids_base_principal: set[str] = set()
 
     if principal_id and principal_row is not None:
         try:
@@ -2060,6 +2368,9 @@ def resolver_cache_media_pos_ingestao(
                 "modo": "principal",
             }
         )
+        for aid in _parse_csv_anuncio_ids(principal_row.get("anuncios_ids")):
+            if aid:
+                ids_base_principal.add(aid)
     else:
         tipos_principal = list(_TIPOS_RESIDENCIAIS_POOL) if tipo_l in _TIPOS_CASA_SOBRADO else [tipo_l]
         amostras, usou_vr, err, diag_principal, n_fc_pri = _montar_amostras_para_tipos(
@@ -2113,6 +2424,26 @@ def resolver_cache_media_pos_ingestao(
                 log_diagnostico=f"{ctx_base}\n--- Principal ---\n{diag_principal}",
             )
         caches.extend(criados_r)
+        for a in amostras:
+            aid = str(a.get("id") or "").strip()
+            if aid:
+                ids_base_principal.add(aid)
+
+    apoio_caches, diag_apoio = _criar_caches_apoio_escala(
+        client,
+        leilao,
+        lat0=lat0,
+        lon0=lon0,
+        geo_bucket=geo_bucket,
+        tipo_l=tipo_l,
+        estado_sigla=estado_sigla,
+        cidade=cidade,
+        raio=raio,
+        ids_excluir=ids_base_principal,
+    )
+    if apoio_caches:
+        caches.extend(apoio_caches)
+    diag_apoio_escala = f"--- Apoio escala ---\n{diag_apoio or 'sem detalhes'}"
 
     if tipo_l in _TIPOS_CASA_SOBRADO:
         if terreno_id and terreno_row is not None:
@@ -2230,6 +2561,8 @@ def resolver_cache_media_pos_ingestao(
         elif diag_terrenos.strip():
             log_ok.append("--- Terrenos ---")
             log_ok.append(diag_terrenos)
+    if diag_apoio_escala.strip():
+        log_ok.append(diag_apoio_escala)
     log_ok.append(log_ok_extra)
     log_diag_final = "\n".join(log_ok)
     _tentar_gravar_roi_pos_cache(client, lid)
@@ -2308,6 +2641,8 @@ def criar_caches_media_para_leilao(
     usou_fc = False
     n_fc_cache = 0
     diag_terrenos = ""
+    diag_apoio_escala = ""
+    ids_base_principal: set[str] = set()
 
     tipos_principal = list(_TIPOS_RESIDENCIAIS_POOL) if tipo_l in _TIPOS_CASA_SOBRADO else [tipo_l]
     amostras, usou_vr, err, diag_principal, n_fc_pri = _montar_amostras_para_tipos(
@@ -2362,6 +2697,26 @@ def criar_caches_media_para_leilao(
             log_diagnostico=f"{ctx_base}\n--- Principal ---\n{diag_principal}",
         )
     caches.extend(criados_r)
+    for a in amostras:
+        aid = str(a.get("id") or "").strip()
+        if aid:
+            ids_base_principal.add(aid)
+
+    apoio_caches, diag_apoio = _criar_caches_apoio_escala(
+        client,
+        leilao,
+        lat0=lat0,
+        lon0=lon0,
+        geo_bucket=geo_bucket,
+        tipo_l=tipo_l,
+        estado_sigla=estado_sigla,
+        cidade=cidade,
+        raio=raio,
+        ids_excluir=ids_base_principal,
+    )
+    if apoio_caches:
+        caches.extend(apoio_caches)
+    diag_apoio_escala = diag_apoio
 
     if tipo_l in _TIPOS_CASA_SOBRADO:
         amostras_t, usou_vr2, err_t, diag_terrenos, n_fc_ter = _montar_amostras_para_tipos(
@@ -2438,6 +2793,9 @@ def criar_caches_media_para_leilao(
         liq_line = "Liquidez metragem: falha ao calcular/persistir."
 
     log_ok: list[str] = [ctx_base, "--- Principal ---", diag_principal]
+    if diag_apoio_escala.strip():
+        log_ok.append("--- Apoio escala ---")
+        log_ok.append(diag_apoio_escala)
     if tipo_l in _TIPOS_CASA_SOBRADO and diag_terrenos.strip():
         log_ok.append("--- Terrenos ---")
         log_ok.append(diag_terrenos)

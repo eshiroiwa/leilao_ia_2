@@ -32,6 +32,63 @@ def test_filtrar_amostras_tres_dentro_raio():
     assert len(out) == 3
 
 
+def test_selecionar_amostras_apoio_escala_menor():
+    ref = 250.0
+    cands = [
+        _anuncio(1, -30.031, -51.221, 150.0, 400_000),
+        _anuncio(2, -30.032, -51.220, 170.0, 410_000),
+        _anuncio(3, -30.030, -51.219, 200.0, 420_000),
+        _anuncio(4, -30.030, -51.218, 245.0, 430_000),  # fora do apoio menor
+    ]
+    out = cml._selecionar_amostras_apoio_escala(
+        cands,
+        area_ref=ref,
+        fator_min=0.60,
+        fator_max=0.95,
+        min_amostras=3,
+        limite=10,
+    )
+    assert len(out) == 3
+    assert {str(x["id"]) for x in out} == {"id-1", "id-2", "id-3"}
+
+
+def test_selecionar_amostras_apoio_escala_respeita_ids_excluir():
+    ref = 250.0
+    cands = [
+        _anuncio(1, -30.031, -51.221, 150.0, 400_000),
+        _anuncio(2, -30.032, -51.220, 170.0, 410_000),
+        _anuncio(3, -30.030, -51.219, 200.0, 420_000),
+    ]
+    out = cml._selecionar_amostras_apoio_escala(
+        cands,
+        area_ref=ref,
+        fator_min=0.60,
+        fator_max=0.95,
+        ids_excluir={"id-2"},
+        min_amostras=2,
+        limite=10,
+    )
+    ids = {str(x["id"]) for x in out}
+    assert "id-2" not in ids
+    assert ids == {"id-1", "id-3"}
+
+
+def test_url_indica_cidade_diferente_do_alvo_detecta_franca_vs_aparecida():
+    url = (
+        "https://www.chavesnamao.com.br/imovel/"
+        "casa-a-venda-3-quartos-sp-franca-vila-nicacio-220m2-RS750000/id-39723738/"
+    )
+    assert cml._url_indica_cidade_diferente_do_alvo(url, "Aparecida") is True
+
+
+def test_url_indica_cidade_diferente_do_alvo_aceita_slug_bairro_cidade():
+    url = (
+        "https://www.vivareal.com.br/imovel/"
+        "lote-terreno-ponte-alta-aparecida-160m2-venda-RS165000-id-2870099796/"
+    )
+    assert cml._url_indica_cidade_diferente_do_alvo(url, "Aparecida") is False
+
+
 def test_preco_anuncio_inconsistente_detecta_titulo_divergente():
     a = _anuncio(1, -30.03, -51.22, 100.0, 1_890_000)
     a["titulo"] = "**R$ 2.790.000** CondomínioR$ 1.050]("

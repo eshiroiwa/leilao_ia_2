@@ -456,6 +456,7 @@ def montar_html_relatorio_simulacao(
     ads_map: dict[str, dict[str, Any]],
     doc: OperacaoSimulacaoDocumento,
     cmp_painel: str = "nenhum",
+    incluir_analise_mercado: bool = True,
 ) -> str:
     """
     ``cmp_painel``: ``nenhum`` (só à vista) | ``prazo`` | ``financiado`` — alinhado ao rádio da simulação.
@@ -494,7 +495,7 @@ def montar_html_relatorio_simulacao(
     else:
         grid_ex = '<p class="sub" style="margin:0">Sem campos extraídos para exibir.</p>'
     col_adicionais = _html_dados_adicionais_coluna(row, ag)
-    sec_ctx_mercado = _html_secao_analise_mercado_ctx(row)
+    sec_ctx_mercado = _html_secao_analise_mercado_ctx(row) if incluir_analise_mercado else ""
 
     map_head, map_sec, map_scripts = _map_comparativos_fragments(row, caches, ads_map)
     if map_sec.strip():

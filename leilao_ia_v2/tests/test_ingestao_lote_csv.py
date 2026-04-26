@@ -206,3 +206,24 @@ def test_processar_lote_csv_preenche_lat_lon_com_geocode(monkeypatch):
     assert isinstance(p, dict)
     assert p.get("latitude") == -23.55
     assert p.get("longitude") == -46.63
+
+
+def test_payload_csv_mapeia_campos_variaveis_lances_e_foto():
+    reg = {
+        "link de acesso": "https://venda-imoveis.caixa.gov.br/sistema/detalhe-imovel.asp?hdnimovel=123",
+        "cidade": "Aparecida",
+        "uf": "SP",
+        "bairro": "Ponte Alta",
+        "endereco": "Rua Exemplo, 100",
+        "1º leilao": "420.000,00",
+        "2º leilao": "310.000,00",
+        "link_foto": "https://cdn.exemplo.com/foto.jpg",
+        "valor de avaliacao": "610.000,00",
+    }
+    mp = mod.resolver_mapeamento_campos_csv([reg])
+    p = mod._payload_de_registro_csv(reg, url=mod._col_url(reg, mapeamento=mp), mapeamento=mp)
+    assert p["valor_lance_1_praca"] == 420000.0
+    assert p["valor_lance_2_praca"] == 310000.0
+    assert p["valor_arrematacao"] == 310000.0
+    assert p["url_foto_imovel"] == "https://cdn.exemplo.com/foto.jpg"
+    assert p["valor_avaliacao"] == 610000.0

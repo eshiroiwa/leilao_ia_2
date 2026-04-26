@@ -12,7 +12,9 @@ Foco da fase 1:
 from __future__ import annotations
 
 import csv
+import json
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -25,6 +27,7 @@ from leilao_ia_v2.constants import STATUS_PENDENTE
 from leilao_ia_v2.normalizacao import normalizar_tipo_imovel, normalizar_url_leilao
 from leilao_ia_v2.persistence import leilao_imoveis_repo
 from leilao_ia_v2.services.cache_media_leilao import resolver_cache_media_pos_ingestao
+from leilao_ia_v2.services.extracao_edital_llm import _deve_omitir_temperature, _extrair_json_objeto, _kwargs_limite_saida
 from leilao_ia_v2.services.geocoding import geocodificar_endereco
 
 logger = logging.getLogger(__name__)
@@ -38,6 +41,70 @@ _URL_CANDS = (
     "link acesso",
     "href",
 )
+
+_MAPEAMENTO_CAMPOS_ALVO: tuple[str, ...] = (
+    "url_leilao",
+    "cidade",
+    "estado",
+    "bairro",
+    "endereco",
+    "tipo_imovel",
+    "descricao",
+    "modalidade_venda",
+    "area_util",
+    "area_total",
+    "valor_avaliacao",
+    "valor_lance_1_praca",
+    "valor_lance_2_praca",
+    "valor_arrematacao",
+    "url_foto_imovel",
+)
+
+_ALIASES_CAMPOS: dict[str, tuple[str, ...]] = {
+    "url_leilao": ("url", "url_leilao", "link", "link de acesso", "href"),
+    "cidade": ("cidade", "municipio"),
+    "estado": ("uf", "estado"),
+    "bairro": ("bairro",),
+    "endereco": ("endereco", "endereço", "logradouro"),
+    "tipo_imovel": ("tipo_imovel", "tipo de imovel", "tipo"),
+    "descricao": ("descricao", "descrição", "detalhes"),
+    "modalidade_venda": ("modalidade de venda", "modalidade_venda", "modalidade"),
+    "area_util": ("area_util", "area util", "área útil", "area privativa"),
+    "area_total": ("area_total", "area total", "área total", "area terreno"),
+    "valor_avaliacao": ("valor de avaliacao", "valor_avaliacao", "avaliação", "avaliacao"),
+    "valor_lance_1_praca": (
+        "valor_lance_1_praca",
+        "lance 1",
+        "1 leilao",
+        "1o leilao",
+        "1º leilao",
+        "1 praca",
+        "1a praca",
+        "1ª praça",
+    ),
+    "valor_lance_2_praca": (
+        "valor_lance_2_praca",
+        "lance 2",
+        "2 leilao",
+        "2o leilao",
+        "2º leilao",
+        "2 praca",
+        "2a praca",
+        "2ª praça",
+    ),
+    "valor_arrematacao": ("valor_arrematacao", "preco", "preço", "lance minimo", "valor do imovel"),
+    "url_foto_imovel": ("url_foto_imovel", "foto", "imagem", "link_foto", "url da foto"),
+}
+
+
+@dataclass
+class MapeamentoCamposCsv:
+    campos: dict[str, str] = field(default_factory=dict)
+    confianca: dict[str, float] = field(default_factory=dict)
+    origem: str = "heuristico"
+
+
+_MAPEAMENTO_CSV_CACHE: dict[str, MapeamentoCamposCsv] = {}
 
 
 @dataclass
@@ -102,11 +169,13 @@ def resumir_csv_leiloes(
 ) -> ResumoCsvLeiloes:
     """Resumo rápido para validação do arquivo antes da ingestão."""
     regs = ler_registros_csv_leiloes(caminho_csv)
+    # Preview precisa ser instantâneo: apenas heurística local (sem chamada LLM).
+    mapeamento = resolver_mapeamento_campos_csv(regs, permitir_llm=False)
     total = len(regs)
     validas = 0
     preview: list[dict[str, str]] = []
     for i, reg in enumerate(regs, start=1):
-        url = _col_url(reg)
+        url = _col_url(reg, mapeamento=mapeamento)
         if url:
             validas += 1
             if len(preview) < int(max(0, preview_limite)):
@@ -114,8 +183,10 @@ def resumir_csv_leiloes(
                     {
                         "linha": str(i),
                         "url": url,
-                        "cidade": str(reg.get("cidade") or "").strip(),
-                        "uf": str(reg.get("uf") or reg.get("estado") or "").strip(),
+                        "cidade": str(
+                            _valor_mapeado(reg, mapeamento, "cidade", ("cidade", "municipio")) or ""
+                        ).strip(),
+                        "uf": str(_valor_mapeado(reg, mapeamento, "estado", ("uf", "estado")) or "").strip(),
                     }
                 )
     return ResumoCsvLeiloes(
@@ -132,6 +203,193 @@ def _norm_key(s: Any) -> str:
     txt = "".join(ch for ch in txt if unicodedata.category(ch) != "Mn")
     txt = re.sub(r"\s+", " ", txt).strip()
     return txt
+
+
+def _score_alias_coluna(coluna_norm: str, aliases: tuple[str, ...]) -> float:
+    c = _norm_key(coluna_norm)
+    if not c:
+        return 0.0
+    best = 0.0
+    for a in aliases:
+        an = _norm_key(a)
+        if not an:
+            continue
+        if c == an:
+            best = max(best, 1.0)
+        elif c.startswith(an) or c.endswith(an):
+            best = max(best, 0.9)
+        elif an in c:
+            best = max(best, 0.75)
+    return best
+
+
+def _mapear_colunas_heuristico(headers_norm: list[str]) -> MapeamentoCamposCsv:
+    out = MapeamentoCamposCsv()
+    usados: set[str] = set()
+    for campo in _MAPEAMENTO_CAMPOS_ALVO:
+        aliases = _ALIASES_CAMPOS.get(campo, ())
+        best_col = ""
+        best_score = 0.0
+        for h in headers_norm:
+            if h in usados:
+                continue
+            sc = _score_alias_coluna(h, aliases)
+            if sc > best_score:
+                best_score = sc
+                best_col = h
+        if best_col and best_score >= 0.72:
+            out.campos[campo] = best_col
+            out.confianca[campo] = round(best_score, 3)
+            usados.add(best_col)
+    return out
+
+
+def _modelo_llm_mapeamento_csv() -> str:
+    m = str(os.getenv("OPENAI_MODEL_CSV_MAPPING", "") or "").strip()
+    if m:
+        return m
+    m2 = str(os.getenv("OPENAI_CHAT_MODEL", "") or "").strip()
+    if m2:
+        return m2
+    return "gpt-4o-mini"
+
+
+def _llm_mapeamento_csv_habilitado() -> bool:
+    """
+    Evita latência inesperada no fluxo interativo; LLM só roda quando explicitamente habilitada.
+    """
+    raw = str(os.getenv("CSV_MAPPING_USE_LLM", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "sim"}
+
+
+def _mapear_colunas_llm(
+    headers_norm: list[str],
+    regs: list[dict[str, Any]],
+) -> MapeamentoCamposCsv | None:
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        return None
+    try:
+        from openai import OpenAI
+    except Exception:
+        return None
+    mid = _modelo_llm_mapeamento_csv()
+    amostra: list[dict[str, str]] = []
+    for reg in regs[:5]:
+        item: dict[str, str] = {}
+        for h in headers_norm[:80]:
+            v = reg.get(h)
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s:
+                item[h] = s[:120]
+        if item:
+            amostra.append(item)
+    if not headers_norm:
+        return None
+    system = (
+        "Você mapeia colunas de CSV de leilões para campos internos. "
+        "Responda APENAS JSON no formato: "
+        "{\"mapping\":{\"campo\":{\"column\":\"coluna_csv_ou_vazio\",\"confidence\":0.0-1.0}},\"notes\":[...]}. "
+        "Nunca invente coluna inexistente."
+    )
+    user = {
+        "campos_alvo": list(_MAPEAMENTO_CAMPOS_ALVO),
+        "headers_csv": headers_norm,
+        "amostra_linhas": amostra,
+        "regras": {
+            "url_foto_imovel": "aceite colunas de foto/imagem/link foto",
+            "valor_lance_1_praca": "aceite 1o/1º leilao, 1a/1ª praca",
+            "valor_lance_2_praca": "aceite 2o/2º leilao, 2a/2ª praca",
+            "valor_arrematacao": "aceite preco/lance minimo/valor de venda",
+        },
+    }
+    cli = OpenAI()
+    kw: dict[str, Any] = {
+        "model": mid,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+    kw.update(_kwargs_limite_saida(mid))
+    if not _deve_omitir_temperature(mid):
+        kw["temperature"] = 0.0
+    try:
+        comp = cli.chat.completions.create(**kw)
+    except Exception:
+        logger.debug("mapeamento llm csv falhou", exc_info=True)
+        return None
+    txt = str((comp.choices[0].message.content or "") if comp.choices else "")
+    blob = _extrair_json_objeto(txt)
+    if not blob.strip():
+        return None
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return None
+    mp = data.get("mapping") if isinstance(data, dict) else None
+    if not isinstance(mp, dict):
+        return None
+    out = MapeamentoCamposCsv(origem="llm")
+    valid_headers = set(headers_norm)
+    for campo in _MAPEAMENTO_CAMPOS_ALVO:
+        ent = mp.get(campo)
+        if not isinstance(ent, dict):
+            continue
+        col = _norm_key(ent.get("column"))
+        try:
+            conf = float(ent.get("confidence"))
+        except Exception:
+            conf = 0.0
+        if col and col in valid_headers and conf >= 0.55:
+            out.campos[campo] = col
+            out.confianca[campo] = max(0.0, min(1.0, conf))
+    return out if out.campos else None
+
+
+def resolver_mapeamento_campos_csv(
+    regs: list[dict[str, Any]],
+    *,
+    permitir_llm: bool = False,
+) -> MapeamentoCamposCsv:
+    headers: list[str] = []
+    seen: set[str] = set()
+    for reg in regs[:20]:
+        for k in reg.keys():
+            nk = _norm_key(k)
+            if nk and nk not in seen:
+                seen.add(nk)
+                headers.append(nk)
+    key_headers = "|".join(headers)
+    key_modo = "llm" if bool(permitir_llm and _llm_mapeamento_csv_habilitado()) else "heur"
+    key_cache = f"{key_modo}|{key_headers}"
+    cached = _MAPEAMENTO_CSV_CACHE.get(key_cache)
+    if cached is not None:
+        return cached
+    base = _mapear_colunas_heuristico(headers)
+    if not (permitir_llm and _llm_mapeamento_csv_habilitado()):
+        _MAPEAMENTO_CSV_CACHE[key_cache] = base
+        return base
+    llm = _mapear_colunas_llm(headers, regs)
+    if llm is None:
+        _MAPEAMENTO_CSV_CACHE[key_cache] = base
+        return base
+    # Mescla: LLM ganha quando tiver confiança melhor.
+    out = MapeamentoCamposCsv(
+        campos=dict(base.campos),
+        confianca=dict(base.confianca),
+        origem="heuristico+llm",
+    )
+    for campo, col in llm.campos.items():
+        conf_llm = float(llm.confianca.get(campo, 0.0))
+        conf_base = float(base.confianca.get(campo, 0.0))
+        if campo not in out.campos or conf_llm >= max(0.78, conf_base + 0.05):
+            out.campos[campo] = col
+            out.confianca[campo] = conf_llm
+    _MAPEAMENTO_CSV_CACHE[key_cache] = out
+    return out
 
 
 def _parse_num_br(v: Any) -> float | None:
@@ -162,6 +420,13 @@ def _parse_url(v: Any) -> str:
         return normalizar_url_leilao(s)
     except Exception:
         return s
+
+
+def _url_http_ou_vazio(v: Any) -> str:
+    u = _parse_url(v)
+    if u.lower().startswith(("http://", "https://")):
+        return u
+    return ""
 
 
 def _guess_delimiter(line: str) -> str:
@@ -233,7 +498,29 @@ def _extrair_area_de_descricao(descricao: str, *, terreno: bool = False) -> floa
     return _parse_num_br(m.group(1))
 
 
-def _col_url(reg: dict[str, Any]) -> str:
+def _valor_mapeado(
+    reg: dict[str, Any],
+    mapeamento: MapeamentoCamposCsv | None,
+    campo: str,
+    aliases: tuple[str, ...],
+) -> Any:
+    if mapeamento is not None:
+        k_map = _norm_key(mapeamento.campos.get(campo, ""))
+        if k_map and k_map in reg:
+            v = reg.get(k_map)
+            if str(v or "").strip():
+                return v
+    for a in aliases:
+        ak = _norm_key(a)
+        if ak in reg and str(reg.get(ak) or "").strip():
+            return reg.get(ak)
+    return None
+
+
+def _col_url(reg: dict[str, Any], *, mapeamento: MapeamentoCamposCsv | None = None) -> str:
+    vmap = _valor_mapeado(reg, mapeamento, "url_leilao", _URL_CANDS)
+    if str(vmap or "").strip():
+        return _parse_url(vmap)
     for k in _URL_CANDS:
         if k in reg and str(reg.get(k) or "").strip():
             return _parse_url(reg.get(k))
@@ -244,11 +531,26 @@ def _col_url(reg: dict[str, Any]) -> str:
     return ""
 
 
-def _payload_de_registro_csv(reg: dict[str, Any], *, url: str) -> dict[str, Any]:
-    uf = str(reg.get("uf") or reg.get("estado") or "").strip()
-    tipo = str(reg.get("tipo_imovel") or "").strip()
-    descricao = str(reg.get("descricao") or reg.get("descrição") or "").strip()
-    modalidade = str(reg.get("modalidade de venda") or reg.get("modalidade_venda") or "").strip()
+def _payload_de_registro_csv(
+    reg: dict[str, Any],
+    *,
+    url: str,
+    mapeamento: MapeamentoCamposCsv | None = None,
+) -> dict[str, Any]:
+    uf = str(_valor_mapeado(reg, mapeamento, "estado", ("uf", "estado")) or "").strip()
+    tipo = str(_valor_mapeado(reg, mapeamento, "tipo_imovel", ("tipo_imovel", "tipo de imovel", "tipo")) or "").strip()
+    descricao = str(
+        _valor_mapeado(reg, mapeamento, "descricao", ("descricao", "descrição", "detalhes")) or ""
+    ).strip()
+    modalidade = str(
+        _valor_mapeado(
+            reg,
+            mapeamento,
+            "modalidade_venda",
+            ("modalidade de venda", "modalidade_venda", "modalidade"),
+        )
+        or ""
+    ).strip()
     if not tipo and descricao:
         t0 = _norm_key(descricao)
         if "apartamento" in t0:
@@ -260,29 +562,80 @@ def _payload_de_registro_csv(reg: dict[str, Any], *, url: str) -> dict[str, Any]
         elif "loja" in t0:
             tipo = "loja"
     tipo_n = normalizar_tipo_imovel(tipo) if tipo else None
-    area_util = _parse_num_br(reg.get("area_util") or reg.get("area util"))
-    area_total = _parse_num_br(reg.get("area_total") or reg.get("area total"))
+    area_util = _parse_num_br(
+        _valor_mapeado(reg, mapeamento, "area_util", ("area_util", "area util", "área útil", "area privativa"))
+    )
+    area_total = _parse_num_br(
+        _valor_mapeado(reg, mapeamento, "area_total", ("area_total", "area total", "área total", "area terreno"))
+    )
     if area_util is None:
         area_util = _extrair_area_de_descricao(descricao, terreno=False)
     if area_total is None:
         area_total = _extrair_area_de_descricao(descricao, terreno=True)
-    v_av = _parse_num_br(reg.get("valor de avaliacao") or reg.get("valor_avaliacao"))
-    v_lance = _parse_num_br(reg.get("preco") or reg.get("preço") or reg.get("valor_arrematacao"))
+    v_av = _parse_num_br(
+        _valor_mapeado(reg, mapeamento, "valor_avaliacao", ("valor de avaliacao", "valor_avaliacao", "avaliacao"))
+    )
+    v_l1 = _parse_num_br(
+        _valor_mapeado(
+            reg,
+            mapeamento,
+            "valor_lance_1_praca",
+            ("valor_lance_1_praca", "lance 1", "1o leilao", "1º leilao", "1a praca", "1ª praça"),
+        )
+    )
+    v_l2 = _parse_num_br(
+        _valor_mapeado(
+            reg,
+            mapeamento,
+            "valor_lance_2_praca",
+            ("valor_lance_2_praca", "lance 2", "2o leilao", "2º leilao", "2a praca", "2ª praça"),
+        )
+    )
+    v_ar = _parse_num_br(
+        _valor_mapeado(
+            reg,
+            mapeamento,
+            "valor_arrematacao",
+            ("valor_arrematacao", "preco", "preço", "lance minimo", "valor do imovel"),
+        )
+    )
+    if v_ar is None:
+        v_ar = v_l2 if v_l2 is not None else v_l1
+    if v_l1 is None and v_ar is not None:
+        v_l1 = v_ar
+    foto = _url_http_ou_vazio(
+        _valor_mapeado(
+            reg,
+            mapeamento,
+            "url_foto_imovel",
+            ("url_foto_imovel", "foto", "imagem", "link_foto", "url da foto"),
+        )
+    )
     payload: dict[str, Any] = {
         "url_leilao": url,
         "status": STATUS_PENDENTE,
         "cache_media_bairro_ids": [],
-        "cidade": str(reg.get("cidade") or "").strip() or None,
+        "cidade": str(_valor_mapeado(reg, mapeamento, "cidade", ("cidade", "municipio")) or "").strip() or None,
         "estado": uf[:2].upper() if uf else None,
-        "bairro": str(reg.get("bairro") or "").strip() or None,
-        "endereco": str(reg.get("endereco") or reg.get("endereço") or "").strip() or None,
+        "bairro": str(_valor_mapeado(reg, mapeamento, "bairro", ("bairro",)) or "").strip() or None,
+        "endereco": str(_valor_mapeado(reg, mapeamento, "endereco", ("endereco", "endereço", "logradouro")) or "").strip() or None,
         "tipo_imovel": str(tipo_n or tipo or "").strip() or None,
         "area_util": area_util,
         "area_total": area_total,
         "valor_avaliacao": v_av,
-        "valor_arrematacao": v_lance,
-        "valor_lance_1_praca": v_lance,
-        "leilao_extra_json": {"modalidade_venda_arquivo": modalidade} if modalidade else {},
+        "valor_lance_1_praca": v_l1,
+        "valor_lance_2_praca": v_l2,
+        "valor_arrematacao": v_ar,
+        "url_foto_imovel": foto or None,
+        "leilao_extra_json": {
+            k: v
+            for k, v in {
+                "modalidade_venda_arquivo": modalidade if modalidade else None,
+                "ingestao_csv_mapeamento_origem": (mapeamento.origem if mapeamento else "heuristico"),
+                "ingestao_csv_campos_mapeados": (mapeamento.campos if mapeamento else {}),
+            }.items()
+            if v not in (None, "", {}, [])
+        },
     }
     return payload
 
@@ -339,6 +692,8 @@ def processar_lote_csv_leiloes(
     should_stop: Callable[[], bool] | None = None,
 ) -> ResultadoLoteCsv:
     regs = ler_registros_csv_leiloes(caminho_csv)
+    # Processamento efetivo pode usar LLM, mas somente se habilitada via env.
+    mapeamento = resolver_mapeamento_campos_csv(regs, permitir_llm=True)
     resultados: list[LinhaLoteResultado] = []
     urls_validas = 0
     ok = erro = ignorados = processados = 0
@@ -350,7 +705,7 @@ def processar_lote_csv_leiloes(
             break
         if max_itens is not None and processados >= int(max_itens):
             break
-        url = _col_url(reg)
+        url = _col_url(reg, mapeamento=mapeamento)
         if not url:
             ignorados += 1
             resultados.append(
@@ -367,7 +722,7 @@ def processar_lote_csv_leiloes(
         urls_validas += 1
         processados += 1
         try:
-            payload = _payload_de_registro_csv(reg, url=url)
+            payload = _payload_de_registro_csv(reg, url=url, mapeamento=mapeamento)
             _geocodificar_payload_csv(payload)
             leilao_id, modo = _upsert_leilao_por_csv(payload, client)
             res_cache = resolver_cache_media_pos_ingestao(

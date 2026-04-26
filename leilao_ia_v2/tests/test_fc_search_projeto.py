@@ -23,6 +23,7 @@ def test_montar_frase_busca_basica():
     assert "100" in s
     assert "henrique" in s
     assert "lessa" in s
+    assert "pindamonhangaba" in s
     assert "sp" in s
     assert "na rua henrique homem de melo" in s
     assert "bairro" not in s
@@ -45,7 +46,7 @@ def test_montar_frase_busca_sp_sem_numero_cep():
     s = montar_frase_busca(row)
     assert s == (
         "apartamento, de 39m², à venda, na rua barao carlos de sousa anhumas, "
-        "jardim recanto verde, sp"
+        "jardim recanto verde, são paulo, sp"
     )
     assert "380" not in s
     assert "cep" not in s

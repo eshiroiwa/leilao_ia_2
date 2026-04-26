@@ -1375,12 +1375,19 @@ def _render_aba_simulacao() -> None:
             cmp_sel = str(_cache_cmp.get("sel") or "nenhum").strip().lower()
         else:
             cmp_sel = str(st.session_state.get(k_cmp) or "nenhum").strip().lower()
+        incluir_mercado = st.checkbox(
+            "Incluir análise de mercado no relatório HTML",
+            value=True,
+            key=f"sim_rel_incluir_mercado_{rid[:12] or 'x'}",
+            help="Quando desmarcado, o relatório HTML será gerado sem a seção de análise de mercado.",
+        )
         html_rep = montar_html_relatorio_simulacao(
             row=row_ex,
             caches=caches_ui,
             ads_map=ads_map_ui,
             doc=doc_rep,
             cmp_painel=cmp_sel,
+            incluir_analise_mercado=bool(incluir_mercado),
         )
         fn = (
             f"relatorio_simulacao_{rid[:8] or 'leilao'}_"
@@ -1392,7 +1399,10 @@ def _render_aba_simulacao() -> None:
             file_name=fn,
             mime="text/html",
             key=f"sim_gerar_rel_{rid[:12] or 'x'}_{cmp_sel}",
-            help="HTML único: edital, dados adicionais, análise de mercado (se você gerou via LLM), comparáveis, mapa e painel financeiro.",
+            help=(
+                "HTML único: edital, dados adicionais, comparáveis, mapa e painel financeiro; "
+                "a análise de mercado é opcional via checkbox acima."
+            ),
             use_container_width=False,
         )
     except Exception as e:
@@ -3285,6 +3295,31 @@ def _render_pendente_frase_firecrawl_pos_ingest() -> None:
                 st.rerun()
 
 
+def _refazer_analise_leilao_sem_firecrawl(iid: str, cli: Any) -> tuple[bool, str, str]:
+    """
+    Recalcula o leilão do zero usando apenas dados já no banco (sem novas chamadas Firecrawl).
+
+    Fluxo:
+    - desvincula/apaga caches antigos do imóvel;
+    - remonta caches e métricas de ROI com base no BD;
+    - não realiza search/scrape externo (max_chamadas_api_firecrawl=0).
+    """
+    lid = str(iid or "").strip()
+    if not lid:
+        return False, "ID do leilão inválido.", ""
+    try:
+        res = recalcular_caches_mercado_para_leilao(
+            cli,
+            lid,
+            ignorar_cache_firecrawl=True,
+            max_chamadas_api_firecrawl=0,
+        )
+    except Exception as exc:
+        logger.exception("Refazer análise sem Firecrawl falhou (leilao=%s)", lid[:12])
+        return False, f"Falha ao refazer análise: {exc}", ""
+    return bool(res.ok), str(res.mensagem or ""), str(res.log_diagnostico or "")
+
+
 def _html_kpis_caches_simulacao(agg: dict[str, Any]) -> str:
     pm2_t = html.escape(_fmt_rs_m2_resumo(agg.get("media_pm2")))
     vm_t = html.escape(_fmt_valor_campo("valor_venda", agg.get("media_valor")))
@@ -3710,6 +3745,38 @@ def _render_painel_tabela_leiloes_topo() -> None:
                             except Exception as e:
                                 st.error(str(e))
                                 logger.exception("atualizar leilão tabela solo iid=%s", iid0[:12])
+            if st.button(
+                "Refazer análise (sem Firecrawl)",
+                use_container_width=True,
+                key="lista_topo_refazer_analise_solo",
+                help=(
+                    "Recalcula este leilão desde a montagem de cache usando apenas dados já no Supabase "
+                    "(sem search/scrape no Firecrawl)."
+                ),
+            ):
+                iid0 = str(r0_solo.get("id") or "")
+                if not iid0:
+                    st.error("Registo inválido — recarregue a página.")
+                else:
+                    with st.spinner("Refazendo análise sem Firecrawl…"):
+                        ok_r, msg_r, log_r = _refazer_analise_leilao_sem_firecrawl(iid0, cli)
+                    if ok_r:
+                        st.session_state.pop("_rows_resumo_leiloes", None)
+                        try:
+                            up = leilao_imoveis_repo.buscar_por_id(iid0, cli)
+                            if isinstance(up, dict):
+                                st.session_state["ultimo_extracao"] = up
+                        except Exception:
+                            logger.exception("refresh ultimo após refazer análise (tabela leilões)")
+                        st.success(msg_r or "Análise refeita com sucesso.")
+                        if log_r.strip():
+                            st.caption("Resumo técnico do recálculo:")
+                            st.code(log_r[:3500], language="text")
+                        st.rerun()
+                    else:
+                        st.error(msg_r or "Falha ao refazer análise.")
+                        if log_r.strip():
+                            st.code(log_r[:3500], language="text")
         else:
             st.caption("Selecione um imóvel na tabela (clique numa **linha**) para editar aqui.")
 
