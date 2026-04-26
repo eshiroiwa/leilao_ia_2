@@ -84,6 +84,62 @@ def test_gerar_insights_decisao_retorna_bloco_acionavel():
     assert "tese_acao" in out and out["tese_acao"]
 
 
+def test_gerar_insights_decisao_reage_roi_abaixo_meta():
+    row = {
+        "cidade": "São José do Rio Preto",
+        "bairro": "Vila Esplanada",
+        "tipo_imovel": "casa",
+        "operacao_simulacao_json": {
+            "inputs": {},
+            "outputs": {
+                "roi_bruto": 0.18,
+                "roi_liquido": 0.12,
+                "roi_desejado_pct_informado": 30.0,
+                "roi_desejado_modo_informado": "bruto",
+                "lucro_liquido": -10000.0,
+            },
+        },
+    }
+    qualidade = {
+        "score_qualidade": 74,
+        "n_amostras_cache": 16,
+        "pct_mesmo_bairro": 70.0,
+        "pct_geo_valida": 88.0,
+    }
+    sinais = {"liquidez_bairro": 60, "pressao_concorrencia": 62, "fit_imovel_bairro": 66}
+    out = gerar_insights_decisao(row=row, qualidade=qualidade, sinais=sinais)
+    assert "Descarte recomendado" in out["estrategia_sugerida"] or "Atenção máxima" in out["estrategia_sugerida"]
+    assert any("abaixo" in x.lower() and "meta" in x.lower() for x in out["insights_risco"])
+
+
+def test_gerar_insights_decisao_reage_roi_acima_meta():
+    row = {
+        "cidade": "São José do Rio Preto",
+        "bairro": "Vila Esplanada",
+        "tipo_imovel": "casa",
+        "operacao_simulacao_json": {
+            "inputs": {},
+            "outputs": {
+                "roi_bruto": 0.55,
+                "roi_liquido": 0.45,
+                "roi_desejado_pct_informado": 30.0,
+                "roi_desejado_modo_informado": "bruto",
+                "lucro_liquido": 120000.0,
+            },
+        },
+    }
+    qualidade = {
+        "score_qualidade": 74,
+        "n_amostras_cache": 16,
+        "pct_mesmo_bairro": 70.0,
+        "pct_geo_valida": 88.0,
+    }
+    sinais = {"liquidez_bairro": 70, "pressao_concorrencia": 55, "fit_imovel_bairro": 68}
+    out = gerar_insights_decisao(row=row, qualidade=qualidade, sinais=sinais)
+    assert "Arrematação" in out["estrategia_sugerida"]
+    assert any("meta" in x.lower() and "roi" in x.lower() for x in out["insights_oportunidade"])
+
+
 def test_extrair_sinais_objetivos_decisao_reage_a_insights():
     s = extrair_sinais_objetivos_decisao(
         insights_oportunidade=["Boa liquidez e saída rápida na microrregião."],

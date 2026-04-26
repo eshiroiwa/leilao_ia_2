@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
+from leilao_ia_v2.schemas.operacao_simulacao import parse_operacao_simulacao_json
 from leilao_ia_v2.schemas.relatorio_mercado_contexto import RelatorioMercadoCard
 
 _POPULACAO_CIDADE_APROX: dict[str, str] = {
@@ -381,6 +382,63 @@ def gerar_insights_decisao(
             "Com sinais de liquidez mais fracos, a operação só tende a compensar com entrada muito descontada "
             "e horizonte de saída mais paciente."
         )
+
+    # Conecta recomendação à simulação gravada (quando existir outputs no JSON).
+    doc_sim = parse_operacao_simulacao_json(row.get("operacao_simulacao_json"))
+    out_sim = doc_sim.outputs
+    if out_sim is not None:
+        roi_meta = out_sim.roi_desejado_pct_informado
+        modo_meta = str(out_sim.roi_desejado_modo_informado or "bruto").strip().lower()
+        roi_base = out_sim.roi_liquido if "liqu" in modo_meta else out_sim.roi_bruto
+        lucro_liq = float(out_sim.lucro_liquido or 0.0)
+        if roi_meta is not None and roi_base is not None:
+            alvo = float(roi_meta) / 100.0
+            obt = float(roi_base)
+            razao = (obt / alvo) if alvo > 0 else 0.0
+            if razao < 0.80:
+                riscos.insert(
+                    0,
+                    f"ROI {'líquido' if 'liqu' in modo_meta else 'bruto'} da simulação fica abaixo de 80% da meta ({obt*100:.1f}% vs alvo {alvo*100:.1f}%).",
+                )
+                estrategia = "Descarte recomendado (ou rever teto de lance de forma relevante)."
+                tese = (
+                    "A simulação gravada não atinge o retorno mínimo desejado. "
+                    "A operação só deveria seguir com redução material do preço de entrada ou mudança de estratégia."
+                )
+            elif razao < 1.00:
+                riscos.insert(
+                    0,
+                    f"ROI da simulação ainda abaixo da meta ({obt*100:.1f}% vs alvo {alvo*100:.1f}%).",
+                )
+                estrategia = "Atenção máxima: só seguir com ajuste de entrada e diligência reforçada."
+                tese = (
+                    "Retorno projetado abaixo do alvo. Recomendação é cautela forte: "
+                    "revisar preço, custos e premissas de saída antes de arrematar."
+                )
+            elif razao <= 1.30:
+                oportunidades.insert(
+                    0,
+                    f"Simulação gravada atinge a meta de ROI ({obt*100:.1f}% para alvo {alvo*100:.1f}%).",
+                )
+                estrategia = "Arrematação viável com cautelas operacionais."
+                tese = (
+                    "Retorno está em faixa aceitável frente à meta definida. "
+                    "A recomendação é seguir com disciplina de execução e controle de riscos."
+                )
+            else:
+                oportunidades.insert(
+                    0,
+                    f"Simulação supera com folga a meta de ROI ({obt*100:.1f}% para alvo {alvo*100:.1f}%).",
+                )
+                estrategia = "Arrematação recomendada; pode tolerar risco moderado adicional com controle."
+                tese = (
+                    "Com ROI projetado muito acima da meta, há espaço para assumir risco moderado adicional "
+                    "desde que riscos jurídicos e de saída permaneçam monitorados."
+                )
+        if lucro_liq > 0:
+            oportunidades.append(f"Lucro líquido projetado positivo na simulação: R$ {lucro_liq:,.2f}.".replace(",", "X").replace(".", ",").replace("X", "."))
+        elif out_sim is not None:
+            riscos.append("Lucro líquido projetado não positivo na simulação gravada.")
 
     return {
         "insights_oportunidade": oportunidades[:5],
