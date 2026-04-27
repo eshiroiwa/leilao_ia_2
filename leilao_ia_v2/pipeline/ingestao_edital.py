@@ -29,6 +29,7 @@ from leilao_ia_v2.normalizacao import (
 )
 from leilao_ia_v2.persistence import leilao_imoveis_repo
 from leilao_ia_v2.schemas.edital import ExtracaoEditalLLM, LeilaoExtraJson
+from leilao_ia_v2.comparaveis import integracao as comparaveis_integracao
 from leilao_ia_v2.services import comparaveis_pos_ingestao, extracao_edital_llm, firecrawl_edital, pii_sanitizer
 from leilao_ia_v2.services.cache_media_leilao import formatar_log_pos_cache, resolver_cache_media_pos_ingestao
 from leilao_ia_v2.services.markdown_foto_imovel import extrair_url_foto_imovel_markdown
@@ -371,7 +372,7 @@ def executar_ingestao_edital(
         budget_fc = int(get_busca_mercado_parametros().max_firecrawl_creditos_analise)
         restante_fc = max(0, budget_fc - int(n_fc_edital))
         try:
-            summ = comparaveis_pos_ingestao.executar_comparaveis_apos_ingestao_leilao(
+            summ = comparaveis_integracao.executar_comparaveis_pos_ingestao(
                 client,
                 leilao_imovel_id=imovel_id,
                 extn=extn,
