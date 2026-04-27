@@ -21,7 +21,7 @@ _RE_MD_LINK = re.compile(r"\[([^\]]{0,400})\]\((https?://[^)\s]{8,800})\)")
 _RE_ANGLE_LINK = re.compile(r"<(https?://[^>\s]{10,800})>")
 _RE_HTTP = re.compile(r"https?://[^\s\)\]\"'<>]+", re.I)
 _RE_JSON_URL = re.compile(
-    r'"(?:url|link|@id|canonicalUrl|shareUrl)"\s*:\s*"(https?://(?:www\.)?(?:zapimoveis|quintoandar|imovelweb|chavesnamao|olx|loft|vivareal)\.com\.br[^"]{8,800})"',
+    r'"(?:url|link|@id|canonicalUrl|shareUrl)"\s*:\s*"(https?://(?:www\.)?(?:zapimoveis|quintoandar|imovelweb|chavesnamao|olx|loft|vivareal|kenlo)\.com\.br[^"]{8,800})"',
     re.I,
 )
 _RE_PRECO = re.compile(r"R\$\s*([\d]{1,3}(?:\.\d{3})*(?:,\d{2})?|\d+(?:,\d{2})?)", re.I)
@@ -228,6 +228,8 @@ def _parece_url_de_anuncio(url: str) -> bool:
         return True
     if "loft.com.br" in u and "/imovel/" in u:
         return True
+    if "kenlo.com.br" in u and ("/imovel/" in u or "/imoveis/" in u):
+        return True
     return False
 
 
@@ -333,6 +335,19 @@ def _titulo_heuristico_proximo(md: str, pos: int, url: str) -> str:
     return ""
 
 
+def _titulo_alt_imagem_proximo(md: str, pos: int) -> str:
+    """Tenta usar ALT da imagem próxima ao URL quando link textual é ruim (ex.: 'Mensagem')."""
+    i0 = max(0, pos - 280)
+    i1 = min(len(md), pos + 260)
+    jan = md[i0:i1]
+    m = re.search(r"!\[([^\]]{8,220})\]", jan)
+    if not m:
+        return ""
+    alt = " ".join(str(m.group(1) or "").split()).strip()
+    alt = re.sub(r"^\s*(mensagem|contatar|ver telefone)\s*$", "", alt, flags=re.I).strip()
+    return alt[:500]
+
+
 def _titulo_sem_valor_monetario_prefixo(titulo: str) -> str:
     """Evita usar título que começa com preço como se fosse logradouro."""
     t = (titulo or "").strip()
@@ -393,7 +408,11 @@ def _card_de_url_janela(
     """Extrai um card se, na vizinhança da URL, existirem R$ e m² válidos."""
     i0, i1 = _limites_janela_card(md, pos, url)
     janela = md[i0:i1]
-    titulo = (titulo_ini or "").strip() or _titulo_heuristico_proximo(md, pos, url)
+    titulo = (titulo_ini or "").strip()
+    if re.fullmatch(r"(?i)\s*(mensagem|contatar|ver telefone|mensagem\]\(?\s*)\s*", titulo or ""):
+        titulo = ""
+    if not titulo:
+        titulo = _titulo_alt_imagem_proximo(md, pos) or _titulo_heuristico_proximo(md, pos, url)
 
     url_in_janela = pos - i0
     portal = _portal_de_url(url)

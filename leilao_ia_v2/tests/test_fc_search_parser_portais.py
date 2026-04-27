@@ -262,6 +262,31 @@ def test_loft_ignora_preco_similares_antes_do_link():
     assert cards[0]["area_m2"] == 78.0
 
 
+def test_kenlo_imovel_bare_url_com_preco_area():
+    md = "https://portal.kenlo.com.br/imovel/taubate/casa-condominio-villagio 120 m² R$ 780.000"
+    cards = extrair_anuncios_markdown_generico(
+        md, cidade_ref="Taubaté", estado_ref="SP", bairro_ref="Chácara do Visconde"
+    )
+    assert len(cards) == 1
+    assert "kenlo.com.br" in cards[0]["url_anuncio"]
+    assert cards[0]["area_m2"] == 120.0
+    assert cards[0]["valor_venda"] == 780_000.0
+
+
+def test_parser_titulo_fallback_quando_link_mensagem():
+    md = """
+R$ 530.000
+[Mensagem](https://www.zapimoveis.com.br/imovel/venda-casa-taubate-sp-120m2-id-1/)
+![Casa de condomínio com 3 quartos em Taubaté](https://img.exemplo/foto.jpg)
+120 m²
+"""
+    cards = extrair_anuncios_markdown_generico(
+        md, cidade_ref="Taubaté", estado_ref="SP", bairro_ref="Centro"
+    )
+    assert len(cards) == 1
+    assert "mensagem" not in str(cards[0].get("titulo") or "").lower()
+
+
 def test_zap_usa_linha_rua_no_markdown_nao_slug_seo():
     md = """
     https://www.zapimoveis.com.br/imovel/venda-apartamento-jardim-paulista-campinas-990011

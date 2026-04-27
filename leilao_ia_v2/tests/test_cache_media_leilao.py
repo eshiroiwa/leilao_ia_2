@@ -32,6 +32,65 @@ def test_filtrar_amostras_tres_dentro_raio():
     assert len(out) == 3
 
 
+def test_filtrar_amostras_prioriza_empreendimento_e_relaxa_faixa_area():
+    ref_lat, ref_lon = -23.01, -45.57
+    c1 = _anuncio(1, -23.011, -45.571, 300.0, 1_000_000)
+    c1["titulo"] = "Casa no Condomínio Residencial Villagio Di Itália"
+    c2 = _anuncio(2, -23.0105, -45.5705, 90.0, 450_000)
+    c2["titulo"] = "Casa em bairro próximo"
+    out = cml._filtrar_amostras(
+        [c2, c1],
+        ref_lat,
+        ref_lon,
+        88.3,
+        raio_km=6.0,
+        aplicar_faixa_area_edital=True,
+        empreendimento_referencia="Condomínio Residencial Villagio Di Itália",
+    )
+    ids = [str(x.get("id")) for x in out]
+    assert ids[0] == "id-1"
+
+
+def test_filtrar_amostras_mesmo_empreendimento_aceita_sem_coordenadas():
+    ref_lat, ref_lon = -23.01, -45.57
+    c1 = _anuncio(1, None, None, 310.0, 1_050_000)
+    c1["titulo"] = "Casa no Condomínio Residencial Villagio Di Itália"
+    out = cml._filtrar_amostras(
+        [c1],
+        ref_lat,
+        ref_lon,
+        88.3,
+        raio_km=6.0,
+        aplicar_faixa_area_edital=True,
+        empreendimento_referencia="Condomínio Residencial Villagio Di Itália",
+    )
+    assert len(out) == 1
+
+
+def test_leilao_indica_condominio_ignora_texto_juridico_padrao():
+    le = {
+        "descricao": "",
+        "endereco": "",
+        "leilao_extra_json": {
+            "observacoes_markdown": (
+                "REGRAS PARA PAGAMENTO DAS DESPESAS (caso existam):\n"
+                "Condomínio: Sob responsabilidade do comprador, até o limite de 10%.\n"
+                "Tributos: Sob responsabilidade do comprador."
+            )
+        },
+    }
+    assert cml._leilao_indica_condominio(le) is False
+
+
+def test_leilao_indica_condominio_quando_nome_real_presente():
+    le = {
+        "descricao": "Casa em condomínio residencial Villagio di Italia",
+        "endereco": "",
+        "leilao_extra_json": {},
+    }
+    assert cml._leilao_indica_condominio(le) is True
+
+
 def test_selecionar_amostras_apoio_escala_menor():
     ref = 250.0
     cands = [
@@ -108,6 +167,17 @@ def test_sanear_amostras_remove_inconsistente_e_duplicado():
     out = cml._sanear_amostras_para_cache([a1, a2, a3], [])
     assert len(out) == 1
     assert out[0]["id"] == "id-1"
+
+
+def test_sanear_amostras_pode_preservar_similares_sem_dedupe():
+    a1 = _anuncio(1, -30.03, -51.22, 100.0, 400_000)
+    a2 = dict(a1)
+    a2["id"] = "id-2"
+    a2["url_anuncio"] = "https://www.vivareal.com.br/dup-2"
+    a2["area_construida_m2"] = 101.0
+    a2["valor_venda"] = 401_000
+    out = cml._sanear_amostras_para_cache([a1, a2], [], deduplicar_similares=False)
+    assert len(out) == 2
 
 
 def test_sanear_amostras_remove_outliers_extremos():
@@ -429,8 +499,50 @@ def test_ordenar_amostras_para_cache_principal_prioriza_distancia_e_qualidade_ge
         area_ref=0.0,
     )
     ids = [str(x.get("id")) for x in out]
-    assert ids[:3] == ["a2", "a3", "a1"]
-    assert ids[-1] == "a4"
+    assert ids == ["a2", "a4", "a3", "a1"]
+
+
+def test_ordenar_amostras_para_cache_principal_modo_legado_prioriza_bairro():
+    ads = [
+        {"id": "a1", "bairro": "Centro", "latitude": -30.05, "longitude": -51.25, "area_construida_m2": 100.0},
+        {"id": "a2", "bairro": "Outro", "latitude": -30.031, "longitude": -51.221, "area_construida_m2": 100.0},
+    ]
+    out = cml._ordenar_amostras_para_cache_principal(
+        ads,
+        bairro_referencia="Centro",
+        lat0=-30.03,
+        lon0=-51.22,
+        area_ref=0.0,
+        geo_first_enabled=False,
+    )
+    ids = [str(x.get("id")) for x in out]
+    assert ids == ["a1", "a2"]
+
+
+def test_flag_por_cidade_modo_piloto():
+    with patch.dict("os.environ", {"CACHE_GEO_FIRST_ENABLED": "pilot"}, clear=False):
+        assert cml._cache_geo_first_enabled("Taubaté") is True
+        assert cml._cache_geo_first_enabled("Curitiba") is False
+
+
+def test_garantir_bairro_canonico_leilao_persiste_em_extra():
+    cli = MagicMock()
+    leilao = {
+        "id": "L1",
+        "cidade": "Taubaté",
+        "bairro": "Chacara do Visconde",
+        "leilao_extra_json": {},
+    }
+    with patch("leilao_ia_v2.services.cache_media_leilao._bairro_canonico_enabled", return_value=True):
+        with patch(
+            "leilao_ia_v2.services.cache_media_leilao.reverse_geocodificar_bairro",
+            return_value=("Chácara do Visconde", "nominatim_reverse"),
+        ):
+            with patch("leilao_ia_v2.services.cache_media_leilao.leilao_imoveis_repo.atualizar_leilao_imovel") as upd:
+                b_inf, b_ref = cml._garantir_bairro_canonico_leilao(cli, leilao, lat0=-23.0, lon0=-45.5)
+    assert b_inf == "Chacara do Visconde"
+    assert "visconde" in b_ref.lower()
+    upd.assert_called_once()
 
 
 def test_fatias_amostras_cache():

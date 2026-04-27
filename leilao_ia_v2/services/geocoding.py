@@ -209,6 +209,93 @@ def _geocode_structured_by_provider(street: str, city: str, state: str) -> Optio
     return _geocode_structured_cached(street, city, state)
 
 
+def _reverse_geocode_google_bairro(lat: float, lon: float) -> Optional[str]:
+    key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
+    if not key:
+        return None
+    params = urllib.parse.urlencode(
+        {
+            "latlng": f"{lat:.7f},{lon:.7f}",
+            "key": key,
+            "language": "pt-BR",
+            "result_type": "neighborhood|sublocality|sublocality_level_1|administrative_area_level_3",
+        }
+    )
+    req = urllib.request.Request(
+        f"{_GOOGLE_GEOCODE_URL}?{params}",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        status = str(data.get("status") or "").strip().upper()
+        if status != "OK":
+            return None
+        for r in list(data.get("results") or []):
+            for comp in list(r.get("address_components") or []):
+                types = {str(t).strip().lower() for t in list(comp.get("types") or [])}
+                if not types:
+                    continue
+                if types & {"neighborhood", "sublocality", "sublocality_level_1", "administrative_area_level_3"}:
+                    nome = str(comp.get("long_name") or comp.get("short_name") or "").strip()
+                    if nome:
+                        return nome
+    except Exception:
+        logger.debug("Google reverse geocoding falhou", exc_info=True)
+    return None
+
+
+def _reverse_geocode_nominatim_bairro(lat: float, lon: float) -> Optional[str]:
+    _rate_limit()
+    try:
+        loc = _get_geocoder().reverse(
+            (float(lat), float(lon)),
+            language="pt-BR",
+            zoom=18,
+            addressdetails=True,
+        )
+    except (GeocoderTimedOut, GeocoderUnavailable, GeocoderServiceError, ValueError, TypeError):
+        logger.debug("Nominatim reverse geocoding falhou", exc_info=True)
+        return None
+    if not loc:
+        return None
+    raw = getattr(loc, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+    addr = raw.get("address")
+    if not isinstance(addr, dict):
+        return None
+    for k in ("suburb", "neighbourhood", "neighborhood", "city_district", "residential"):
+        nome = str(addr.get(k) or "").strip()
+        if nome:
+            return nome
+    return None
+
+
+def reverse_geocodificar_bairro(lat: float, lon: float) -> tuple[Optional[str], str]:
+    """
+    Descobre bairro canônico por coordenada.
+    Retorna (bairro, fonte), com fonte em {"google_reverse", "nominatim_reverse", ""}.
+    """
+    provider = (os.getenv("GEOCODING_PROVIDER") or "nominatim").strip().lower()
+    if provider == "google":
+        nome = _reverse_geocode_google_bairro(lat, lon)
+        if nome:
+            return nome, "google_reverse"
+        nome = _reverse_geocode_nominatim_bairro(lat, lon)
+        if nome:
+            return nome, "nominatim_reverse"
+        return None, ""
+    nome = _reverse_geocode_nominatim_bairro(lat, lon)
+    if nome:
+        return nome, "nominatim_reverse"
+    nome = _reverse_geocode_google_bairro(lat, lon)
+    if nome:
+        return nome, "google_reverse"
+    return None, ""
+
+
 _UF_PARA_NOME_ESTADO: dict[str, str] = {
     "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
     "BA": "Bahia", "CE": "Ceará", "DF": "Distrito Federal",

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from supabase import Client
@@ -206,4 +207,9 @@ def executar_comparaveis_apos_ingestao_leilao(
         "markdown_insuficiente": not salvos_fc,
         "firecrawl_chamadas_api": int(n_api or 0),
         "diagnostico_firecrawl_search": str(diag_fc or "").strip(),
+        "falha_por_filtros_persistencia": (
+            int(salvos_fc or 0) == 0
+            and bool(re.search(r"persistencia:\s*cards_recebidos=\d+", str(diag_fc or ""), re.I))
+            and bool(re.search(r"descartes_total=(?!0)\\d+", str(diag_fc or ""), re.I))
+        ),
     }

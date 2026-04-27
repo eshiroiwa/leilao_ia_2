@@ -44,7 +44,11 @@ from leilao_ia_v2.normalizacao import (
 )
 from leilao_ia_v2.persistence import anuncios_mercado_repo, cache_media_bairro_repo, leilao_imoveis_repo
 from leilao_ia_v2.services.exclusao_cache_listagem_leilao import filtrar_anuncios_mantendo_apenas_mercado_comparavel
-from leilao_ia_v2.services.geocoding import geocodificar_anuncios_batch, geocodificar_endereco
+from leilao_ia_v2.services.geocoding import (
+    geocodificar_anuncios_batch,
+    geocodificar_endereco,
+    reverse_geocodificar_bairro,
+)
 from leilao_ia_v2.services.geo_medicao import coords_de_anuncio, geo_bucket_de_coords, haversine_km
 from leilao_ia_v2.vivareal.slug import slug_vivareal
 from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
@@ -96,6 +100,9 @@ CACHE_APOIO_ESCALA_MENOR_MIN = 0.60
 CACHE_APOIO_ESCALA_MENOR_MAX = 0.95
 CACHE_APOIO_ESCALA_MAIOR_MIN = 1.05
 CACHE_APOIO_ESCALA_MAIOR_MAX = 1.60
+RAIO_EXPANSAO_GEO_FIRST_MEDIO_KM = 10.0
+RAIO_EXPANSAO_GEO_FIRST_MAX_KM = 15.0
+_CIDADES_PILOTO_GEO_FIRST: frozenset[str] = frozenset({"taubate", "aparecida"})
 # Distribuição de metragem para liquidez (aviso de outlier da região).
 LIQ_METRAGEM_MIN_AMOSTRAS = 20
 LIQ_METRAGEM_MAX_FIRECRAWL_CREDITOS = 4
@@ -110,6 +117,42 @@ def _float_positivo(v: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return x if x > 0 else None
+
+
+def _env_flag_bool(nome: str, default: bool) -> bool:
+    raw = str(os.getenv(nome, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "y", "on", "sim"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "nao", "não"}:
+        return False
+    return bool(default)
+
+
+def _cidade_rollout_slug(cidade: str) -> str:
+    return _slug_fold(cidade).replace("-", "")
+
+
+def _flag_por_cidade(nome: str, cidade: str, *, default: bool) -> bool:
+    raw = str(os.getenv(nome, "") or "").strip().lower()
+    if raw in {"pilot", "piloto"}:
+        return _cidade_rollout_slug(cidade) in _CIDADES_PILOTO_GEO_FIRST
+    return _env_flag_bool(nome, default)
+
+
+def _cache_geo_first_enabled(cidade: str) -> bool:
+    return _flag_por_cidade("CACHE_GEO_FIRST_ENABLED", cidade, default=True)
+
+
+def _cache_radius_expansion_enabled(cidade: str) -> bool:
+    return _cache_geo_first_enabled(cidade) and _flag_por_cidade(
+        "CACHE_RADIUS_EXPANSION_ENABLED", cidade, default=True
+    )
+
+
+def _bairro_canonico_enabled(cidade: str) -> bool:
+    return _flag_por_cidade("BAIRRO_CANONICO_ENABLED", cidade, default=False)
 
 
 def _host_url(u: str) -> str:
@@ -387,13 +430,21 @@ def _remover_extremos_estatisticos(
     return filtradas, n_drop
 
 
-def _sanear_amostras_para_cache(amostras: list[dict[str, Any]], linhas: list[str] | None = None) -> list[dict[str, Any]]:
+def _sanear_amostras_para_cache(
+    amostras: list[dict[str, Any]],
+    linhas: list[str] | None = None,
+    *,
+    deduplicar_similares: bool = True,
+) -> list[dict[str, Any]]:
     n0 = len(amostras)
     if n0 == 0:
         return amostras
     sem_incons = [a for a in amostras if not _preco_anuncio_inconsistente(a)]
     n_inc = n0 - len(sem_incons)
-    dedup, n_dup_url, n_dup_fuzzy = _deduplicar_amostras_similares(sem_incons)
+    if deduplicar_similares:
+        dedup, n_dup_url, n_dup_fuzzy = _deduplicar_amostras_similares(sem_incons)
+    else:
+        dedup, n_dup_url, n_dup_fuzzy = sem_incons, 0, 0
     sem_extremos, n_out = _remover_extremos_estatisticos(dedup, linhas)
     if linhas is not None and (n_inc > 0 or n_dup_url > 0 or n_dup_fuzzy > 0 or n_out > 0):
         linhas.append(
@@ -811,6 +862,238 @@ def _coords_leilao(leilao: dict[str, Any]) -> Optional[tuple[float, float]]:
         return None
 
 
+def _normalizar_lista_alias_bairro(v: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(v, list):
+        vals = v
+    elif isinstance(v, str) and v.strip():
+        vals = [x.strip() for x in v.split(",")]
+    else:
+        vals = []
+    seen: set[str] = set()
+    for x in vals:
+        sx = str(x or "").strip()
+        if not sx:
+            continue
+        key = _bairro_normalizado_para_match(sx)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(sx)
+    return out
+
+
+def _normalizar_nome_empreendimento(v: Any) -> str:
+    s = " ".join(str(v or "").strip().split())
+    if not s:
+        return ""
+    s = re.sub(r"(?i)^(condom[ií]nio|edif[ií]cio|pr[eé]dio)\s+", "", s).strip()
+    s = re.sub(r"\s{2,}", " ", s).strip(" -,:;.")
+    return s[:160]
+
+
+def _texto_boilerplate_condominio(s: str) -> bool:
+    t = str(s or "").lower()
+    if not t:
+        return False
+    termos = (
+        "regras para pagamento",
+        "despesas",
+        "sob responsabilidade do comprador",
+        "a caixa realizará o pagamento",
+        "limite de 10%",
+        "valor de avaliação",
+        "tributos",
+    )
+    return any(k in t for k in termos)
+
+
+def _nome_empreendimento_valido(v: Any) -> str:
+    s = _normalizar_nome_empreendimento(v)
+    if not s or len(s) < 4:
+        return ""
+    if _texto_boilerplate_condominio(s):
+        return ""
+    return s
+
+
+def _nome_empreendimento_leilao(leilao: dict[str, Any]) -> str:
+    extra = _parse_extra(leilao)
+    for k in (
+        "nome_condominio",
+        "condominio",
+        "nome_predio",
+        "predio",
+        "nome_edificio",
+        "edificio",
+        "nome_empreendimento",
+        "empreendimento",
+    ):
+        v = _nome_empreendimento_valido(extra.get(k) or leilao.get(k))
+        if v:
+            return v
+    textos = [
+        str(extra.get("observacoes_markdown") or "").strip(),
+        str(leilao.get("endereco") or "").strip(),
+        str(leilao.get("descricao") or "").strip(),
+    ]
+    for obs in textos:
+        if not obs:
+            continue
+        for ln in obs.splitlines():
+            s = " ".join(str(ln or "").strip().split())
+            if len(s) < 8:
+                continue
+            if re.search(r"(?i)\b(condom[ií]nio|edif[ií]cio|pr[eé]dio)\b", s):
+                m = re.search(r"(?i)\b(condom[ií]nio|edif[ií]cio|pr[eé]dio)\b\s*[:\-]?\s*(.+)$", s)
+                if m:
+                    c = _nome_empreendimento_valido(m.group(2) or s)
+                    if c:
+                        return c
+                c2 = _nome_empreendimento_valido(s)
+                if c2:
+                    return c2
+    return ""
+
+
+def _leilao_indica_condominio(leilao: dict[str, Any]) -> bool:
+    if _nome_empreendimento_leilao(leilao):
+        return True
+    extra = _parse_extra(leilao)
+    blob = " ".join(
+        str(x or "")
+        for x in (
+            leilao.get("endereco"),
+            leilao.get("descricao"),
+            extra.get("observacoes_markdown"),
+            extra.get("edital_resumo"),
+            leilao.get("edital_markdown"),
+        )
+    )
+    if _texto_boilerplate_condominio(blob):
+        return False
+    b = blob.lower()
+    # Evita falso positivo de texto jurídico "Condomínio: sob responsabilidade..."
+    if re.search(r"(?i)\bcondom[ií]nio\s*:", b):
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b(condom[ií]nio\s+(residencial|fechado|[a-z0-9]))\b",
+            b,
+        )
+        or re.search(r"(?i)\bcasa\s+em\s+condom[ií]nio\b", b)
+    )
+
+
+def _texto_norm_match(v: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _slug_fold(v))
+
+
+def _anuncio_match_empreendimento(anuncio: dict[str, Any], nome_empreendimento_ref: str) -> bool:
+    ref = _normalizar_nome_empreendimento(nome_empreendimento_ref)
+    if not ref:
+        return False
+    ref_n = _texto_norm_match(ref)
+    if len(ref_n) < 6:
+        return False
+    md = _metadados_anuncio_como_dict(anuncio)
+    blobs = [
+        anuncio.get("titulo"),
+        anuncio.get("url_anuncio"),
+        anuncio.get("logradouro"),
+        anuncio.get("bairro"),
+        md.get("nome_empreendimento"),
+        md.get("condominio"),
+        md.get("nome_condominio"),
+    ]
+    txt = _texto_norm_match(" ".join(str(x or "") for x in blobs))
+    if not txt:
+        return False
+    if ref_n in txt:
+        return True
+    toks = [
+        _texto_norm_match(t)
+        for t in re.split(r"\s+", ref)
+        if _texto_norm_match(t)
+        and _texto_norm_match(t)
+        not in {"condominio", "residencial", "predio", "edificio", "torre", "bloco", "vila"}
+    ]
+    if not toks:
+        return False
+    hit = sum(1 for t in toks if t and t in txt)
+    return hit >= min(2, len(toks))
+
+
+def _garantir_bairro_canonico_leilao(
+    client: Client,
+    leilao: dict[str, Any],
+    *,
+    lat0: float,
+    lon0: float,
+) -> tuple[str, str]:
+    """
+    Mantém trilha de bairro informado/canônico em ``leilao_extra_json``.
+    Retorna (bairro_informado, bairro_referencia_cache), sem sobrescrever silenciosamente
+    o campo textual principal do leilão.
+    """
+    bairro_informado = str(leilao.get("bairro") or "").strip()
+    cidade = str(leilao.get("cidade") or "").strip()
+    if not _bairro_canonico_enabled(cidade):
+        return bairro_informado, bairro_informado
+    extra = _parse_extra(leilao)
+    mudou = False
+    if str(extra.get("bairro_informado") or "").strip() != bairro_informado:
+        extra["bairro_informado"] = bairro_informado
+        mudou = True
+    aliases = _normalizar_lista_alias_bairro(extra.get("bairro_aliases"))
+    nome_rev, fonte_rev = reverse_geocodificar_bairro(lat0, lon0)
+    bairro_canonico = str(extra.get("bairro_canonico") or "").strip()
+    if nome_rev:
+        if nome_rev != bairro_canonico:
+            extra["bairro_canonico"] = nome_rev
+            bairro_canonico = nome_rev
+            mudou = True
+        if fonte_rev:
+            if str(extra.get("fonte_canonica_bairro") or "").strip() != fonte_rev:
+                extra["fonte_canonica_bairro"] = fonte_rev
+                mudou = True
+    alias_norm = {_bairro_normalizado_para_match(x) for x in aliases}
+    for v in (bairro_informado, bairro_canonico):
+        sv = str(v or "").strip()
+        if not sv:
+            continue
+        k = _bairro_normalizado_para_match(sv)
+        if not k:
+            continue
+        if k not in alias_norm:
+            aliases.append(sv)
+            alias_norm.add(k)
+            mudou = True
+    if aliases != _normalizar_lista_alias_bairro(extra.get("bairro_aliases")):
+        extra["bairro_aliases"] = aliases
+        mudou = True
+    if bairro_informado and bairro_canonico:
+        diverge = _bairro_normalizado_para_match(bairro_informado) != _bairro_normalizado_para_match(bairro_canonico)
+        if bool(extra.get("bairro_canonico_divergente")) != bool(diverge):
+            extra["bairro_canonico_divergente"] = bool(diverge)
+            mudou = True
+    if mudou:
+        try:
+            leilao_imoveis_repo.atualizar_leilao_imovel(str(leilao.get("id") or ""), {"leilao_extra_json": extra}, client)
+            leilao["leilao_extra_json"] = extra
+        except Exception:
+            logger.exception("Falha ao persistir bairro canônico do leilão")
+    bairro_ref = bairro_canonico or bairro_informado
+    return bairro_informado, bairro_ref
+
+
+def _bairro_referencia_cache_leilao(leilao: dict[str, Any]) -> str:
+    extra = _parse_extra(leilao)
+    b_can = str(extra.get("bairro_canonico") or "").strip()
+    b_inf = str(extra.get("bairro_informado") or leilao.get("bairro") or "").strip()
+    return b_can or b_inf
+
+
 def _tipos_somente_terreno_ou_lote(tipos: list[str]) -> bool:
     ts = {str(t).strip().lower() for t in tipos if str(t).strip()}
     return bool(ts) and ts <= {"terreno", "lote"}
@@ -824,29 +1107,34 @@ def _filtrar_amostras(
     *,
     raio_km: float,
     aplicar_faixa_area_edital: bool = True,
+    empreendimento_referencia: str = "",
 ) -> list[dict[str, Any]]:
     bp = get_busca_mercado_parametros()
-    scored: list[tuple[dict[str, Any], float, float]] = []
+    scored: list[tuple[dict[str, Any], float, float, float]] = []
     for r in candidatos:
+        emp_pen = 0.0 if _anuncio_match_empreendimento(r, empreendimento_referencia) else 1.0
         la, lo = coords_de_anuncio(r)
         if la is None or lo is None:
-            continue
-        d = haversine_km(lat0, lon0, float(la), float(lo))
-        if d > float(raio_km):
-            continue
+            if emp_pen > 0.0:
+                continue
+            d = 0.0
+        else:
+            d = haversine_km(lat0, lon0, float(la), float(lo))
+            if d > float(raio_km):
+                continue
         try:
             am = float(r.get("area_construida_m2") or 0)
         except (TypeError, ValueError):
             continue
         if am <= 0:
             continue
-        if aplicar_faixa_area_edital and area_ref > 0:
+        if aplicar_faixa_area_edital and area_ref > 0 and emp_pen > 0.0:
             lo_a, hi_a = bp.area_fator_min * area_ref, bp.area_fator_max * area_ref
             if not (lo_a <= am <= hi_a):
                 continue
-        delta_a = abs(am - area_ref) if area_ref > 0 and aplicar_faixa_area_edital else 0.0
-        scored.append((r, d, delta_a))
-    scored.sort(key=lambda x: (x[1], x[2]))
+        delta_a = abs(am - area_ref) if (area_ref > 0 and aplicar_faixa_area_edital and emp_pen > 0.0) else 0.0
+        scored.append((r, emp_pen, d, delta_a))
+    scored.sort(key=lambda x: (x[1], x[2], x[3]))
     return [t[0] for t in scored]
 
 
@@ -928,6 +1216,9 @@ def _diagnostico_filtro_amostras(
     raio_km: float,
     etiqueta: str,
     aplicar_faixa_area_edital: bool = True,
+    bairro_informado: str = "",
+    bairro_canonico: str = "",
+    empreendimento_referencia: str = "",
 ) -> str:
     """Contagens alinhadas à ordem de exclusão de ``_filtrar_amostras`` (para log em ``ultima_ingestao_log_text``)."""
     bp = get_busca_mercado_parametros()
@@ -937,6 +1228,12 @@ def _diagnostico_filtro_amostras(
     n_area_parse_err = 0
     n_area_zero = 0
     n_fora_faixa_area = 0
+    n_mesmo_empreendimento = 0
+    ids_fora_raio: list[str] = []
+    ids_fora_faixa: list[str] = []
+    ids_area_zero: list[str] = []
+    ids_area_parse_err: list[str] = []
+    ids_sem_coord: list[str] = []
     dists: list[float] = []
     dists_fora_raio: list[float] = []
     lo_a = hi_a = None
@@ -945,26 +1242,49 @@ def _diagnostico_filtro_amostras(
 
     for r in candidatos:
         la, lo = coords_de_anuncio(r)
+        rid = str(r.get("id") or r.get("url_anuncio") or "-")
+        eh_mesmo_emp = _anuncio_match_empreendimento(r, empreendimento_referencia)
+        if eh_mesmo_emp:
+            n_mesmo_empreendimento += 1
         if la is None or lo is None:
-            n_sem_coord += 1
-            continue
-        d = haversine_km(lat0, lon0, float(la), float(lo))
+            if not eh_mesmo_emp:
+                n_sem_coord += 1
+                if len(ids_sem_coord) < 5:
+                    ids_sem_coord.append(rid)
+                continue
+            d = 0.0
+        else:
+            d = haversine_km(lat0, lon0, float(la), float(lo))
         dists.append(d)
         if d > float(raio_km):
             n_fora_raio += 1
             dists_fora_raio.append(d)
+            if len(ids_fora_raio) < 5:
+                ids_fora_raio.append(rid)
             continue
         try:
             am = float(r.get("area_construida_m2") or 0)
         except (TypeError, ValueError):
             n_area_parse_err += 1
+            if len(ids_area_parse_err) < 5:
+                ids_area_parse_err.append(rid)
             continue
         if am <= 0:
             n_area_zero += 1
+            if len(ids_area_zero) < 5:
+                ids_area_zero.append(rid)
             continue
-        if aplicar_faixa_area_edital and area_ref > 0 and lo_a is not None and hi_a is not None:
+        if (
+            aplicar_faixa_area_edital
+            and area_ref > 0
+            and lo_a is not None
+            and hi_a is not None
+            and not eh_mesmo_emp
+        ):
             if not (lo_a <= am <= hi_a):
                 n_fora_faixa_area += 1
+                if len(ids_fora_faixa) < 5:
+                    ids_fora_faixa.append(rid)
                 continue
 
     n_pass = len(
@@ -975,6 +1295,7 @@ def _diagnostico_filtro_amostras(
             area_ref,
             raio_km=raio_km,
             aplicar_faixa_area_edital=aplicar_faixa_area_edital,
+            empreendimento_referencia=empreendimento_referencia,
         )
     )
     d_min = min(dists) if dists else None
@@ -982,11 +1303,31 @@ def _diagnostico_filtro_amostras(
     dr_min = min(dists_fora_raio) if dists_fora_raio else None
     dr_max = max(dists_fora_raio) if dists_fora_raio else None
 
+    def _pct(x: int) -> float:
+        return (100.0 * float(x) / float(n_total)) if n_total > 0 else 0.0
+
+    b_inf = _bairro_normalizado_para_match(bairro_informado)
+    b_can = _bairro_normalizado_para_match(bairro_canonico)
+    n_mesmo_b_inf = 0
+    n_mesmo_b_can = 0
+    for r in candidatos:
+        b = _bairro_normalizado_para_match(r.get("bairro"))
+        if b_inf and b == b_inf:
+            n_mesmo_b_inf += 1
+        if b_can and b == b_can:
+            n_mesmo_b_can += 1
+
     lines = [
         f"{etiqueta}: total_bd={n_total} | passam_filtro={n_pass}",
         (
             f"  excluídos: sem_coord={n_sem_coord} | distância>{raio_km}km={n_fora_raio} | "
             f"área_parse_erro={n_area_parse_err} | área<=0={n_area_zero} | fora_faixa_m²={n_fora_faixa_area}"
+        ),
+        (
+            f"  taxas: sem_coord={_pct(n_sem_coord):.1f}% | dentro_raio={_pct(max(0, n_total - n_fora_raio - n_sem_coord)):.1f}% | "
+            f"mesmo_bairro_informado={_pct(n_mesmo_b_inf):.1f}%"
+            + (f" | mesmo_bairro_canonico={_pct(n_mesmo_b_can):.1f}%" if b_can else "")
+            + (f" | mesmo_empreendimento={_pct(n_mesmo_empreendimento):.1f}%" if empreendimento_referencia else "")
         ),
     ]
     if not aplicar_faixa_area_edital:
@@ -996,12 +1337,25 @@ def _diagnostico_filtro_amostras(
             f"  faixa_m²_ref={area_ref:.1f} aceita [{lo_a:.1f}, {hi_a:.1f}] "
             f"(fatores {bp.area_fator_min}..{bp.area_fator_max})"
         )
+        if empreendimento_referencia:
+            lines.append(
+                "  regra_empreendimento: anúncios com match de condomínio/prédio não são excluídos por faixa de m²."
+            )
     else:
         lines.append("  faixa_m²: sem filtro por área (ref<=0 ou inválida)")
     if dists:
         lines.append(f"  dist_km (anúncios com coord): min={d_min:.2f} max={d_max:.2f}")
     if dists_fora_raio:
         lines.append(f"  dist_km (só excluídos por raio): min={dr_min:.2f} max={dr_max:.2f}")
+    if ids_fora_raio or ids_fora_faixa or ids_area_parse_err or ids_area_zero or ids_sem_coord:
+        lines.append(
+            "  motivos_por_anuncio(amostra): "
+            f"fora_raio={ids_fora_raio or []} | "
+            f"fora_faixa_area={ids_fora_faixa or []} | "
+            f"area_parse_erro={ids_area_parse_err or []} | "
+            f"area_zero={ids_area_zero or []} | "
+            f"sem_coord={ids_sem_coord or []}"
+        )
     lines.append(f"  ref_geo: lat={lat0:.6f} lon={lon0:.6f} raio_km={raio_km}")
     return "\n".join(lines)
 
@@ -1196,6 +1550,8 @@ def _montar_payload_cache(
     bairro = str(leilao.get("bairro") or "").strip()
     estado_sigla = estado_livre_para_sigla_uf(str(leilao.get("estado") or "")) or str(leilao.get("estado") or "")[:2]
     tipo_l = str(normalizar_tipo_imovel(leilao.get("tipo_imovel")) or "desconhecido")
+    if tipo_l == "casa" and _leilao_indica_condominio(leilao):
+        tipo_l = "casa_condominio"
     tipo_row = str(tipo_imovel_cache or tipo_l) if modo != "terrenos" else "terreno"
     cons = str(normalizar_conservacao(leilao.get("conservacao")) or "desconhecido")
     tc_raw = normalizar_tipo_casa(leilao.get("tipo_casa"), tipo_l)
@@ -1224,6 +1580,52 @@ def _montar_payload_cache(
     valor_media = round(sum(vals) / len(vals), 2) if vals else 0.0
     preco_m2_mediana = round(float(statistics.median(pm2s)), 4) if pm2s else 0.0
     valor_mediana = round(float(statistics.median(vals)), 2) if vals else 0.0
+
+    cidade_ref = str(leilao.get("cidade") or "").strip()
+    bairro_ref_cache = _bairro_referencia_cache_leilao(leilao)
+    dists: list[float] = []
+    q_geo_pts: list[float] = []
+    n_url_ok = 0
+    for a in amostras:
+        la, lo = coords_de_anuncio(a)
+        if la is not None and lo is not None:
+            d = float(haversine_km(float(lat0), float(lon0), float(la), float(lo)))
+            dists.append(d)
+            q = _penalidade_qualidade_geo_anuncio(a)
+            q_geo_pts.append(100.0 if q == 0 else 80.0 if q == 1 else 55.0 if q == 2 else 20.0)
+        if not _url_indica_cidade_diferente_do_alvo(str(a.get("url_anuncio") or ""), cidade_ref):
+            n_url_ok += 1
+    n_am = max(1, len(amostras))
+    geo_cobertura_raio_pct = max(0.0, min(100.0, round(100.0 * (len(dists) / n_am), 2)))
+    geo_precisao_geocode_score = round((sum(q_geo_pts) / len(q_geo_pts)), 2) if q_geo_pts else 0.0
+    geo_volume_util_score = max(
+        0.0,
+        min(100.0, round(100.0 * (len(amostras) / max(1, CACHE_VOLUME_BAIXO_LIMITE)), 2)),
+    )
+    geo_consistencia_cidade_url_pct = max(0.0, min(100.0, round(100.0 * (n_url_ok / n_am), 2)))
+    geo_cobertura_bairro_pct = max(
+        0.0,
+        min(100.0, round(100.0 * (_contar_amostras_mesmo_bairro(amostras, bairro_ref_cache) / n_am), 2)),
+    )
+    geo_confianca_score = round(
+        (0.30 * geo_cobertura_raio_pct)
+        + (0.25 * geo_precisao_geocode_score)
+        + (0.20 * geo_volume_util_score)
+        + (0.20 * geo_consistencia_cidade_url_pct)
+        + (0.05 * geo_cobertura_bairro_pct),
+        2,
+    )
+    if geo_confianca_score >= 75:
+        geo_confianca_classe = "alta"
+    elif geo_confianca_score >= 55:
+        geo_confianca_classe = "media"
+    else:
+        geo_confianca_classe = "baixa"
+    dist_msg = f" em até {max(dists):.1f} km" if dists else ""
+    geo_confianca_msg = (
+        f"{geo_confianca_classe.title()} confiança: {len(amostras)} comparáveis diretos{dist_msg}. "
+        f"Cobertura bairro {geo_cobertura_bairro_pct:.0f}%."
+    )
 
     ref_flag = 1 if apenas_referencia else 0
     sim_flag = 1 if uso_simulacao else 0
@@ -1254,6 +1656,14 @@ def _montar_payload_cache(
         "valor_mediana_venda_amostra": valor_mediana,
         "preco_m2_media_amostra": preco_m2_media,
         "valor_media_venda_amostra": valor_media,
+        "geo_confianca_score": geo_confianca_score,
+        "geo_confianca_classe": geo_confianca_classe,
+        "geo_confianca_msg": geo_confianca_msg,
+        "geo_cobertura_raio_pct": geo_cobertura_raio_pct,
+        "geo_precisao_geocode_score": geo_precisao_geocode_score,
+        "geo_volume_util_score": geo_volume_util_score,
+        "geo_consistencia_cidade_url_pct": geo_consistencia_cidade_url_pct,
+        "geo_cobertura_bairro_pct": geo_cobertura_bairro_pct,
     }
     if metadados_extras:
         for k, v in metadados_extras.items():
@@ -1556,13 +1966,16 @@ def _ordenar_amostras_para_cache_principal(
     lat0: float,
     lon0: float,
     area_ref: float,
+    geo_first_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     """
     Ordenação estável para o cache principal:
-    1) mesmo bairro
-    2) menor distância real ao imóvel
-    3) melhor qualidade de geolocalização (desempate de distância)
-    4) menor delta de área quando há área de referência
+    Geo-first:
+    1) menor distância real ao imóvel
+    2) melhor qualidade de geolocalização
+    3) menor delta de área quando há área de referência
+    4) mesmo bairro (sinal auxiliar)
+    Legacy (sem geo-first): mesmo bairro continua primeiro.
     """
     b_ref = _bairro_normalizado_para_match(bairro_referencia)
 
@@ -1580,6 +1993,8 @@ def _ordenar_amostras_para_cache_principal(
         except (TypeError, ValueError):
             ar = 0.0
         delta_a = abs(ar - float(area_ref)) if (area_ref > 0 and ar > 0) else 0.0
+        if geo_first_enabled:
+            return (dist, q_geo, delta_a, bairro_pen)
         return (bairro_pen, dist, q_geo, delta_a)
 
     return sorted(amostras, key=_key)
@@ -1621,6 +2036,41 @@ def _diagnostico_reuso_bairro(cache_row: dict[str, Any], bairro_leilao: str) -> 
     return "bairro_indeterminado"
 
 
+def _raios_expansao_geo_first(raio_base_km: float) -> list[float]:
+    rb = max(0.5, float(raio_base_km or RAIO_KM_PADRAO))
+    vals = [rb, max(rb, RAIO_EXPANSAO_GEO_FIRST_MEDIO_KM), max(rb, RAIO_EXPANSAO_GEO_FIRST_MAX_KM)]
+    out: list[float] = []
+    for v in vals:
+        rv = round(float(v), 4)
+        if rv not in out:
+            out.append(rv)
+    return out
+
+
+def _atingiu_cobertura_bairro_geo_first(
+    *,
+    n_amostras: int,
+    n_mesmo_bairro: int,
+    min_amostras: int,
+    min_mesmo_bairro: int,
+    bairro_referencia: str,
+    geo_first_enabled: bool = True,
+) -> bool:
+    if int(n_amostras) < int(min_amostras):
+        return False
+    if not _bairro_normalizado_para_match(bairro_referencia):
+        return True
+    if int(min_mesmo_bairro) <= 0:
+        return True
+    if int(n_mesmo_bairro) >= int(min_mesmo_bairro):
+        return True
+    if not geo_first_enabled:
+        return False
+    # Geo-first: aceita cobertura parcial do bairro alvo quando o volume total é suficiente.
+    min_relax = max(1, int(min_mesmo_bairro // 2))
+    return int(n_mesmo_bairro) >= int(min_relax)
+
+
 def _amostras_reuso_validas(
     client: Client,
     cache_row: dict[str, Any],
@@ -1634,6 +2084,8 @@ def _amostras_reuso_validas(
     leilao: dict[str, Any] | None = None,
     bairro_referencia: str = "",
     min_amostras_mesmo_bairro: int = 0,
+    geo_first_enabled: bool = True,
+    empreendimento_referencia: str = "",
 ) -> Optional[list[dict[str, Any]]]:
     ids = _parse_csv_anuncio_ids(cache_row.get("anuncios_ids"))
     if not ids:
@@ -1662,12 +2114,20 @@ def _amostras_reuso_validas(
         area_ref,
         raio_km=raio_km,
         aplicar_faixa_area_edital=aplicar_faixa_area_edital,
+        empreendimento_referencia=empreendimento_referencia,
     )
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, None)
     amostras = _sanear_amostras_para_cache(amostras, None)
     if int(min_amostras_mesmo_bairro or 0) > 0:
         n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro_referencia)
-        if n_mesmo_bairro < int(min_amostras_mesmo_bairro):
+        if not _atingiu_cobertura_bairro_geo_first(
+            n_amostras=len(amostras),
+            n_mesmo_bairro=n_mesmo_bairro,
+            min_amostras=max(CACHE_MONTE_MIN_EXIGIDO, int(min_amostras_mesmo_bairro or 0)),
+            min_mesmo_bairro=int(min_amostras_mesmo_bairro),
+            bairro_referencia=bairro_referencia,
+            geo_first_enabled=geo_first_enabled,
+        ):
             return None
     if len(amostras) >= CACHE_MONTE_MIN_EXIGIDO:
         return amostras
@@ -1707,13 +2167,37 @@ def _montar_amostras_para_tipos(
     """
     min_n = get_busca_mercado_parametros().min_amostras_cache
     min_mesmo_bairro = max(0, int(min_n))
+    min_mesmo_bairro_relax = max(0, int(min_n // 2))
+    geo_first_enabled = _cache_geo_first_enabled(cidade)
+    radius_exp_enabled = _cache_radius_expansion_enabled(cidade)
+    raios_busca = _raios_expansao_geo_first(raio_km) if radius_exp_enabled else [max(0.5, float(raio_km or RAIO_KM_PADRAO))]
     aplicar_faixa = not _tipos_somente_terreno_ou_lote(tipos)
     msg = ""
+    extra_leilao = _parse_extra(leilao or {})
+    bairro_canonico = str(extra_leilao.get("bairro_canonico") or "").strip()
+    empreendimento_ref = _nome_empreendimento_leilao(leilao or {})
     tipos_txt = ",".join(str(t).strip() for t in tipos if str(t).strip()) or tipo_imovel_coleta
     linhas: list[str] = [
         f"Montagem amostras: tipos_busca=[{tipos_txt}] tipo_coleta_fc={tipo_imovel_coleta} "
         f"(mínimo exigido={min_n}; BD antes de Firecrawl)"
     ]
+    linhas.append(
+        f"Geo-first={'ativo' if geo_first_enabled else 'desligado'}; "
+        f"bairro canônico={'ativo' if _bairro_canonico_enabled(cidade) else 'desligado'}; "
+        f"expansão_raio={'ativa' if radius_exp_enabled else 'desligada'}."
+    )
+    if empreendimento_ref:
+        linhas.append(f"Empreendimento alvo detectado: {empreendimento_ref}")
+    if geo_first_enabled:
+        linhas.append(
+            "Geo-first ativo: prioriza distância real e aceita cobertura parcial do bairro alvo "
+            f"(mínimo relaxado={min_mesmo_bairro_relax})."
+        )
+    if radius_exp_enabled and len(raios_busca) > 1:
+        linhas.append(
+            "Expansão progressiva de raio habilitada: "
+            + " -> ".join(f"{r:g}km" for r in raios_busca)
+        )
     candidatos = anuncios_mercado_repo.listar_por_cidade_estado_tipos(
         client,
         cidade=cidade,
@@ -1732,19 +2216,80 @@ def _montar_amostras_para_tipos(
             raio_km=raio_km,
             etiqueta="Após query BD (antes de geocode/Firecrawl)",
             aplicar_faixa_area_edital=aplicar_faixa,
+            bairro_informado=bairro,
+            bairro_canonico=bairro_canonico,
+            empreendimento_referencia=empreendimento_ref,
         )
     )
     amostras = _filtrar_amostras(
-        candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
+        candidatos,
+        lat0,
+        lon0,
+        area_ref,
+        raio_km=raio_km,
+        aplicar_faixa_area_edital=aplicar_faixa,
+        empreendimento_referencia=empreendimento_ref,
     )
     amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
     amostras = _sanear_amostras_para_cache(amostras, linhas)
     n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
-    linhas.append(f"bairro_alvo: '{bairro or '-'}' | amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})")
+    linhas.append(
+        f"bairro_alvo: '{bairro or '-'}' | amostras_mesmo_bairro={n_mesmo_bairro} "
+        f"(mínimo estrito={min_mesmo_bairro}; relaxado={min_mesmo_bairro_relax})"
+    )
 
-    if len(amostras) >= min_n and n_mesmo_bairro >= min_mesmo_bairro:
+    if _atingiu_cobertura_bairro_geo_first(
+        n_amostras=len(amostras),
+        n_mesmo_bairro=n_mesmo_bairro,
+        min_amostras=min_n,
+        min_mesmo_bairro=min_mesmo_bairro,
+        bairro_referencia=bairro,
+        geo_first_enabled=geo_first_enabled,
+    ):
         linhas.append("Resultado: amostras suficientes só com dados já no BD (sem geocode nem Firecrawl).")
         return amostras, False, msg, "\n".join(linhas), 0
+    for raio_exp in raios_busca[1:]:
+        linhas.append(
+            _diagnostico_filtro_amostras(
+                candidatos,
+                lat0,
+                lon0,
+                area_ref,
+                raio_km=raio_exp,
+                etiqueta=f"Expansão de raio (somente BD) @{raio_exp:g}km",
+                aplicar_faixa_area_edital=aplicar_faixa,
+                bairro_informado=bairro,
+                bairro_canonico=bairro_canonico,
+                empreendimento_referencia=empreendimento_ref,
+            )
+        )
+        amostras_exp = _filtrar_amostras(
+            candidatos,
+            lat0,
+            lon0,
+            area_ref,
+            raio_km=raio_exp,
+            aplicar_faixa_area_edital=aplicar_faixa,
+            empreendimento_referencia=empreendimento_ref,
+        )
+        amostras_exp = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras_exp, leilao, linhas)
+        amostras_exp = _sanear_amostras_para_cache(amostras_exp, linhas)
+        n_mesmo_exp = _contar_amostras_mesmo_bairro(amostras_exp, bairro)
+        linhas.append(
+            f"expansao_bd@{raio_exp:g}km: amostras_mesmo_bairro={n_mesmo_exp} "
+            f"(mínimo estrito={min_mesmo_bairro}; relaxado={min_mesmo_bairro_relax})"
+        )
+        if _atingiu_cobertura_bairro_geo_first(
+            n_amostras=len(amostras_exp),
+            n_mesmo_bairro=n_mesmo_exp,
+            min_amostras=min_n,
+            min_mesmo_bairro=min_mesmo_bairro,
+            bairro_referencia=bairro,
+            geo_first_enabled=geo_first_enabled,
+        ):
+            linhas.append(f"Resultado: amostras suficientes com expansão de raio para {raio_exp:g}km (sem geocode/Firecrawl).")
+            return amostras_exp, False, msg, "\n".join(linhas), 0
+        amostras = amostras_exp
 
     if pode_geocode:
         _tentar_geocodificar_sem_coordenadas(
@@ -1773,20 +2318,79 @@ def _montar_amostras_para_tipos(
                 raio_km=raio_km,
                 etiqueta="Após geocodificar anúncios sem coord e re-query BD",
                 aplicar_faixa_area_edital=aplicar_faixa,
+                bairro_informado=bairro,
+                bairro_canonico=bairro_canonico,
+                empreendimento_referencia=empreendimento_ref,
             )
         )
         amostras = _filtrar_amostras(
-            candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
+            candidatos,
+            lat0,
+            lon0,
+            area_ref,
+            raio_km=raio_km,
+            aplicar_faixa_area_edital=aplicar_faixa,
+            empreendimento_referencia=empreendimento_ref,
         )
         amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
         amostras = _sanear_amostras_para_cache(amostras, linhas)
         n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
         linhas.append(
-            f"após_geocode: amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})"
+            f"após_geocode: amostras_mesmo_bairro={n_mesmo_bairro} "
+            f"(mínimo estrito={min_mesmo_bairro}; relaxado={min_mesmo_bairro_relax})"
         )
-        if len(amostras) >= min_n and n_mesmo_bairro >= min_mesmo_bairro:
+        if _atingiu_cobertura_bairro_geo_first(
+            n_amostras=len(amostras),
+            n_mesmo_bairro=n_mesmo_bairro,
+            min_amostras=min_n,
+            min_mesmo_bairro=min_mesmo_bairro,
+            bairro_referencia=bairro,
+            geo_first_enabled=geo_first_enabled,
+        ):
             linhas.append("Resultado: amostras suficientes após geocode (sem Firecrawl).")
             return amostras, False, msg, "\n".join(linhas), 0
+        for raio_exp in raios_busca[1:]:
+            linhas.append(
+                _diagnostico_filtro_amostras(
+                    candidatos,
+                    lat0,
+                    lon0,
+                    area_ref,
+                    raio_km=raio_exp,
+                    etiqueta=f"Expansão de raio (pós-geocode) @{raio_exp:g}km",
+                    aplicar_faixa_area_edital=aplicar_faixa,
+                    bairro_informado=bairro,
+                    bairro_canonico=bairro_canonico,
+                    empreendimento_referencia=empreendimento_ref,
+                )
+            )
+            amostras_exp = _filtrar_amostras(
+                candidatos,
+                lat0,
+                lon0,
+                area_ref,
+                raio_km=raio_exp,
+                aplicar_faixa_area_edital=aplicar_faixa,
+                empreendimento_referencia=empreendimento_ref,
+            )
+            amostras_exp = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras_exp, leilao, linhas)
+            amostras_exp = _sanear_amostras_para_cache(amostras_exp, linhas)
+            n_mesmo_exp = _contar_amostras_mesmo_bairro(amostras_exp, bairro)
+            linhas.append(
+                f"expansao_pos_geocode@{raio_exp:g}km: amostras_mesmo_bairro={n_mesmo_exp} "
+                f"(mínimo estrito={min_mesmo_bairro}; relaxado={min_mesmo_bairro_relax})"
+            )
+            if _atingiu_cobertura_bairro_geo_first(
+                n_amostras=len(amostras_exp),
+                n_mesmo_bairro=n_mesmo_exp,
+                min_amostras=min_n,
+                min_mesmo_bairro=min_mesmo_bairro,
+                bairro_referencia=bairro,
+                geo_first_enabled=geo_first_enabled,
+            ):
+                linhas.append(f"Resultado: amostras suficientes após geocode com expansão para {raio_exp:g}km.")
+                return amostras_exp, False, msg, "\n".join(linhas), 0
+            amostras = amostras_exp
 
     n_api_fc = 0
     pode_fc = pode_firecrawl_search and (max_chamadas_api_firecrawl is None or int(max_chamadas_api_firecrawl) > 0)
@@ -1829,20 +2433,79 @@ def _montar_amostras_para_tipos(
                 raio_km=raio_km,
                 etiqueta="Após Firecrawl Search e re-query BD",
                 aplicar_faixa_area_edital=aplicar_faixa,
+                bairro_informado=bairro,
+                bairro_canonico=bairro_canonico,
+                empreendimento_referencia=empreendimento_ref,
             )
         )
         amostras = _filtrar_amostras(
-            candidatos, lat0, lon0, area_ref, raio_km=raio_km, aplicar_faixa_area_edital=aplicar_faixa
+            candidatos,
+            lat0,
+            lon0,
+            area_ref,
+            raio_km=raio_km,
+            aplicar_faixa_area_edital=aplicar_faixa,
+            empreendimento_referencia=empreendimento_ref,
         )
         amostras = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras, leilao, linhas)
         amostras = _sanear_amostras_para_cache(amostras, linhas)
         n_mesmo_bairro = _contar_amostras_mesmo_bairro(amostras, bairro)
         linhas.append(
-            f"após_firecrawl: amostras_mesmo_bairro={n_mesmo_bairro} (mínimo={min_mesmo_bairro})"
+            f"após_firecrawl: amostras_mesmo_bairro={n_mesmo_bairro} "
+            f"(mínimo estrito={min_mesmo_bairro}; relaxado={min_mesmo_bairro_relax})"
         )
-        if len(amostras) >= min_n and n_mesmo_bairro >= min_mesmo_bairro:
+        if _atingiu_cobertura_bairro_geo_first(
+            n_amostras=len(amostras),
+            n_mesmo_bairro=n_mesmo_bairro,
+            min_amostras=min_n,
+            min_mesmo_bairro=min_mesmo_bairro,
+            bairro_referencia=bairro,
+            geo_first_enabled=geo_first_enabled,
+        ):
             linhas.append("Resultado: amostras suficientes após Firecrawl Search.")
             return amostras, True, msg, "\n".join(linhas), n_api_fc
+        for raio_exp in raios_busca[1:]:
+            linhas.append(
+                _diagnostico_filtro_amostras(
+                    candidatos,
+                    lat0,
+                    lon0,
+                    area_ref,
+                    raio_km=raio_exp,
+                    etiqueta=f"Expansão de raio (pós-Firecrawl) @{raio_exp:g}km",
+                    aplicar_faixa_area_edital=aplicar_faixa,
+                    bairro_informado=bairro,
+                    bairro_canonico=bairro_canonico,
+                    empreendimento_referencia=empreendimento_ref,
+                )
+            )
+            amostras_exp = _filtrar_amostras(
+                candidatos,
+                lat0,
+                lon0,
+                area_ref,
+                raio_km=raio_exp,
+                aplicar_faixa_area_edital=aplicar_faixa,
+                empreendimento_referencia=empreendimento_ref,
+            )
+            amostras_exp = _apos_filtro_geo_excluir_listagem_sinc_lance(amostras_exp, leilao, linhas)
+            amostras_exp = _sanear_amostras_para_cache(amostras_exp, linhas)
+            n_mesmo_exp = _contar_amostras_mesmo_bairro(amostras_exp, bairro)
+            linhas.append(
+                f"expansao_pos_firecrawl@{raio_exp:g}km: amostras_mesmo_bairro={n_mesmo_exp} "
+                f"(mínimo estrito={min_mesmo_bairro}; relaxado={min_mesmo_bairro_relax})"
+            )
+            if _atingiu_cobertura_bairro_geo_first(
+                n_amostras=len(amostras_exp),
+                n_mesmo_bairro=n_mesmo_exp,
+                min_amostras=min_n,
+                min_mesmo_bairro=min_mesmo_bairro,
+                bairro_referencia=bairro,
+                geo_first_enabled=geo_first_enabled,
+            ):
+                linhas.append(f"Resultado: amostras suficientes após Firecrawl com expansão para {raio_exp:g}km.")
+                return amostras_exp, True, msg, "\n".join(linhas), n_api_fc
+            amostras = amostras_exp
 
     elif pode_firecrawl_search and max_chamadas_api_firecrawl is not None and int(max_chamadas_api_firecrawl) <= 0:
         linhas.append("Firecrawl Search: omitido (orçamento de chamadas API esgotado para esta rodada).")
@@ -1855,7 +2518,8 @@ def _montar_amostras_para_tipos(
             f"Resultado: {len(amostras)} amostra(s) após todas as etapas (mínimo configurado p/ coleta={min_n}; "
             "montagem de cache permitida com volume reduzido se <5 amostras no segmento)."
         )
-        if n_mesmo_bairro < min_mesmo_bairro:
+        limite_bairro_log = min_mesmo_bairro_relax if geo_first_enabled else min_mesmo_bairro
+        if n_mesmo_bairro < limite_bairro_log:
             linhas.append(
                 "Observação: sem amostras suficientes do bairro alvo; cache montado com fallback de bairros próximos."
             )
@@ -1888,10 +2552,11 @@ def _inserir_caches_residenciais_fatiados(
     cap_p, cap_l = _caps_amostras_cache_mercado()
     amostras_ordenadas = _ordenar_amostras_para_cache_principal(
         amostras,
-        bairro_referencia=str(leilao.get("bairro") or ""),
+        bairro_referencia=_bairro_referencia_cache_leilao(leilao),
         lat0=float(lat0),
         lon0=float(lon0),
         area_ref=_area_referencia_m2(leilao),
+        geo_first_enabled=_cache_geo_first_enabled(str(leilao.get("cidade") or "")),
     )
     tc_o = normalizar_tipo_casa(leilao.get("tipo_casa"), tipo_l)
     tipo_casa_prim = str(tc_o) if tc_o else "-"
@@ -2137,18 +2802,32 @@ def _criar_caches_apoio_escala(
         tipos_imovel=tipos_principal,
     )
     candidatos = _filtrar_candidatos_por_coerencia_url_cidade(candidatos, cidade)
-    candidatos = _filtrar_amostras(
-        candidatos,
-        lat0,
-        lon0,
-        area_ref=0.0,
-        raio_km=raio,
-        aplicar_faixa_area_edital=False,
-    )
+    raios_busca = [float(raio)]
+    for r in (10.0, 15.0):
+        if r > float(raio) and r not in raios_busca:
+            raios_busca.append(r)
+    cand_por_id: dict[str, dict[str, Any]] = {}
+    for r in raios_busca:
+        lote = _filtrar_amostras(
+            candidatos,
+            lat0,
+            lon0,
+            area_ref=0.0,
+            raio_km=float(r),
+            aplicar_faixa_area_edital=False,
+        )
+        for a in lote:
+            aid = str(a.get("id") or "").strip()
+            if aid:
+                cand_por_id.setdefault(aid, a)
+    candidatos = list(cand_por_id.values())
     candidatos = _apos_filtro_geo_excluir_listagem_sinc_lance(candidatos, leilao, None)
-    candidatos = _sanear_amostras_para_cache(candidatos, None)
+    # Para caches auxiliares de escala, preserva diversidade/volume de faixa de área;
+    # dedupe agressivo de "similares" costuma eliminar amostras úteis.
+    candidatos = _sanear_amostras_para_cache(candidatos, None, deduplicar_similares=False)
     cap_p, cap_l = _caps_amostras_cache_mercado()
-    lim_apoio = max(3, min(cap_l, cap_p))
+    min_apoio = max(1, int(CACHE_APOIO_ESCALA_MIN_AMOSTRAS))
+    lim_apoio = max(min_apoio, min(cap_l, cap_p))
 
     out: list[dict[str, Any]] = []
     logs: list[str] = []
@@ -2160,7 +2839,18 @@ def _criar_caches_apoio_escala(
         fator_max=CACHE_APOIO_ESCALA_MENOR_MAX,
         ids_excluir=base_ids,
         limite=lim_apoio,
+        min_amostras=min_apoio,
     )
+    if not men:
+        men = _selecionar_amostras_apoio_escala(
+            candidatos,
+            area_ref=area_ref,
+            fator_min=max(0.30, CACHE_APOIO_ESCALA_MENOR_MIN - 0.20),
+            fator_max=min(1.00, CACHE_APOIO_ESCALA_MENOR_MAX + 0.15),
+            ids_excluir=base_ids,
+            limite=lim_apoio,
+            min_amostras=min_apoio,
+        )
     c_men, err_men = _inserir_cache_apoio_escala(
         client,
         leilao,
@@ -2191,7 +2881,18 @@ def _criar_caches_apoio_escala(
         fator_max=CACHE_APOIO_ESCALA_MAIOR_MAX,
         ids_excluir=base_ids,
         limite=lim_apoio,
+        min_amostras=min_apoio,
     )
+    if not mai:
+        mai = _selecionar_amostras_apoio_escala(
+            candidatos,
+            area_ref=area_ref,
+            fator_min=max(1.00, CACHE_APOIO_ESCALA_MAIOR_MIN - 0.05),
+            fator_max=min(3.20, CACHE_APOIO_ESCALA_MAIOR_MAX + 0.90),
+            ids_excluir=base_ids,
+            limite=lim_apoio,
+            min_amostras=min_apoio,
+        )
     c_mai, err_mai = _inserir_cache_apoio_escala(
         client,
         leilao,
@@ -2271,14 +2972,30 @@ def resolver_cache_media_pos_ingestao(
             log_diagnostico="Sem coords no leilão e geocodificação do endereço falhou.",
         )
     lat0, lon0 = coords
+    bairro_informado, bairro_ref = _garantir_bairro_canonico_leilao(
+        client,
+        leilao,
+        lat0=float(lat0),
+        lon0=float(lon0),
+    )
     geo_bucket = geo_bucket_de_coords(lat0, lon0)
     area_ref = _area_referencia_m2(leilao)
+    empreendimento_ref = _nome_empreendimento_leilao(leilao)
     tipo_l = str(normalizar_tipo_imovel(leilao.get("tipo_imovel")) or "desconhecido")
+    if tipo_l == "casa" and (_leilao_indica_condominio(leilao) or empreendimento_ref):
+        # Se o edital traz nome de condomínio/empreendimento, tratamos como casa_condominio.
+        tipo_l = "casa_condominio"
     if tipo_l == "desconhecido":
         tipo_l = "apartamento"
+    geo_first_enabled = _cache_geo_first_enabled(cidade)
+    min_mesmo_bairro_reuso = max(0, int(min_n // 2)) if geo_first_enabled else max(0, int(min_n))
 
     estado_sigla = estado_livre_para_sigla_uf(estado_raw) or estado_raw[:2].upper()
     ctx_base = _contexto_log_cache(lid, cidade, estado_sigla, tipo_l, area_ref, min_n, raio)
+    ctx_base += (
+        f"\nbairro_informado={bairro_informado or '-'} | "
+        f"bairro_referencia_cache={bairro_ref or '-'} | geo_first={'on' if geo_first_enabled else 'off'}"
+    )
 
     candidatos = cache_media_bairro_repo.listar_candidatos_reuso(
         client,
@@ -2286,7 +3003,7 @@ def resolver_cache_media_pos_ingestao(
         estado_sigla=estado_sigla,
         cidade=cidade,
     )
-    candidatos_ordenados = _ordenar_candidatos_priorizando_mesmo_bairro(candidatos, bairro)
+    candidatos_ordenados = _ordenar_candidatos_priorizando_mesmo_bairro(candidatos, bairro_ref)
 
     principal_id: Optional[str] = None
     principal_row: Optional[dict[str, Any]] = None
@@ -2303,8 +3020,10 @@ def resolver_cache_media_pos_ingestao(
                 [tipo_l],
                 raio_km=raio,
                 leilao=leilao,
-                bairro_referencia=bairro,
-                min_amostras_mesmo_bairro=min_n,
+                bairro_referencia=bairro_ref,
+                min_amostras_mesmo_bairro=min_mesmo_bairro_reuso,
+                geo_first_enabled=geo_first_enabled,
+                empreendimento_referencia=empreendimento_ref,
             )
             is not None
         ):
@@ -2329,8 +3048,10 @@ def resolver_cache_media_pos_ingestao(
                     raio_km=raio,
                     aplicar_faixa_area_edital=False,
                     leilao=leilao,
-                    bairro_referencia=bairro,
-                    min_amostras_mesmo_bairro=min_n,
+                    bairro_referencia=bairro_ref,
+                    min_amostras_mesmo_bairro=min_mesmo_bairro_reuso,
+                    geo_first_enabled=geo_first_enabled,
+                    empreendimento_referencia=empreendimento_ref,
                 )
                 is not None
             ):
@@ -2381,7 +3102,7 @@ def resolver_cache_media_pos_ingestao(
             tipos_principal,
             estado_sigla,
             cidade,
-            bairro,
+            bairro_ref,
             raio_km=raio,
             pode_geocode=True,
             pode_firecrawl_search=True,
@@ -2468,7 +3189,7 @@ def resolver_cache_media_pos_ingestao(
                 list(_TIPOS_TERRENO_BUSCA),
                 estado_sigla,
                 cidade,
-                bairro,
+                bairro_ref,
                 raio_km=raio,
                 pode_geocode=True,
                 pode_firecrawl_search=True,
@@ -2628,14 +3349,27 @@ def criar_caches_media_para_leilao(
             log_diagnostico="Sem coords no leilão e geocodificação do endereço falhou.",
         )
     lat0, lon0 = coords
+    bairro_informado, bairro_ref = _garantir_bairro_canonico_leilao(
+        client,
+        leilao,
+        lat0=float(lat0),
+        lon0=float(lon0),
+    )
     geo_bucket = geo_bucket_de_coords(lat0, lon0)
     area_ref = _area_referencia_m2(leilao)
     tipo_l = str(normalizar_tipo_imovel(leilao.get("tipo_imovel")) or "desconhecido")
+    if tipo_l == "casa" and _leilao_indica_condominio(leilao):
+        tipo_l = "casa_condominio"
     if tipo_l == "desconhecido":
         tipo_l = "apartamento"
 
     estado_sigla = estado_livre_para_sigla_uf(estado_raw) or estado_raw[:2].upper()
     ctx_base = _contexto_log_cache(lid, cidade, estado_sigla, tipo_l, area_ref, min_n, raio)
+    ctx_base += (
+        f"\nbairro_informado={bairro_informado or '-'} | "
+        f"bairro_referencia_cache={bairro_ref or '-'} | "
+        f"geo_first={'on' if _cache_geo_first_enabled(cidade) else 'off'}"
+    )
 
     caches: list[dict[str, Any]] = []
     usou_fc = False
@@ -2653,7 +3387,7 @@ def criar_caches_media_para_leilao(
         tipos_principal,
         estado_sigla,
         cidade,
-        bairro,
+        bairro_ref,
         raio_km=raio,
         pode_geocode=True,
         pode_firecrawl_search=True,
@@ -2727,7 +3461,7 @@ def criar_caches_media_para_leilao(
             list(_TIPOS_TERRENO_BUSCA),
             estado_sigla,
             cidade,
-            bairro,
+            bairro_ref,
             raio_km=raio,
             pode_geocode=True,
             pode_firecrawl_search=True,

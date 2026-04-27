@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from leilao_ia_v2.fc_search.query_builder import montar_frase_busca, montar_frase_busca_mercado
+from leilao_ia_v2.fc_search.query_builder import (
+    montar_frase_busca,
+    montar_frase_busca_mercado,
+    montar_frases_busca_mercado_em_camadas,
+)
 from leilao_ia_v2.fc_search.urls import extrair_urls_da_busca, selecionar_urls_para_scrape
 
 
@@ -67,6 +71,58 @@ def test_montar_frase_busca_mercado_terreno():
     assert "200" in q
 
 
+def test_montar_frases_busca_mercado_em_camadas():
+    row = {
+        "tipo_imovel": "casa",
+        "area_util": 120.0,
+        "endereco": "Rua das Flores, 123",
+        "bairro": "Centro",
+        "cidade": "Taubaté",
+        "estado": "SP",
+    }
+    qs = montar_frases_busca_mercado_em_camadas(
+        row,
+        "casa",
+        bairro_canonico="Chácara do Visconde",
+        bairro_aliases=["Chacara Visconde"],
+    )
+    assert len(qs) >= 3
+    assert any("na rua das flores" in q for q in qs)  # Q1
+    assert any("taubaté, sp" in q and "na rua" not in q and "chácara do visconde" not in q for q in qs)  # Q2
+    assert any("chácara do visconde" in q for q in qs)  # Q3
+
+
+def test_montar_frases_camadas_prioriza_empreendimento_quando_disponivel():
+    row = {
+        "tipo_imovel": "apartamento",
+        "area_util": 78.0,
+        "endereco": "Rua Y, 100",
+        "bairro": "Centro",
+        "cidade": "Campinas",
+        "estado": "SP",
+        "leilao_extra_json": {
+            "nome_condominio": "Condomínio Residencial Parque das Flores",
+        },
+    }
+    qs = montar_frases_busca_mercado_em_camadas(row, "apartamento")
+    assert qs
+    assert "apartamentos à venda no condomínio ou prédio residencial parque das flores, campinas, sp".lower() in qs[0]
+
+
+def test_montar_frases_camadas_usa_empreendimento_em_observacoes():
+    row = {
+        "tipo_imovel": "casa",
+        "cidade": "Taubaté",
+        "estado": "SP",
+        "leilao_extra_json": {
+            "observacoes_markdown": "CONDOMÍNIO RESIDENCIAL VILLAGIO DI ITÁLIA\nValor de avaliação: R$ 435.000,00"
+        },
+    }
+    qs = montar_frases_busca_mercado_em_camadas(row, "casa")
+    assert qs
+    assert "villagio di itália" in qs[0]
+
+
 def test_extrair_e_selecionar_urls():
     web = [
         {"url": "https://www.vivareal.com.br/venda/sp/cidade/apartamento/", "title": "x", "description": ""},
@@ -80,6 +136,19 @@ def test_extrair_e_selecionar_urls():
     assert len(sel) <= 2
     # Ordem da busca é VR antes do Zap; scrape prioriza diversidade (Zap antes de VR).
     assert "zapimoveis" in sel[0]
+
+
+def test_extrair_urls_aceita_host_kenlo():
+    web = [
+        {
+            "url": "https://portal.kenlo.com.br/imoveis/taubate/condominio-villagio-d-italia",
+            "title": "k",
+            "description": "",
+        }
+    ]
+    urls = extrair_urls_da_busca(web)
+    assert urls
+    assert "kenlo.com.br" in urls[0]
 
 
 def test_selecionar_urls_prioriza_outros_portais_antes_de_vivareal():
@@ -148,6 +217,9 @@ def test_pipeline_complementar_mock(
         "bairro": "Centro",
         "cidade": "Campinas",
         "estado": "SP",
+        "latitude": -22.9,
+        "longitude": -47.06,
+        "leilao_extra_json": {"bairro_canonico": "Centro"},
     }
     cli = MagicMock()
     with patch("leilao_ia_v2.fc_search.pipeline.leilao_imoveis_repo.buscar_por_id", return_value=row):
@@ -166,3 +238,7 @@ def test_pipeline_complementar_mock(
     assert "markdown_chars=" in diag
     mock_geo.assert_called_once()
     mock_persist.assert_called_once()
+    kwargs = mock_persist.call_args.kwargs
+    assert kwargs.get("bairro_canonico") == "Centro"
+    assert kwargs.get("lat_ref") == -22.9
+    assert kwargs.get("lon_ref") == -47.06

@@ -422,8 +422,18 @@ def _parse_url(v: Any) -> str:
         return s
 
 
+def _parse_url_generica(v: Any) -> str:
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    if not s.lower().startswith(("http://", "https://")):
+        s = "https://" + s
+    return s
+
+
 def _url_http_ou_vazio(v: Any) -> str:
-    u = _parse_url(v)
+    # Para foto, manter URL original (incl. fragment/query), sem normalização de URL de leilão.
+    u = _parse_url_generica(v)
     if u.lower().startswith(("http://", "https://")):
         return u
     return ""

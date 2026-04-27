@@ -487,7 +487,13 @@ def montar_html_relatorio_simulacao(
     foto_html = ""
     if foto_u:
         fq = html.escape(foto_u, quote=True)
-        foto_html = f'<div class="foto"><img src="{fq}" alt="Foto do imóvel" loading="lazy" referrerpolicy="no-referrer" /></div>'
+        foto_html = (
+            f'<div class="foto">'
+            f'<img src="{fq}" alt="Foto do imóvel" loading="lazy" referrerpolicy="no-referrer" '
+            f'onerror="this.style.display=\'none\';var n=this.nextElementSibling;if(n){{n.style.display=\'inline-flex\';}}" />'
+            f'<a href="{fq}" target="_blank" rel="noopener noreferrer">Abrir foto do imóvel</a>'
+            f"</div>"
+        )
 
     painel_ex = ag._html_painel_extraidos_lista_painel_fin(row)
     if painel_ex:

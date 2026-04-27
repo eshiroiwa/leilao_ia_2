@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from leilao_ia_v2.services.geocoding import extrair_logradouro_de_url, sanear_logradouro_markdown_card
 from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
@@ -57,6 +58,65 @@ def _detectar_tipo_por_card(url: str, titulo: str, block: str) -> str:
         if not any(x in bl for x in ("casa", "sobrado", "apartamento")):
             return "terreno"
     return ""
+
+
+def _extrair_cards_links_genericos_markdown(
+    markdown: str,
+    *,
+    cidade_ref: str,
+    estado_ref: str,
+    bairro_ref: str,
+) -> list[dict[str, Any]]:
+    """Fallback para páginas de listagem fora do padrão VivaReal."""
+    out: list[dict[str, Any]] = []
+    uf2 = estado_livre_para_sigla_uf(estado_ref)
+    seen: set[str] = set()
+    for m in re.finditer(r"\[([^\]]{8,220})\]\((https?://[^\s\)]+)\)", markdown or "", re.IGNORECASE):
+        titulo = " ".join((m.group(1) or "").split())
+        url = (m.group(2) or "").strip()
+        if not titulo or not url:
+            continue
+        if url in seen:
+            continue
+        if not re.search(r"/imove(?:l|is)/", url, re.IGNORECASE):
+            continue
+        ini = max(0, m.start() - 240)
+        fim = min(len(markdown or ""), m.end() + 240)
+        bloco = (markdown or "")[ini:fim]
+        area_m = re.search(r"(\d{2,5})(?:[.,]\d+)?\s*m(?:²|2)\b", bloco, re.IGNORECASE)
+        preco_m = re.search(r"R\$\s*([\d.]+(?:,\d+)?)", bloco, re.IGNORECASE)
+        if not area_m or not preco_m:
+            continue
+        try:
+            area = float(area_m.group(1))
+        except Exception:
+            continue
+        preco = _parse_preco_vr(preco_m.group(1) or "")
+        if preco is None:
+            continue
+        if area < 12 or area > 50_000:
+            continue
+        logradouro = sanear_logradouro_markdown_card(extrair_logradouro_de_url(url))
+        tipo_card = _detectar_tipo_por_card(url, titulo, bloco)
+        portal = (urlparse(url).netloc or "").lower().replace("www.", "") or "desconhecido"
+        out.append(
+            {
+                "url_anuncio": url.split("?")[0],
+                "portal": portal,
+                "area_m2": area,
+                "valor_venda": preco,
+                "quartos": None,
+                "vagas": None,
+                "logradouro": logradouro,
+                "titulo": titulo[:500],
+                "bairro": bairro_ref,
+                "cidade": cidade_ref,
+                "estado": uf2,
+                "_tipo_detectado": tipo_card,
+            }
+        )
+        seen.add(url)
+    return out
 
 
 def extrair_cards_anuncios_vivareal_markdown(
@@ -137,4 +197,10 @@ def extrair_cards_anuncios_vivareal_markdown(
             continue
 
     logger.info("Parser Viva Real: %s anúncios extraídos da listagem", len(anuncios))
+    if not anuncios:
+        anuncios = _extrair_cards_links_genericos_markdown(
+            markdown, cidade_ref=cidade_ref, estado_ref=estado_ref, bairro_ref=bairro_ref
+        )
+        if anuncios:
+            logger.info("Parser fallback genérico: %s anúncios extraídos da listagem", len(anuncios))
     return anuncios

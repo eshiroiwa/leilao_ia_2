@@ -14,6 +14,7 @@ _PORTAIS_ACEITES: tuple[str, ...] = (
     "imovelweb.com.br",
     "olx.com.br",
     "chavesnamao.com.br",
+    "kenlo.com.br",
     "quintoandar.com.br",
     "loft.com.br",
 )
@@ -25,6 +26,7 @@ _PORTAIS_ORDEM_SCRAPE: tuple[str, ...] = (
     "imovelweb.com.br",
     "olx.com.br",
     "chavesnamao.com.br",
+    "kenlo.com.br",
     "quintoandar.com.br",
     "loft.com.br",
     "vivareal.com.br",
@@ -48,7 +50,10 @@ def _host_ok(host: str) -> bool:
         return False
     if any(x in h for x in _EXCLUIR_HOST):
         return False
-    return any(p in h for p in _PORTAIS_ACEITES)
+    extra_raw = str(os.getenv("FC_SEARCH_PORTAIS_EXTRA", "") or "").strip().lower()
+    extras = tuple(x.strip() for x in extra_raw.split(",") if x.strip())
+    aceites = tuple(_PORTAIS_ACEITES) + extras
+    return any(p in h for p in aceites)
 
 
 def _candidate_url_de_item_resultado_busca(it: dict[str, Any]) -> str:

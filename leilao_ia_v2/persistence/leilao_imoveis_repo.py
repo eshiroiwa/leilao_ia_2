@@ -193,6 +193,7 @@ def listar_resumo_recentes(
         .select(
             "id,url_leilao,cidade,estado,bairro,endereco,tipo_imovel,latitude,longitude,"
             "edital_coletado_em,data_leilao_1_praca,data_leilao_2_praca,data_leilao,"
+            "url_foto_imovel,"
             "valor_lance_1_praca,valor_lance_2_praca,valor_arrematacao,leilao_extra_json,"
             "operacao_simulacao_json,simulacoes_modalidades_json,"
             "valor_mercado_estimado,custo_reforma_estimado,roi_projetado,lance_maximo_recomendado,"

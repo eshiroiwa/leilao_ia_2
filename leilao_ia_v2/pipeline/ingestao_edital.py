@@ -402,6 +402,13 @@ def executar_ingestao_edital(
             )
         else:
             restante_fc = max(0, restante_fc - int(summ.get("firecrawl_chamadas_api") or 0))
+            if bool(summ.get("falha_por_filtros_persistencia")):
+                # Economia de créditos: não repetir Firecrawl no cache quando a rodada
+                # anterior já falhou por filtros de persistência/qualidade.
+                log_parts.append(
+                    "Cache (automático): rodada Firecrawl extra desativada (comparáveis já falharam por filtros internos)."
+                )
+                restante_fc = 0
             try:
                 cres = resolver_cache_media_pos_ingestao(
                     client,

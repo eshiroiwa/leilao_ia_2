@@ -227,3 +227,15 @@ def test_payload_csv_mapeia_campos_variaveis_lances_e_foto():
     assert p["valor_arrematacao"] == 310000.0
     assert p["url_foto_imovel"] == "https://cdn.exemplo.com/foto.jpg"
     assert p["valor_avaliacao"] == 610000.0
+
+
+def test_url_foto_preserva_fragmento_preview():
+    reg = {
+        "link de acesso": "https://site.exemplo/lote/1",
+        "cidade": "Aparecida",
+        "uf": "SP",
+        "link da foto": "https://site.exemplo/lote/1/#preview",
+    }
+    mp = mod.resolver_mapeamento_campos_csv([reg], permitir_llm=False)
+    p = mod._payload_de_registro_csv(reg, url=mod._col_url(reg, mapeamento=mp), mapeamento=mp)
+    assert p["url_foto_imovel"] == "https://site.exemplo/lote/1/#preview"

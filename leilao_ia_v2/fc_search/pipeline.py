@@ -11,7 +11,8 @@ from typing import Any
 from supabase import Client
 
 from .parser import dedupe_por_url, extrair_anuncios_do_markdown_pagina
-from .query_builder import montar_frase_busca_mercado
+from .llm_extractor import extrair_cards_com_llm_markdown, llm_extracao_habilitada
+from .query_builder import montar_frase_busca_mercado, montar_frases_busca_mercado_em_camadas
 from .search_client import executar_busca_web
 from .urls import extrair_urls_do_markdown, extrair_urls_da_busca, selecionar_urls_para_scrape
 from leilao_ia_v2.persistence import leilao_imoveis_repo
@@ -67,13 +68,25 @@ def complementar_anuncios_firecrawl_search(
 
     override = (str(frase_busca_override).strip() if frase_busca_override is not None else "") or None
     if override:
-        query = override
+        queries = [override]
         linhas.append("search: frase=override_utilizador")
     else:
-        query = montar_frase_busca_mercado(row, tipo_imovel)
-    if not query or len(query) < 8:
-        logger.warning("Firecrawl Search complemento: frase de busca vazia demais")
-        linhas.append(f"erro: frase_busca inválida ou curta demais (len={len(query or '')})")
+        extra = row.get("leilao_extra_json") if isinstance(row.get("leilao_extra_json"), dict) else {}
+        bairro_canonico = str((extra or {}).get("bairro_canonico") or "").strip()
+        bairro_aliases = list((extra or {}).get("bairro_aliases") or [])
+        queries = montar_frases_busca_mercado_em_camadas(
+            row,
+            tipo_imovel,
+            bairro_canonico=bairro_canonico,
+            bairro_aliases=bairro_aliases,
+        )
+    if not queries:
+        q1 = montar_frase_busca_mercado(row, tipo_imovel)
+        queries = [q1] if q1 else []
+    queries = [str(q or "").strip() for q in queries if str(q or "").strip()]
+    if not queries:
+        logger.warning("Firecrawl Search complemento: sem frases de busca válidas")
+        linhas.append("erro: nenhuma frase de busca válida")
         return 0, _diag(), 0
 
     if max_chamadas_api is not None and int(max_chamadas_api) <= 0:
@@ -81,18 +94,29 @@ def complementar_anuncios_firecrawl_search(
         return 0, _diag(), 0
 
     n_chamadas_api = 0
-    try:
-        web, n_search = executar_busca_web(query)
-        n_chamadas_api += int(n_search or 0)
-    except Exception:
-        logger.exception("Firecrawl Search: falha na pesquisa")
-        linhas.append("search: exceção na pesquisa (ver log com stack trace)")
-        return 0, _diag(), 0
-
-    n_web = len(web) if isinstance(web, list) else 0
-    linhas.append(f"search: frase_busca_chars={len(query)} resultados_web={n_web}")
-    if isinstance(web, list) and web and isinstance(web[0], dict):
-        linhas.append(f"search: chaves_1o_item={sorted(web[0].keys())}")
+    web: list[dict[str, Any]] = []
+    linhas.append(f"search: camadas_planejadas={len(queries)}")
+    for i, q in enumerate(queries, start=1):
+        if max_chamadas_api is not None and int(n_chamadas_api) >= int(max_chamadas_api):
+            linhas.append(
+                f"search: orçamento atingido antes da camada {i} "
+                f"(max_chamadas_api={int(max_chamadas_api)})."
+            )
+            break
+        if len(q) < 8:
+            continue
+        try:
+            web_i, n_search = executar_busca_web(q)
+            n_chamadas_api += int(n_search or 0)
+        except Exception:
+            logger.exception("Firecrawl Search: falha na pesquisa da camada %s", i)
+            linhas.append(f"search[{i}]: exceção na pesquisa (ver log com stack trace)")
+            continue
+        web_i = list(web_i or [])
+        web.extend(web_i)
+        linhas.append(f"search[{i}]: frase_chars={len(q)} resultados_web={len(web_i)}")
+        if web_i and isinstance(web_i[0], dict):
+            linhas.append(f"search[{i}]: chaves_1o_item={sorted(web_i[0].keys())}")
 
     urls: list[str] = extrair_urls_da_busca(web)
     # URLs embutidas em títulos/descrições (quando a API devolve texto rico)
@@ -127,7 +151,7 @@ def complementar_anuncios_firecrawl_search(
         for u in urls[:12]:
             linhas.append(f"  - {u}")
     if not alvo:
-        logger.info("Firecrawl Search complemento: nenhuma URL de portal aceite (query=%r)", query[:120])
+        logger.info("Firecrawl Search complemento: nenhuma URL de portal aceite")
         linhas.append("motivo: nenhuma URL de portal aceite após filtro (hosts permitidos).")
         linhas.append(f"firecrawl_api_calls_estimadas={n_chamadas_api}")
         return 0, _diag(), n_chamadas_api
@@ -136,8 +160,14 @@ def complementar_anuncios_firecrawl_search(
     estado_parser = str(estado_raw or row.get("estado") or "").strip() or uf_sigla
     cidade_ref = (cidade or str(row.get("cidade") or "")).strip()
     bairro_ref = (bairro or str(row.get("bairro") or "")).strip()
+    extra_row = row.get("leilao_extra_json") if isinstance(row.get("leilao_extra_json"), dict) else {}
+    bairro_canonico = str((extra_row or {}).get("bairro_canonico") or "").strip()
+    lat_ref = row.get("latitude")
+    lon_ref = row.get("longitude")
 
     agregados: list[dict[str, Any]] = []
+    llm_fallback_usos = 0
+    llm_fallback_limite = max(0, int(os.getenv("FC_SEARCH_LLM_MAX_PAGINAS_FALLBACK", "2") or "2"))
     for u in alvo:
         n_chamadas_api += 1
         try:
@@ -154,6 +184,20 @@ def complementar_anuncios_firecrawl_search(
             estado_ref=estado_parser,
             bairro_ref=bairro_ref,
         )
+        if not cards and llm_extracao_habilitada() and llm_fallback_usos < llm_fallback_limite:
+            cards_llm = extrair_cards_com_llm_markdown(
+                markdown=md,
+                url_pagina=u,
+                cidade_ref=cidade_ref,
+                estado_ref=estado_parser,
+                bairro_ref=bairro_ref,
+            )
+            if cards_llm:
+                cards = cards_llm
+                llm_fallback_usos += 1
+                linhas.append(
+                    f"scrape: fallback_llm acionado url={u[:120]} cards_llm={len(cards_llm)}"
+                )
         fonte = str((meta or {}).get("fonte") or "")
         linhas.append(
             f"scrape: ok url={u[:160]} markdown_chars={nmd} cards_extraidos={len(cards)} fonte={fonte}"
@@ -175,8 +219,10 @@ def complementar_anuncios_firecrawl_search(
         permitir_fallback_centro_cidade=False,
     )
 
-    url_listagem_meta = f"firecrawl_search:{query[:400]}"
+    query_meta = " | ".join(queries[:3])
+    url_listagem_meta = f"firecrawl_search_camadas:{query_meta[:400]}"
     tipo_fb = (tipo_imovel or str(row.get("tipo_imovel") or "apartamento")).strip().lower()
+    diag_persist: dict[str, Any] = {}
     salvos = persistir_cards_anuncios_mercado(
         client,
         agregados,
@@ -189,12 +235,29 @@ def complementar_anuncios_firecrawl_search(
         origem_metadados="firecrawl_search_complemento",
         leilao_row=row,
         exigir_geolocalizacao=True,
+        bairro_canonico=bairro_canonico,
+        lat_ref=float(lat_ref) if lat_ref is not None else None,
+        lon_ref=float(lon_ref) if lon_ref is not None else None,
+        diagnostico_saida=diag_persist,
     )
+    desc = dict(diag_persist.get("descartes_por_motivo") or {})
+    linhas.append(
+        "persistencia: cards_recebidos=%s validos_pre_upsert=%s descartes_total=%s upsert=%s"
+        % (
+            int(diag_persist.get("cards_recebidos") or 0),
+            int(diag_persist.get("cards_validos_pre_upsert") or 0),
+            int(diag_persist.get("descartes_total") or 0),
+            int(diag_persist.get("upsert_gravados") or salvos or 0),
+        )
+    )
+    if desc:
+        itens = ", ".join(f"{k}={int(v)}" for k, v in sorted(desc.items()))
+        linhas.append(f"persistencia: descartes_por_motivo: {itens}")
     if salvos:
         logger.info(
             "Firecrawl Search complemento: %s anúncios gravados; frase=%r urls=%s",
             salvos,
-            query[:200],
+            query_meta[:200],
             alvo,
         )
         linhas.append(f"persistencia: anuncios_gravados_upsert={salvos}")

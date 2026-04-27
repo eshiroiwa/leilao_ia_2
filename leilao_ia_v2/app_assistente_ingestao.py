@@ -70,6 +70,7 @@ from leilao_ia_v2.schemas.operacao_simulacao import (
     parse_simulacoes_modalidades_json,
 )
 from leilao_ia_v2.services.conteudo_edital_heuristica import MENSAGEM_ACOES_USUARIO
+from leilao_ia_v2.vivareal.slug import slug_vivareal
 from leilao_ia_v2.ui.app_theme import STREAMLIT_PAGE_CSS as _PAGE_CSS
 from leilao_ia_v2.ui.lote_jobs import escolher_job_referencia, progresso_job
 from leilao_ia_v2.ui.sim_form_compact import (
@@ -353,7 +354,9 @@ def _html_foto_imovel_extracao(row: dict[str, Any]) -> str:
     uq = html.escape(url_foto, quote=True)
     return (
         f'<div class="leilao-extracao-foto-wrap">'
-        f'<img src="{uq}" alt="Foto do imóvel" loading="lazy" referrerpolicy="no-referrer" />'
+        f'<img src="{uq}" alt="Foto do imóvel" loading="lazy" referrerpolicy="no-referrer" '
+        f'onerror="this.style.display=\'none\';var n=this.nextElementSibling;if(n){{n.style.display=\'inline-flex\';}}" />'
+        f'<a href="{uq}" target="_blank" rel="noopener noreferrer">Abrir foto do imóvel</a>'
         f"</div>"
     )
 
@@ -523,6 +526,110 @@ def _metadados_cache_row_ui(cache_row: dict[str, Any]) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _leilao_extra_row_ui(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("leilao_extra_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                return j
+        except Exception:
+            return {}
+    return {}
+
+
+def _linhas_auditoria_geo_leilao(row: dict[str, Any]) -> list[str]:
+    txt = str(row.get("ultima_ingestao_log_text") or "").strip()
+    if not txt:
+        return []
+    linhas_src = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    keep: list[str] = []
+    for ln in linhas_src:
+        low = ln.lower()
+        if (
+            "geo-first" in low
+            or "expansão" in low
+            or "taxas:" in low
+            or "motivos_por_anuncio" in low
+            or "coerencia_cidade_url" in low
+            or "reuso_bairro" in low
+            or "resultado:" in low
+        ):
+            keep.append(ln)
+    return keep[:60]
+
+
+def _render_bloco_geo_auditoria_e_correcao(row: dict[str, Any], iid: str) -> None:
+    with st.expander("Auditoria geográfica do leilão", expanded=False):
+        linhas_aud = _linhas_auditoria_geo_leilao(row)
+        if linhas_aud:
+            st.text("\n".join(linhas_aud))
+        else:
+            st.caption(
+                "Sem linhas de auditoria geográfica no `ultima_ingestao_log_text` deste leilão "
+                "(gere/recalcule a análise para preencher)."
+            )
+
+    with st.expander("Corrigir bairro informado (manual)", expanded=False):
+        extra = _leilao_extra_row_ui(row)
+        b_inf = str(extra.get("bairro_informado") or row.get("bairro") or "").strip()
+        b_can = str(extra.get("bairro_canonico") or "").strip()
+        st.caption(
+            "Use quando o bairro textual vier errado/desatualizado no edital. "
+            "O valor salvo entra como referência geográfica auxiliar."
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            st.text_input(
+                "Bairro informado (somente leitura)",
+                value=b_inf,
+                key=f"geo_binf_{iid}",
+                disabled=True,
+            )
+        with c2:
+            can_key = f"geo_bcan_{iid}"
+            st.text_input("Bairro canônico", value=b_can, key=can_key)
+        alias_key = f"geo_balias_{iid}"
+        st.text_input(
+            "Novo alias (opcional)",
+            value="",
+            key=alias_key,
+            placeholder="ex.: Chacara do Visconde",
+        )
+        if st.button("Salvar ajuste de bairro", key=f"geo_bsave_{iid}", type="secondary"):
+            novo_can = str(st.session_state.get(can_key) or "").strip()
+            novo_alias = str(st.session_state.get(alias_key) or "").strip()
+            extra_n = dict(extra)
+            if b_inf:
+                extra_n["bairro_informado"] = b_inf
+            if novo_can:
+                extra_n["bairro_canonico"] = novo_can
+            arr = list(extra_n.get("bairro_aliases") or [])
+            for v in (b_inf, novo_can, novo_alias):
+                sv = str(v or "").strip()
+                if not sv:
+                    continue
+                if sv not in arr:
+                    arr.append(sv)
+            extra_n["bairro_aliases"] = arr
+            if b_inf and novo_can:
+                extra_n["bairro_canonico_divergente"] = (
+                    slug_vivareal(b_inf) != slug_vivareal(novo_can)
+                )
+            try:
+                cli2 = get_supabase_client()
+                leilao_imoveis_repo.atualizar_leilao_imovel(iid, {"leilao_extra_json": extra_n}, cli2)
+                fresh = leilao_imoveis_repo.buscar_por_id(iid, cli2)
+                if isinstance(fresh, dict) and fresh.get("id"):
+                    st.session_state["ultimo_extracao"] = fresh
+                st.success("Bairro canônico/aliases atualizados.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Falha ao salvar ajuste de bairro: {e}")
 
 
 def _cache_e_principal_simulacao(cache_row: dict[str, Any]) -> bool:
@@ -810,6 +917,20 @@ def _render_painel_cache_mercado(
             html_linha_detalhe_painel("Uso", uso_txt),
             html_linha_detalhe_painel("Tipo de imóvel", tipo_seg),
         ]
+        geo_score = md_c.get("geo_confianca_score")
+        geo_cls = str(md_c.get("geo_confianca_classe") or "").strip().lower()
+        geo_msg = str(md_c.get("geo_confianca_msg") or "").strip()
+        if geo_score is not None:
+            try:
+                geo_score_txt = f"{float(geo_score):.1f}/100"
+            except Exception:
+                geo_score_txt = "—"
+            classe_txt = (geo_cls or "indefinida").upper()
+            linhas_painel.append(
+                html_linha_detalhe_painel("Confiança geográfica", f"{geo_score_txt} · {classe_txt}")
+            )
+            if geo_msg:
+                linhas_painel.append(html_linha_detalhe_painel("Leitura objetiva", html.escape(geo_msg)))
         if n_db is not None:
             linhas_painel.append(html_linha_detalhe_painel("Amostras (registro)", str(n_db)))
         linhas_painel.extend(
@@ -830,7 +951,7 @@ def _render_painel_cache_mercado(
         rows_html: list[str] = []
         if ads_seg:
             rows_html.append(
-                "<tr><th>Endereço</th><th>Bairro</th><th>m²</th><th>Valor</th><th>Anúncio</th></tr>"
+                "<tr><th>Endereço</th><th>Bairro</th><th>m²</th><th>Valor</th><th>Score geo</th><th>Anúncio</th></tr>"
             )
             for a in ads_seg:
                 ender = html.escape(str(a.get("logradouro") or "—").strip() or "—")
@@ -851,10 +972,18 @@ def _render_painel_cache_mercado(
                     link_cell = f'<a href="{uq}" target="_blank" rel="noopener noreferrer">abrir</a>'
                 else:
                     link_cell = "—"
-                rows_html.append(f"<tr><td>{ender}</td><td>{bai}</td><td>{m2c}</td><td>{vc}</td><td>{link_cell}</td></tr>")
+                md_a = _metadados_cache_row_ui(a)
+                sc = md_a.get("score_geo")
+                try:
+                    sc_txt = f"{float(sc):.1f}"
+                except Exception:
+                    sc_txt = "—"
+                rows_html.append(
+                    f"<tr><td>{ender}</td><td>{bai}</td><td>{m2c}</td><td>{vc}</td><td>{sc_txt}</td><td>{link_cell}</td></tr>"
+                )
         else:
             rows_html.append(
-                '<tr><td colspan="5" style="color:#94a3b8">Nenhum anúncio resolvido no banco para os IDs deste cache.</td></tr>'
+                '<tr><td colspan="6" style="color:#94a3b8">Nenhum anúncio resolvido no banco para os IDs deste cache.</td></tr>'
             )
 
         blocos.append(
@@ -3498,6 +3627,7 @@ def _render_painel_caches_leilao_selecionado_simulacao() -> None:
                 legenda_slot.caption(
                     "Sem dados numéricos para o resumo. Marque caches na tabela abaixo; vazio = todos."
                 )
+            _render_bloco_geo_auditoria_e_correcao(row, iid)
         _render_bloco_recalcular_caches_mercado(iid)
 
 
@@ -6266,6 +6396,9 @@ def _render_conteudo_principal() -> None:
                         unsafe_allow_html=True,
                     )
                     _render_painel_cache_mercado(caches_ui, ads_map_ui)
+                    iid_geo = str(row_ex.get("id") or "").strip()
+                    if iid_geo:
+                        _render_bloco_geo_auditoria_e_correcao(row_ex, iid_geo)
         with st.expander("Mapa interativo", expanded=False):
             _render_mapa_folium_row(row_ex, comparaveis=comparaveis_mapa)
 
