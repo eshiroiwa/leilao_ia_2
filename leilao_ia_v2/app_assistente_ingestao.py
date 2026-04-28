@@ -3307,123 +3307,6 @@ def _agregar_caches_para_painel_sim(
     }
 
 
-def _proposta_frase_busca_imovel_id(iid: str) -> str:
-    """Texto padrão da pesquisa Firecrawl a partir do registo no Supabase (mesma regra do pipeline)."""
-    from leilao_ia_v2.fc_search.query_builder import montar_frase_busca_mercado
-    from leilao_ia_v2.normalizacao import normalizar_tipo_imovel
-
-    try:
-        cli = get_supabase_client()
-    except Exception:
-        return ""
-    r = leilao_imoveis_repo.buscar_por_id(str(iid).strip(), cli)
-    if not isinstance(r, dict) or not r:
-        return ""
-    try:
-        t = str(normalizar_tipo_imovel(r.get("tipo_imovel")) or "apartamento")
-    except Exception:
-        t = "apartamento"
-    return (montar_frase_busca_mercado(r, t) or "").strip()
-
-
-def _executar_pendente_frase_firecrawl_pos_ingest(frase_digitada: str) -> None:
-    """Corre o Firecrawl Search pós-ingestão com a frase escolhida e depois o cache automático."""
-    p = st.session_state.get("fc_pendente_pos_ingest")
-    if not isinstance(p, dict) or not p.get("leilao_imovel_id"):
-        return
-    frase = (frase_digitada or "").strip()
-    if len(frase) < 8:
-        st.error("A frase de busca deve ter pelo menos 8 caracteres (requisito do Firecrawl Search).")
-        return
-    pl = p.get("payload_comparaveis")
-    if not isinstance(pl, dict):
-        st.error("Dados pendentes inválidos — volte a ingerir o edital.")
-        return
-    try:
-        cli = get_supabase_client()
-    except Exception as e:
-        st.error(f"Supabase indisponível: {e}")
-        return
-    from leilao_ia_v2.fc_search.pipeline import complementar_anuncios_firecrawl_search
-
-    lid = str(p.get("leilao_imovel_id") or "").strip()
-    cap0 = int(p.get("restante_fc_antes_comparaveis") or 0)
-    ign = bool(p.get("ignorar_cache_firecrawl", False))
-    with st.spinner("Firecrawl Search (comparáveis) e montagem de cache…"):
-        try:
-            salvos, diag_fc, n_api = complementar_anuncios_firecrawl_search(
-                cli,
-                leilao_imovel_id=lid,
-                cidade=str(pl.get("cidade") or ""),
-                estado_raw=str(pl.get("estado_raw") or ""),
-                bairro=str(pl.get("bairro") or ""),
-                tipo_imovel=str(pl.get("tipo_imovel") or "apartamento"),
-                area_ref=float(pl.get("area_ref") or 0),
-                ignorar_cache_firecrawl=ign,
-                max_chamadas_api=cap0,
-                frase_busca_override=frase,
-            )
-        except Exception as e:
-            st.error(f"Falha no Firecrawl Search: {e}")
-            logger.exception("Pendente pós-ingest: complementar")
-            return
-        rest2 = max(0, cap0 - int(n_api or 0))
-        try:
-            cres = resolver_cache_media_pos_ingestao(
-                cli,
-                lid,
-                ignorar_cache_firecrawl=ign,
-                max_chamadas_api_firecrawl=rest2,
-                frase_busca_firecrawl_override=frase,
-            )
-        except Exception as e:
-            st.error(f"Falha ao montar cache: {e}")
-            logger.exception("Pendente pós-ingest: resolver cache")
-            return
-    st.session_state.pop("fc_pendente_pos_ingest", None)
-    for k in list(st.session_state.keys()):
-        if k.startswith("fc_pendente_frase_draft"):
-            st.session_state.pop(k, None)
-    st.success(
-        f"Concluído: comparáveis gravados={int(salvos or 0)} · cache={'OK' if cres.ok else cres.mensagem}"
-    )
-    st.text((diag_fc or "")[:4000] + ("\n" + formatar_log_pos_cache(cres))[:2000])
-    try:
-        fresh = leilao_imoveis_repo.buscar_por_id(lid, cli)
-    except Exception:
-        fresh = None
-    if isinstance(fresh, dict) and fresh.get("id"):
-        st.session_state["ultimo_extracao"] = fresh
-    st.rerun()
-
-
-def _render_pendente_frase_firecrawl_pos_ingest() -> None:
-    p = st.session_state.get("fc_pendente_pos_ingest")
-    if not isinstance(p, dict) or not p.get("leilao_imovel_id"):
-        return
-    proposta = str(p.get("frase_proposta") or "")
-    lidp = str(p.get("leilao_imovel_id") or "").strip()
-    kdraft = f"fc_pendente_frase_draft_{lidp}"
-    st.session_state.setdefault(kdraft, proposta)
-    with st.container(border=True):
-        st.warning("**Pendente:** confirmação da frase de **Firecrawl Search** (anúncios na web) antes de gastar créditos.")
-        st.caption("Edite a frase se quiser — o sistema usa exatamente o texto abaixo na pesquisa.")
-        t = st.text_area(
-            "Frase de busca a usar",
-            key=kdraft,
-            height=100,
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Executar busca e montar cache", type="primary", key="fc_pendente_executar"):
-                _executar_pendente_frase_firecrawl_pos_ingest(t)
-        with c2:
-            if st.button("Descartar pendência", key="fc_pendente_descartar"):
-                st.session_state.pop("fc_pendente_pos_ingest", None)
-                st.session_state.pop(kdraft, None)
-                st.rerun()
-
-
 def _refazer_analise_leilao_sem_firecrawl(iid: str, cli: Any) -> tuple[bool, str, str]:
     """
     Recalcula o leilão do zero usando apenas dados já no banco (sem novas chamadas Firecrawl).
@@ -3493,15 +3376,6 @@ def _render_bloco_recalcular_caches_mercado(imovel_id: str) -> None:
             key=f"recache_ignfc_{iid}",
         )
         bp = parametros_de_session_state(st.session_state)
-        sk = f"recache_frase_draft_{iid}"
-        if bp.confirmar_frase_firecrawl_search:
-            st.session_state.setdefault(sk, _proposta_frase_busca_imovel_id(iid))
-            st.text_area(
-                "Frase de busca (Firecrawl Search)",
-                key=sk,
-                height=90,
-                help="Texto exato a usar na pesquisa web (mínimo 8 caracteres). Ajuste em **Ajustes de busca** para não pedir confirmação.",
-            )
         if st.button(
             "Recalcular caches agora",
             key=f"recache_run_{iid}",
@@ -3512,13 +3386,6 @@ def _render_bloco_recalcular_caches_mercado(imovel_id: str) -> None:
             except Exception as e:
                 st.error(f"Supabase indisponível: {e}")
                 return
-            frase_oc: str | None = None
-            if bp.confirmar_frase_firecrawl_search:
-                fr = (st.session_state.get(sk) or "").strip()
-                if len(fr) < 8:
-                    st.error("A frase de busca deve ter pelo menos 8 caracteres.")
-                    return
-                frase_oc = fr
             with st.spinner("A desvincular, eventualmente apagar orfãs e a criar novos caches…"):
                 r = recalcular_caches_mercado_para_leilao(
                     cli,
@@ -3527,7 +3394,6 @@ def _render_bloco_recalcular_caches_mercado(imovel_id: str) -> None:
                     ignorar_cache_firecrawl=ign_fc,
                     raio_km=float(bp.raio_km),
                     max_chamadas_api_firecrawl=int(bp.max_firecrawl_creditos_analise),
-                    frase_busca_firecrawl_override=frase_oc,
                 )
             if r.ok:
                 st.success(r.mensagem)
@@ -5142,7 +5008,7 @@ def _render_bloco_ingestao_lote_csv() -> None:
                 "Máx. Firecrawl/item",
                 min_value=0,
                 max_value=50,
-                value=15,
+                value=20,
                 step=1,
                 key="ing_lote_csv_max_fc_item",
                 help="Limite de chamadas Firecrawl por item no recálculo de mercado/cache.",
@@ -5588,7 +5454,7 @@ def _render_sidebar_ingestao_lote_csv() -> None:
                     "Máx. FC/item",
                     min_value=0,
                     max_value=50,
-                    value=15,
+                    value=20,
                     step=1,
                     key="sidebar_ing_lote_csv_max_fc_item",
                 )
@@ -5694,11 +5560,6 @@ def _render_sidebar_ajustes_busca() -> None:
             step=1,
             key="bm_max_firecrawl_creditos",
             help="Teto de chamadas API (1 search + N scrapes) numa mesma ingestão: edital, comparáveis e montagem de cache partilham este saldo.",
-        )
-        st.checkbox(
-            "Confirmar frase (Firecrawl Search)",
-            key="bm_confirmar_frase_fc_search",
-            help="Se ativo, a frase de busca na web é mostrada para confirmar ou editar antes de pesquisar (ingestão e recálculo de cache).",
         )
         if st.button("Repor padrões", key="bm_reset_defaults", use_container_width=True):
             st.session_state[_BM_APPLY_DEFAULTS_FLAG] = True
@@ -6316,8 +6177,6 @@ def _render_conteudo_principal() -> None:
         "</div></div>",
         unsafe_allow_html=True,
     )
-
-    _render_pendente_frase_firecrawl_pos_ingest()
 
     _sp_hero = st.session_state.snapshot or {}
     _st_hero = _sp_hero.get("status")

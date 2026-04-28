@@ -1,30 +1,19 @@
 """
-Adaptador entre o pipeline de ingestão do edital e o módulo `comparaveis` (v2).
+Adaptador entre o pipeline de ingestão do edital e o módulo `comparaveis`.
 
-Este módulo é a **única porta** pela qual o pipeline antigo
-(`pipeline/ingestao_edital.py`) invoca a busca de comparáveis. Ele:
+Este módulo é a **única porta** pela qual o resto da aplicação invoca a busca
+de comparáveis. Ele:
 
-1. Lê a flag de ambiente :data:`FLAG_ENV` (``LEILAO_IA_COMPARAVEIS_NOVO``).
-2. Quando **off** (default), delega ao caminho antigo
-   :func:`services.comparaveis_pos_ingestao.executar_comparaveis_apos_ingestao_leilao`,
-   preservando a compatibilidade total enquanto o novo módulo está em rollout.
-3. Quando **on**, executa :func:`comparaveis.pipeline.executar_pipeline` e
-   converte o :class:`EstatisticasPipeline` para o **mesmo formato de dict**
-   que o caminho antigo devolve — o pipeline de ingestão lê apenas dicts e
-   não precisa de saber qual versão correu.
+1. Constrói um :class:`LeilaoAlvo` a partir da extração do edital.
+2. Cria um :class:`OrcamentoFirecrawl` com o cap recebido.
+3. Executa :func:`comparaveis.pipeline.executar_pipeline`.
+4. Converte o :class:`EstatisticasPipeline` para o **mesmo formato de dict**
+   que o resto do pipeline espera consumir
+   (:func:`pipeline.ingestao_edital`, :func:`services.cache_media_leilao`).
 
-Princípios:
-- **Mesma assinatura** que o caminho antigo → swap sem migração de chamadores.
-- **Mesmo formato de retorno** (chaves: ``ok``, ``omitido``, ``motivo``,
-  ``anuncios_salvos``, ``url_listagem``, ``n_geocodificados``,
-  ``markdown_insuficiente``, ``firecrawl_chamadas_api``,
-  ``diagnostico_firecrawl_search``, ``falha_por_filtros_persistencia``).
-- ``aguarda_confirmacao_frase`` **não é suportado** na v2 — a frase é
-  determinística (uma só, focada). Se o utilizador quiser confirmar, faz-lo
-  ANTES de habilitar a flag.
-- **Defesa em profundidade**: se a v2 falhar com excepção inesperada, o
-  router devolve ``ok=False`` em vez de propagar, mantendo o resto do pipeline
-  vivo.
+Defesa em profundidade: se o pipeline levantar excepção inesperada, devolvemos
+``ok=False`` em vez de propagar — o resto da ingestão (gravação do leilão,
+cache automático, log) continua a correr.
 """
 
 from __future__ import annotations
@@ -47,90 +36,91 @@ from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
 logger = logging.getLogger(__name__)
 
 
-FLAG_ENV = "LEILAO_IA_COMPARAVEIS_NOVO"
-"""Variável de ambiente que activa a v2. Valores aceites como `on`:
-``"1"``, ``"true"``, ``"on"``, ``"yes"``, ``"sim"`` (case-insensitive)."""
-
-URL_LISTAGEM_V2 = "comparaveis_v2"
+URL_LISTAGEM = "comparaveis_v2"
+"""Marca de proveniência usada em logs / campo ``url_listagem`` do dict de retorno."""
 
 
-def flag_v2_ativa() -> bool:
-    """Devolve ``True`` se a flag ``LEILAO_IA_COMPARAVEIS_NOVO`` está activa.
+def formatar_log_pos_ingestao(resumo: dict[str, Any]) -> str:
+    """Texto curto para anexar a ``ultima_ingestao_log_text``.
 
-    Aceita ``"1"``, ``"true"``, ``"on"``, ``"yes"``, ``"sim"`` (case-insensitive).
-    Tudo o resto (incluindo ausente/vazio) é tratado como off.
+    Aceita o dict produzido por :func:`executar_comparaveis_pos_ingestao`
+    (mesmas chaves que o caminho antigo).
     """
-    raw = (os.getenv(FLAG_ENV) or "").strip().lower()
-    return raw in {"1", "true", "on", "yes", "sim"}
+    if resumo.get("omitido"):
+        return f"Comparáveis: omitido — {resumo.get('motivo', '')}"
+    if not resumo.get("ok"):
+        return f"Comparáveis: falha — {resumo.get('erro', resumo)}"
+    parts = [
+        "Comparáveis (v2): OK",
+        f"anuncios_salvos={resumo.get('anuncios_salvos', 0)}",
+        f"url_listagem={str(resumo.get('url_listagem') or '')[:120]}",
+        f"geocodificados={resumo.get('n_geocodificados', 0)}",
+    ]
+    if resumo.get("markdown_insuficiente"):
+        parts.append("nenhum_card_persistido")
+    nfc = int(resumo.get("firecrawl_chamadas_api") or 0)
+    if nfc > 0:
+        parts.append(f"firecrawl_api_calls={nfc}")
+    base = " | ".join(parts)
+    diag = str(resumo.get("diagnostico_firecrawl_search") or "").strip()
+    if diag:
+        if len(diag) > 8000:
+            diag = diag[:8000] + "\n… (diagnóstico truncado)"
+        base = f"{base}\n--- Comparáveis (resumo) ---\n{diag}"
+    return base
 
 
 def executar_comparaveis_pos_ingestao(
     client: Client,
     *,
-    leilao_imovel_id: str,
+    leilao_imovel_id: str,  # noqa: ARG001 - mantido por compat de assinatura; v2 não precisa
     extn: ExtracaoEditalLLM,
-    ignorar_cache_firecrawl: bool = False,
+    ignorar_cache_firecrawl: bool = False,  # noqa: ARG001 - cache de scrape é sempre reusado (gratuito)
     max_chamadas_api_firecrawl: int | None = None,
 ) -> dict[str, Any]:
-    """Router: chama v2 (sob flag) ou v1 (default).
+    """Executa a busca de comparáveis após a ingestão do edital.
 
     Args:
-        client: cliente Supabase (passado adiante a v1 ou à persistência v2).
-        leilao_imovel_id: id do leilão recém ingerido (usado pela v1; a v2
-            não precisa porque os anúncios em ``anuncios_mercado`` não são
-            por leilão — a vinculação é feita depois via ``cache_media_bairro``).
+        client: cliente Supabase usado para upsert em ``anuncios_mercado``.
+        leilao_imovel_id: id do leilão recém ingerido (não usado pela v2 — os
+            anúncios em ``anuncios_mercado`` não são por leilão; a vinculação
+            é feita depois via ``cache_media_bairro``). Mantido por compat
+            com chamadores que ainda passam.
         extn: extração do edital (cidade, UF, bairro, tipo, área).
-        ignorar_cache_firecrawl: se ``True``, força nova chamada à API
-            mesmo havendo cache em disco. **Hoje a v2 ignora este flag**
-            porque o cache de scrape é gratuito e queremos sempre reusá-lo.
-        max_chamadas_api_firecrawl: cap de créditos para esta etapa (igual
-            semântica nas duas versões — `max_firecrawl_creditos_analise`).
-            ``None`` deixa cada implementação aplicar o seu default.
+        ignorar_cache_firecrawl: ignorado pela v2 — o cache de scrape em disco
+            é sempre reusado porque é gratuito (não consome créditos Firecrawl).
+        max_chamadas_api_firecrawl: cap de créditos para esta etapa
+            (semântica: ``max_firecrawl_creditos_analise``). ``None`` usa o
+            default lido de :func:`config.busca_mercado_parametros`.
 
     Returns:
-        Dict no mesmo formato que o caminho antigo. Ver
-        :func:`services.comparaveis_pos_ingestao.formatar_log_pos_ingestao`
-        para a lista de chaves consumidas pelo pipeline de ingestão.
+        Dict com chaves: ``ok``, ``omitido``, ``motivo``, ``anuncios_salvos``,
+        ``url_listagem``, ``n_geocodificados``, ``markdown_insuficiente``,
+        ``firecrawl_chamadas_api``, ``diagnostico_firecrawl_search``,
+        ``falha_por_filtros_persistencia``.
     """
-    if flag_v2_ativa():
-        logger.info("Comparaveis: rota v2 ativa (LEILAO_IA_COMPARAVEIS_NOVO=1).")
-        try:
-            return _executar_v2(
-                client,
-                leilao_imovel_id=leilao_imovel_id,
-                extn=extn,
-                max_chamadas_api_firecrawl=max_chamadas_api_firecrawl,
-            )
-        except Exception:
-            logger.exception("Comparaveis v2: falha — devolvendo erro sem propagar.")
-            return {
-                "ok": False,
-                "erro": "comparaveis_v2_excecao_ver_log",
-                "firecrawl_chamadas_api": 0,
-            }
-
-    # Default: caminho antigo (v1) — preserva comportamento existente.
-    from leilao_ia_v2.services.comparaveis_pos_ingestao import (
-        executar_comparaveis_apos_ingestao_leilao,
-    )
-
-    return executar_comparaveis_apos_ingestao_leilao(
-        client,
-        leilao_imovel_id=leilao_imovel_id,
-        extn=extn,
-        ignorar_cache_firecrawl=ignorar_cache_firecrawl,
-        max_chamadas_api_firecrawl=max_chamadas_api_firecrawl,
-    )
+    try:
+        return _executar(
+            client,
+            extn=extn,
+            max_chamadas_api_firecrawl=max_chamadas_api_firecrawl,
+        )
+    except Exception:
+        logger.exception("Comparaveis: falha — devolvendo erro sem propagar.")
+        return {
+            "ok": False,
+            "erro": "comparaveis_excecao_ver_log",
+            "firecrawl_chamadas_api": 0,
+        }
 
 
 # -----------------------------------------------------------------------------
-# Implementação v2
+# Implementação
 # -----------------------------------------------------------------------------
 
-def _executar_v2(
+def _executar(
     client: Client,
     *,
-    leilao_imovel_id: str,
     extn: ExtracaoEditalLLM,
     max_chamadas_api_firecrawl: int | None,
 ) -> dict[str, Any]:
@@ -177,9 +167,67 @@ def _executar_v2(
         leilao,
         orcamento=orcamento,
         supabase_client=client,
+        min_amostras_refino=_resolver_min_amostras_refino(),
     )
 
     return _resultado_para_dict(resultado, orcamento)
+
+
+def executar_comparaveis_para_cache(
+    client: Client,
+    *,
+    cidade: str,
+    estado_raw: str,
+    bairro: str,
+    tipo_imovel: str,
+    area_ref: float = 0.0,
+    max_chamadas_api: int | None = None,
+) -> tuple[int, int]:
+    """Helper para o cache de média complementar amostras via Firecrawl.
+
+    Devolve a mesma assinatura esperada por
+    :func:`services.cache_media_leilao._uma_coleta_firecrawl_search`:
+    ``(n_anuncios_gravados, n_chamadas_api_estimadas)``.
+
+    Diferente de :func:`executar_comparaveis_pos_ingestao`, esta variante
+    aceita os campos individuais (a chamadora não tem um ``ExtracaoEditalLLM``).
+    Em caso de qualquer erro, devolve ``(0, 0)``.
+    """
+    cidade_l = (cidade or "").strip()
+    estado_l = (estado_raw or "").strip()
+    if not cidade_l or not estado_l:
+        return 0, 0
+    if not (os.getenv("FIRECRAWL_API_KEY") or "").strip():
+        return 0, 0
+    cap_fc = _resolver_cap(max_chamadas_api)
+    if cap_fc <= 0:
+        return 0, 0
+
+    uf = estado_livre_para_sigla_uf(estado_l) or estado_l[:2].upper()
+    if len(uf) != 2:
+        return 0, 0
+
+    leilao = LeilaoAlvo(
+        cidade=cidade_l,
+        estado_uf=uf,
+        tipo_imovel=(tipo_imovel or "apartamento").strip().lower(),
+        bairro=(bairro or "").strip(),
+        area_m2=float(area_ref) if area_ref and float(area_ref) > 0 else None,
+    )
+    orcamento = OrcamentoFirecrawl(cap=cap_fc)
+    try:
+        resultado = executar_pipeline(
+            leilao,
+            orcamento=orcamento,
+            supabase_client=client,
+            min_amostras_refino=_resolver_min_amostras_refino(),
+        )
+    except Exception:
+        logger.exception("Comparaveis (cache): falha — devolvendo (0,0).")
+        return 0, 0
+
+    s = resultado.estatisticas
+    return int(s.persistidos), _chamadas_api(s)
 
 
 def _resultado_para_dict(
@@ -195,7 +243,7 @@ def _resultado_para_dict(
             "omitido": True,
             "motivo": s.motivo_aborto or "abortado",
             "anuncios_salvos": 0,
-            "url_listagem": URL_LISTAGEM_V2,
+            "url_listagem": URL_LISTAGEM,
             "n_geocodificados": 0,
             "markdown_insuficiente": True,
             "firecrawl_chamadas_api": _chamadas_api(s),
@@ -211,7 +259,7 @@ def _resultado_para_dict(
     return {
         "ok": True,
         "anuncios_salvos": persistidos,
-        "url_listagem": URL_LISTAGEM_V2,
+        "url_listagem": URL_LISTAGEM,
         "n_geocodificados": int(s.cards_aprovados_validacao),
         "markdown_insuficiente": persistidos == 0,
         "firecrawl_chamadas_api": _chamadas_api(s),
@@ -230,7 +278,7 @@ def _omitido(motivo: str, *, diagnostico: str = "") -> dict[str, Any]:
         "omitido": True,
         "motivo": motivo,
         "anuncios_salvos": 0,
-        "url_listagem": URL_LISTAGEM_V2,
+        "url_listagem": URL_LISTAGEM,
         "n_geocodificados": 0,
         "markdown_insuficiente": False,
         "firecrawl_chamadas_api": 0,
@@ -250,8 +298,25 @@ def _resolver_cap(cap_arg: int | None) -> int:
 
         return int(get_busca_mercado_parametros().max_firecrawl_creditos_analise)
     except Exception:
-        logger.warning("Não consegui ler max_firecrawl_creditos_analise — usando 15.", exc_info=True)
-        return 15
+        logger.warning("Não consegui ler max_firecrawl_creditos_analise — usando 20.", exc_info=True)
+        return 20
+
+
+def _resolver_min_amostras_refino() -> int:
+    """Lê ``min_amostras_cache`` da config e usa como limiar para o refino.
+
+    Política da pergunta 3: se após descartar um card refinado (cuja nova
+    coord caiu noutro município) ainda houver ``>= min_amostras`` cards
+    aprovados, descartar; caso contrário reverter para coord antiga.
+    Reusamos o mesmo limiar do cache para coerência: não vale a pena
+    persistir cards "refinados-erradamente" se o cache não vai usar mesmo.
+    """
+    try:
+        from leilao_ia_v2.config.busca_mercado_parametros import get_busca_mercado_parametros
+
+        return int(get_busca_mercado_parametros().min_amostras_cache)
+    except Exception:
+        return 4
 
 
 def _area_referencia(extn: ExtracaoEditalLLM) -> float:
@@ -267,11 +332,7 @@ def _area_referencia(extn: ExtracaoEditalLLM) -> float:
 
 
 def _chamadas_api(s: Any) -> int:
-    """Conta chamadas REAIS à API Firecrawl (search + scrapes não-cache).
-
-    O caminho antigo conta uma "chamada" ≈ uma round-trip à API.
-    Cache hits NÃO contam. Search conta como 1 (mesmo custando 2 cr).
-    """
+    """Conta chamadas REAIS à API Firecrawl (search + scrapes não-cache)."""
     paginas = int(getattr(s, "paginas_scrapadas", 0) or 0)
     cache_hits = int(getattr(s, "paginas_cache_hit", 0) or 0)
     scrapes_pagos = max(0, paginas - cache_hits)

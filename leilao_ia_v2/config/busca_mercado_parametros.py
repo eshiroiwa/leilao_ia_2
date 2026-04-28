@@ -26,10 +26,9 @@ class BuscaMercadoParametros:
     area_fator_max: float = 1.30
     raio_km: float = 6.0
     min_amostras_cache: int = 4
-    #: Se True, a app mostra a frase do Firecrawl Search para confirmar/alterar antes de pesquisar.
-    confirmar_frase_firecrawl_search: bool = False
     #: Teto de chamadas Firecrawl (search + scrapes) por **análise/ingestão** e por invocação de cache isolada.
-    max_firecrawl_creditos_analise: int = 12
+    #: Inclui: 1 search (2cr) + scrape de listagens + refino top-N (até 8 scrapes individuais).
+    max_firecrawl_creditos_analise: int = 20
     #: Máximo de anúncios no **cache principal** (simulação); o resto vai a caches de referência em lotes.
     cache_max_amostras_principal: int = 8
     #: Tamanho de cada **lote** de anúncios nos caches de referência (e terrenos em partes).
@@ -52,19 +51,6 @@ def _clamp_float(v: Any, lo: float, hi: float, default: float) -> float:
     return max(lo, min(hi, x))
 
 
-def _bool_sess(v: Any, default: bool = False) -> bool:
-    if v is None:
-        return default
-    if isinstance(v, bool):
-        return v
-    s = str(v).strip().lower()
-    if s in ("1", "true", "yes", "on", "sim"):
-        return True
-    if s in ("0", "false", "no", "off", "não", "nao"):
-        return False
-    return default
-
-
 def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametros:
     """
     Constrói parâmetros a partir do estado da sessão Streamlit.
@@ -78,10 +64,9 @@ def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametr
     amax_src = sess.get("bm_area_pct_max", d.get("area_pct_max", 130))
     raio_src = sess.get("bm_raio_km", d.get("raio_km", 6.0))
     min_cache_src = sess.get("bm_min_amostras_cache", d.get("min_amostras_cache", 4))
-    max_fc_src = sess.get("bm_max_firecrawl_creditos", d.get("max_firecrawl_creditos_analise", 12))
+    max_fc_src = sess.get("bm_max_firecrawl_creditos", d.get("max_firecrawl_creditos_analise", 20))
     cap_pri_src = sess.get("bm_cache_max_principal", d.get("cache_max_amostras_principal", 8))
     cap_lote_src = sess.get("bm_cache_max_lote", d.get("cache_max_amostras_lote", 8))
-    conf_fc_src = sess.get("bm_confirmar_frase_fc_search", d.get("confirmar_frase_firecrawl_search", False))
 
     amin_p = _clamp_int(amin_src, 30, 120, 75)
     amax_p = _clamp_int(amax_src, 80, 350, 130)
@@ -90,7 +75,7 @@ def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametr
 
     raio = _clamp_float(raio_src, 0.5, 80.0, 6.0)
     min_cache = _clamp_int(min_cache_src, 1, 25, 4)
-    max_fc = _clamp_int(max_fc_src, 1, 50, 12)
+    max_fc = _clamp_int(max_fc_src, 1, 50, 20)
     cap_pri = _clamp_int(cap_pri_src, 1, 50, 8)
     cap_lote = _clamp_int(cap_lote_src, 1, 50, 8)
     if cap_lote < 1:
@@ -103,7 +88,6 @@ def parametros_de_session_state(sess: Mapping[str, Any]) -> BuscaMercadoParametr
         area_fator_max=amax_p / 100.0,
         raio_km=raio,
         min_amostras_cache=min_cache,
-        confirmar_frase_firecrawl_search=_bool_sess(conf_fc_src, False),
         max_firecrawl_creditos_analise=max_fc,
         cache_max_amostras_principal=cap_pri,
         cache_max_amostras_lote=cap_lote,
@@ -149,8 +133,7 @@ def defaults_chaves_busca_mercado_session() -> dict[str, Any]:
         "bm_area_pct_max": 130,
         "bm_raio_km": 6.0,
         "bm_min_amostras_cache": 4,
-        "bm_max_firecrawl_creditos": 12,
+        "bm_max_firecrawl_creditos": 20,
         "bm_cache_max_principal": 8,
         "bm_cache_max_lote": 8,
-        "bm_confirmar_frase_fc_search": False,
     }

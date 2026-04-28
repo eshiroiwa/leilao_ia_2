@@ -41,7 +41,11 @@ def _card(
     )
 
 
-def _validacao_ok(municipio="Pindamonhangaba", coords=(-22.92, -45.46)) -> ResultadoValidacaoMunicipio:
+def _validacao_ok(
+    municipio="Pindamonhangaba",
+    coords=(-22.92, -45.46),
+    precisao="rua",
+) -> ResultadoValidacaoMunicipio:
     return ResultadoValidacaoMunicipio(
         valido=True,
         motivo="ok",
@@ -49,6 +53,7 @@ def _validacao_ok(municipio="Pindamonhangaba", coords=(-22.92, -45.46)) -> Resul
         coordenadas=coords,
         municipio_alvo_slug="pindamonhangaba",
         municipio_real_slug="pindamonhangaba",
+        precisao_geo=precisao,
     )
 
 
@@ -185,6 +190,92 @@ class TestParaDict:
             "valor_venda", "area_construida_m2", "transacao", "metadados_json",
         ):
             assert k in d
+
+
+# -----------------------------------------------------------------------------
+# Política de precisão (jitter, marcador, cidade-centroide, desconhecido)
+# -----------------------------------------------------------------------------
+
+class TestPoliticaPrecisao:
+    def test_rua_marca_metadados_e_mantem_coord(self):
+        l = montar_linha(
+            _card(),
+            _validacao_ok(coords=(-22.92, -45.46), precisao="rua"),
+            tipo_imovel="apartamento",
+            estado_uf="SP",
+        )
+        assert l.latitude == -22.92 and l.longitude == -45.46
+        assert l.metadados_json["precisao_geo"] == "rua"
+
+    def test_rooftop_marca_e_mantem_coord(self):
+        l = montar_linha(
+            _card(),
+            _validacao_ok(coords=(-22.92, -45.46), precisao="rooftop"),
+            tipo_imovel="apartamento",
+            estado_uf="SP",
+        )
+        assert l.latitude == -22.92
+        assert l.metadados_json["precisao_geo"] == "rooftop"
+
+    def test_bairro_aplica_jitter_determinístico(self):
+        # Mesmo URL → mesmo jitter (idempotência do upsert).
+        c1 = _card(url="https://portal.com/imovel/1/")
+        v = _validacao_ok(coords=(-22.92, -45.46), precisao="bairro")
+        l1 = montar_linha(c1, v, tipo_imovel="apartamento", estado_uf="SP")
+        l2 = montar_linha(c1, v, tipo_imovel="apartamento", estado_uf="SP")
+        assert l1.latitude == l2.latitude
+        assert l1.longitude == l2.longitude
+        # Jitter aplicado: coord muda do centroide.
+        assert l1.latitude != -22.92 or l1.longitude != -45.46
+        # Marcador dedicado.
+        assert l1.metadados_json["precisao_geo"] == "bairro_centroide"
+        # Magnitude do jitter ≈ ±80m → ≈ 0.000721 graus em lat.
+        assert abs(l1.latitude - (-22.92)) < 0.001
+        assert abs(l1.longitude - (-45.46)) < 0.002
+
+    def test_bairro_jitter_difere_entre_urls(self):
+        c1 = _card(url="https://portal.com/imovel/A/")
+        c2 = _card(url="https://portal.com/imovel/B/")
+        v = _validacao_ok(coords=(-22.92, -45.46), precisao="bairro")
+        l1 = montar_linha(c1, v, tipo_imovel="apartamento", estado_uf="SP")
+        l2 = montar_linha(c2, v, tipo_imovel="apartamento", estado_uf="SP")
+        assert (l1.latitude, l1.longitude) != (l2.latitude, l2.longitude)
+
+    def test_cidade_marca_centroide_e_mantem_coord(self):
+        l = montar_linha(
+            _card(),
+            _validacao_ok(coords=(-22.92, -45.46), precisao="cidade"),
+            tipo_imovel="apartamento",
+            estado_uf="SP",
+        )
+        # Cidade pequena: persistir coord mas marcar para o cache descartar
+        # quando houver alternativas melhores.
+        assert l.latitude == -22.92 and l.longitude == -45.46
+        assert l.metadados_json["precisao_geo"] == "cidade_centroide"
+
+    def test_desconhecido_nao_grava_coord(self):
+        l = montar_linha(
+            _card(),
+            _validacao_ok(coords=(-22.92, -45.46), precisao="desconhecido"),
+            tipo_imovel="apartamento",
+            estado_uf="SP",
+        )
+        assert l.latitude is None and l.longitude is None
+        assert l.metadados_json["precisao_geo"] == "desconhecido"
+
+    def test_validacao_sem_coords_marca_desconhecido(self):
+        v = ResultadoValidacaoMunicipio(
+            valido=True,
+            motivo="ok",
+            municipio_real="Pindamonhangaba",
+            coordenadas=None,
+            municipio_alvo_slug="pindamonhangaba",
+            municipio_real_slug="pindamonhangaba",
+            precisao_geo="",
+        )
+        l = montar_linha(_card(), v, tipo_imovel="apartamento", estado_uf="SP")
+        assert l.latitude is None and l.longitude is None
+        assert l.metadados_json["precisao_geo"] == "desconhecido"
 
 
 # -----------------------------------------------------------------------------

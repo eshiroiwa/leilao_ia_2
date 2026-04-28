@@ -14,7 +14,7 @@ def test_parametros_padrao_fora_streamlit():
     assert p.area_fator_max == 1.30
     assert p.raio_km == 6.0
     assert p.min_amostras_cache == 4
-    assert p.max_firecrawl_creditos_analise == 12
+    assert p.max_firecrawl_creditos_analise == 20
     assert p.cache_max_amostras_principal == 8
     assert p.cache_max_amostras_lote == 8
 

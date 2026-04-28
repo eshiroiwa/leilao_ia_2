@@ -1,24 +1,20 @@
 """
 Construção determinística de **uma única** frase de busca para Firecrawl Search.
 
-O pacote antigo `leilao_ia_v2/fc_search/query_builder.py` gera até 4 frases por
-leilão (Q0 empreendimento, Q1 rua, Q2 cidade, Q3 bairro), o que multiplica o
-custo por 4 e amplia o risco de trazer cidades vizinhas em queries muito largas
-(causa-raiz #2 do incidente Pindamonhangaba → São Bernardo).
+Prioriza precisão geográfica e linguagem natural do que utilizadores e portais
+escrevem (uma chamada de search por ingestão):
 
-Esta versão prioriza precisão geográfica:
-
-- A frase **sempre** termina com ``"<cidade> <UF>"`` (e o UF por extenso quando
-  a cidade é homónima de muitas — desambiguação cara, mas barata em texto).
-- Inclui sempre **tipo de imóvel** (apartamento/casa/terreno/sobrado/...) quando
-  conhecido — palavra normalmente presente no título dos portais.
-- Inclui **bairro** quando conhecido (sinal de proximidade muito mais forte que
-  rua, e ortograficamente mais estável).
-- Inclui **área aproximada** apenas se vier no edital E for plausível (15 a 1000
-  m²) — usado como filtro de "tamanho similar" pelos motores de busca.
-- **Nunca** inclui o nome do empreendimento sozinho: o nome de condomínio
-  funciona como query de baixa qualidade e foi a fonte do bug Pindamonhangaba
-  (o "Empreendimento Vila Maria" matchou um anúncio em SP capital).
+- A frase **sempre** termina com ``"<cidade> <UF>"``.
+- O tipo de imóvel entra **no plural com "à venda em"** (ex.: "apartamentos à
+  venda em Centro Pindamonhangaba SP") — alinha com o SEO dos portais
+  imobiliários, que indexam páginas de listagem em vez de anúncios isolados.
+- Inclui **bairro** quando conhecido (sinal de proximidade muito forte e
+  ortograficamente mais estável que rua).
+- **Não inclui área em m²**: páginas de listagem juntam várias áreas; um
+  número específico restringe demais e prejudica a recall.
+- **Nunca** inclui o nome do empreendimento sozinho: foi a fonte do bug
+  histórico em que o "Empreendimento Vila Maria" matchou um anúncio em SP
+  capital.
 
 A função é pura (sem efeitos colaterais) e totalmente testável.
 """
@@ -31,22 +27,23 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-_TIPOS_CANONICOS: dict[str, str] = {
-    "apartamento": "apartamento",
-    "apto": "apartamento",
-    "ap": "apartamento",
-    "casa": "casa",
-    "sobrado": "sobrado",
-    "terreno": "terreno",
-    "lote": "terreno",
-    "gleba": "terreno",
-    "sala": "sala comercial",
-    "loja": "loja",
-    "galpao": "galpão",
-    "galpão": "galpão",
-    "comercial": "imóvel comercial",
-    "industrial": "imóvel industrial",
-    "rural": "imóvel rural",
+# Mapeamento tipo livre → (singular canónico, plural usado na frase).
+_TIPOS_CANONICOS: dict[str, tuple[str, str]] = {
+    "apartamento": ("apartamento", "apartamentos"),
+    "apto": ("apartamento", "apartamentos"),
+    "ap": ("apartamento", "apartamentos"),
+    "casa": ("casa", "casas"),
+    "sobrado": ("sobrado", "sobrados"),
+    "terreno": ("terreno", "terrenos"),
+    "lote": ("terreno", "terrenos"),
+    "gleba": ("terreno", "terrenos"),
+    "sala": ("sala comercial", "salas comerciais"),
+    "loja": ("loja", "lojas"),
+    "galpao": ("galpão", "galpões"),
+    "galpão": ("galpão", "galpões"),
+    "comercial": ("imóvel comercial", "imóveis comerciais"),
+    "industrial": ("imóvel industrial", "imóveis industriais"),
+    "rural": ("imóvel rural", "imóveis rurais"),
 }
 
 
@@ -56,27 +53,27 @@ def _strip_acentos(s: str) -> str:
     )
 
 
-def _normalizar_tipo(tipo_imovel: str) -> str:
-    """Mapeia variantes de tipo para um termo canónico em português.
+def _normalizar_tipo(tipo_imovel: str) -> tuple[str, str]:
+    """Mapeia variantes de tipo para (singular, plural) canónicos.
 
-    Retorna string vazia quando o tipo é desconhecido ou irrelevante (não
-    arrisca colocar "desconhecido" na busca).
+    Retorna ``("", "")`` quando o tipo é desconhecido — nesse caso, a frase é
+    montada sem prefixo de tipo.
 
     >>> _normalizar_tipo("Apartamento Padrão")
-    'apartamento'
+    ('apartamento', 'apartamentos')
     >>> _normalizar_tipo("LOTE")
-    'terreno'
+    ('terreno', 'terrenos')
     >>> _normalizar_tipo("xpto")
-    ''
+    ('', '')
     """
     base = _strip_acentos((tipo_imovel or "").strip().lower())
     base = re.sub(r"[^a-z ]+", " ", base).strip()
     if not base:
-        return ""
+        return ("", "")
     for token in base.split():
         if token in _TIPOS_CANONICOS:
             return _TIPOS_CANONICOS[token]
-    return ""
+    return ("", "")
 
 
 def _normalizar_uf(uf: str) -> str:
@@ -84,31 +81,8 @@ def _normalizar_uf(uf: str) -> str:
     return s[:2] if len(s) >= 2 else ""
 
 
-def _area_plausivel(area_m2: Optional[float]) -> Optional[int]:
-    """Devolve a área arredondada se estiver na faixa plausível (15..1000 m²).
-
-    Áreas fora desta faixa são geralmente ruído (ex.: 0, 999999 placeholders
-    do CEF) e prejudicam a query mais do que ajudam.
-    """
-    if area_m2 is None:
-        return None
-    try:
-        v = float(area_m2)
-    except (TypeError, ValueError):
-        return None
-    if not (15.0 <= v <= 1000.0):
-        return None
-    return int(round(v))
-
-
 def _limpar_componente(s: str) -> str:
-    """Remove caracteres especiais que confundem buscadores, mantendo acentos.
-
-    Buscadores web (Google/Bing usados pelo Firecrawl Search por baixo)
-    funcionam melhor com texto natural — não convém remover acentos do
-    nome da cidade, mas convém remover aspas, parênteses e abreviaturas
-    crípticas.
-    """
+    """Remove caracteres especiais que confundem buscadores, mantendo acentos."""
     s = (s or "").strip()
     s = re.sub(r"[\"'()<>\[\]{}|]", " ", s)
     s = re.sub(r"\s+", " ", s)
@@ -133,23 +107,26 @@ def montar_frase_busca(
     estado_uf: str,
     tipo_imovel: str = "",
     bairro: str = "",
-    area_m2: Optional[float] = None,
+    area_m2: Optional[float] = None,  # noqa: ARG001 - aceito para compat; intencionalmente ignorado
 ) -> FraseBusca:
     """Monta UMA frase de busca focada em encontrar comparáveis na cidade-alvo.
 
-    Regras (ordem dos componentes na frase final, da direita para a esquerda
-    porque os motores dão peso aos últimos termos):
+    Estrutura final:
 
-    1. ``"<tipo> [N m²] [bairro] <cidade> <UF>"``
-    2. Sem cidade/UF a frase é considerada inválida (devolve vazio).
-    3. Termos opcionais ausentes são simplesmente omitidos (sem placeholders).
+    - ``"<tipos no plural> à venda em <bairro> <cidade> <UF>"`` (com tipo + bairro)
+    - ``"<tipos no plural> à venda em <cidade> <UF>"`` (sem bairro)
+    - ``"imóveis à venda em <cidade> <UF>"`` (sem tipo conhecido)
+
+    Sem cidade/UF a frase é considerada inválida (devolve vazia).
 
     Args:
-        cidade: nome do município do leilão (obrigatório, sem normalização agressiva).
+        cidade: nome do município do leilão (obrigatório).
         estado_uf: sigla de 2 letras (obrigatório).
-        tipo_imovel: tipo livre vindo do edital (será mapeado p/ termo canónico).
+        tipo_imovel: tipo livre vindo do edital (será mapeado p/ plural canónico).
         bairro: bairro do imóvel leiloado.
-        area_m2: área construída em m² (será incluída só se 15..1000).
+        area_m2: **ignorado** (mantido por compat de assinatura). Áreas
+            específicas no termo de busca prejudicam a recall em listagens
+            que agregam vários tamanhos.
 
     Returns:
         :class:`FraseBusca` com o texto final e os componentes usados.
@@ -159,24 +136,18 @@ def montar_frase_busca(
     if not cid or not uf:
         return FraseBusca(texto="", componentes={"motivo_vazio": "cidade_ou_uf_ausente"})
 
-    partes: list[str] = []
     componentes: dict[str, str] = {"cidade": cid, "uf": uf}
 
-    tipo = _normalizar_tipo(tipo_imovel)
-    if tipo:
-        partes.append(tipo)
-        componentes["tipo"] = tipo
-
-    area = _area_plausivel(area_m2)
-    if area is not None:
-        partes.append(f"{area} m²")
-        componentes["area_m2"] = str(area)
+    tipo_singular, tipo_plural = _normalizar_tipo(tipo_imovel)
+    prefixo = tipo_plural if tipo_plural else "imóveis"
+    if tipo_singular:
+        componentes["tipo"] = tipo_singular
 
     bai = _limpar_componente(bairro)
+    partes: list[str] = [prefixo, "à venda", "em"]
     if bai:
         partes.append(bai)
         componentes["bairro"] = bai
-
     partes.append(cid)
     partes.append(uf)
 

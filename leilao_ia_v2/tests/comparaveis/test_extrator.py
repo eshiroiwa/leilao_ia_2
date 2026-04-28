@@ -7,6 +7,7 @@ import pytest
 from leilao_ia_v2.comparaveis.extrator import (
     CardExtraido,
     extrair_cards,
+    extrair_endereco_anuncio_individual,
     url_eh_anuncio_aproveitavel,
 )
 
@@ -40,10 +41,12 @@ class TestUrlAproveitavel:
             "https://www.vivareal.com.br/venda/sp/pindamonhangaba/",
             "https://www.imovelweb.com.br/casas-venda-sao-paulo.html",
             "https://www.loft.com.br/comprar/sp/sao-paulo",
+            "https://www.chavesnamao.com.br/apartamentos-a-venda/sp-pindamonhangaba/santana/",
         ],
     )
-    def test_listagens_rejeitadas(self, url):
-        assert not url_eh_anuncio_aproveitavel(url)
+    def test_listagens_aceites(self, url):
+        """Listagens são aceites: em cidades menores são a única fonte de cards."""
+        assert url_eh_anuncio_aproveitavel(url)
 
     @pytest.mark.parametrize(
         "url",
@@ -233,3 +236,138 @@ class TestOrdemDosCards:
         )
         cards = extrair_cards(md)
         assert [c.url_anuncio.rsplit("/", 2)[-2] for c in cards] == ["a", "b", "c"]
+
+
+class TestCidadeNoMarkdown:
+    """Sinal textual local: ``cidade_no_markdown`` é preenchido quando a
+    cidade-alvo aparece dentro da janela do card (sem geocode)."""
+
+    def test_default_vazio_quando_nao_passa_cidade_alvo(self):
+        md = _md_card(
+            "https://www.zapimoveis.com.br/imovel/x/",
+            "Apto 65m² Centro Pindamonhangaba SP",
+            "300.000",
+            "65",
+        )
+        cards = extrair_cards(md)
+        assert cards and cards[0].cidade_no_markdown == ""
+
+    def test_cidade_alvo_presente_no_markdown(self):
+        md = _md_card(
+            "https://www.zapimoveis.com.br/imovel/x/",
+            "Apartamento 65m² Centro Pindamonhangaba SP",
+            "300.000",
+            "65",
+        )
+        cards = extrair_cards(md, cidade_alvo="Pindamonhangaba")
+        assert cards and cards[0].cidade_no_markdown == "Pindamonhangaba"
+
+    def test_cidade_alvo_ausente_fica_vazio(self):
+        md = _md_card(
+            "https://www.zapimoveis.com.br/imovel/x/",
+            "Apartamento 65m² Vila Mariana São Paulo SP",
+            "300.000",
+            "65",
+        )
+        cards = extrair_cards(md, cidade_alvo="Pindamonhangaba")
+        assert cards and cards[0].cidade_no_markdown == ""
+
+    def test_cidade_acentuada_e_caixa_diferente(self):
+        md = _md_card(
+            "https://www.zapimoveis.com.br/imovel/x/",
+            "Apartamento centro TAUBATE - sp",
+            "300.000",
+            "60",
+        )
+        cards = extrair_cards(md, cidade_alvo="Taubaté")
+        assert cards and cards[0].cidade_no_markdown == "Taubaté"
+
+    def test_cidade_dentro_de_outra_palavra_nao_match(self):
+        # "saopaulonorte" não deve disparar match para "São Paulo".
+        md = _md_card(
+            "https://www.zapimoveis.com.br/imovel/x/",
+            "Apartamento condo saopaulonorte vila X SP",
+            "300.000",
+            "60",
+        )
+        cards = extrair_cards(md, cidade_alvo="São Paulo")
+        assert cards and cards[0].cidade_no_markdown == ""
+
+    def test_cidade_curta_demais_ignorada(self):
+        # Nomes < 4 chars são ignorados para evitar falsos positivos.
+        md = _md_card(
+            "https://www.zapimoveis.com.br/imovel/x/",
+            "Apartamento 65m² ali em algum lugar SP",
+            "300.000",
+            "60",
+        )
+        cards = extrair_cards(md, cidade_alvo="Iaú")
+        assert cards and cards[0].cidade_no_markdown == ""
+
+
+# -----------------------------------------------------------------------------
+# extrair_endereco_anuncio_individual: parser para páginas de anúncio individual
+# -----------------------------------------------------------------------------
+
+class TestExtrairEnderecoAnuncioIndividual:
+    def test_label_endereco_explicito(self):
+        md = (
+            "# Apto 65m² no Centro\n\n"
+            "**Endereço:** Rua das Flores, 123 - Centro\n\n"
+            "Mais detalhes..."
+        )
+        logr, bairro = extrair_endereco_anuncio_individual(md)
+        assert logr.startswith("Rua das Flores, 123") or "Rua das Flores" in logr
+
+    def test_label_localizacao(self):
+        md = "Localização: Av. Paulista, 1500 — Bela Vista — São Paulo, SP"
+        logr, _ = extrair_endereco_anuncio_individual(md)
+        assert "Av. Paulista" in logr
+        assert "1500" in logr
+
+    def test_rua_no_corpo_sem_label(self):
+        md = (
+            "Belíssimo apartamento com 2 dormitórios.\n"
+            "Localizado na Rua Sete de Setembro, 250, próximo ao parque."
+        )
+        logr, _ = extrair_endereco_anuncio_individual(md)
+        assert "Rua Sete de Setembro" in logr
+        assert "250" in logr
+
+    def test_label_bairro(self):
+        md = (
+            "Apartamento de 60m².\n"
+            "**Bairro:** Vila Mariana\n"
+        )
+        _, bairro = extrair_endereco_anuncio_individual(md)
+        assert bairro == "Vila Mariana"
+
+    def test_bairro_inline(self):
+        md = "Lindo apartamento no bairro Santana, com sacada e churrasqueira."
+        _, bairro = extrair_endereco_anuncio_individual(md)
+        assert bairro == "Santana"
+
+    def test_markdown_vazio(self):
+        logr, bairro = extrair_endereco_anuncio_individual("")
+        assert logr == "" and bairro == ""
+
+    def test_markdown_sem_endereco(self):
+        md = "Anúncio genérico sem qualquer informação geográfica."
+        logr, bairro = extrair_endereco_anuncio_individual(md)
+        assert logr == "" and bairro == ""
+
+    def test_avenida_com_numero(self):
+        md = "Endereço: Avenida Paulista, 2500"
+        logr, _ = extrair_endereco_anuncio_individual(md)
+        assert "Avenida Paulista" in logr
+        assert "2500" in logr
+
+    def test_logradouro_truncado_a_200(self):
+        md = "Endereço: Rua " + ("X" * 500)
+        logr, _ = extrair_endereco_anuncio_individual(md)
+        assert len(logr) <= 200
+
+    def test_bairro_truncado_a_80(self):
+        md = "**Bairro:** " + ("Z" * 200)
+        _, bairro = extrair_endereco_anuncio_individual(md)
+        assert len(bairro) <= 80

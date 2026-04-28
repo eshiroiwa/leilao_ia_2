@@ -108,7 +108,9 @@ class TestGeocodeSemCidade:
             coords = vc.geocode_sem_cidade(
                 logradouro="Rua A 10", bairro="Centro", estado_uf="SP"
             )
-        assert coords == (-22.92, -45.46)
+        assert coords is not None
+        assert coords[0:2] == (-22.92, -45.46)
+        assert isinstance(coords[2], str)
         assert any("maps.googleapis.com" in c for c in fake.chamadas)
 
     def test_google_falha_cai_para_nominatim(self, monkeypatch):
@@ -128,8 +130,8 @@ class TestGeocodeSemCidade:
             coords = vc.geocode_sem_cidade(
                 logradouro="Rua B 20", bairro="Centro", estado_uf="SP"
             )
-        assert coords == (-22.93, -45.47)
-        # Tem que ter tentado Google primeiro e Nominatim depois.
+        assert coords is not None
+        assert coords[0:2] == (-22.93, -45.47)
         assert "maps.googleapis.com" in fake.chamadas[0]
         assert "nominatim.openstreetmap.org" in fake.chamadas[1]
 
@@ -144,8 +146,8 @@ class TestGeocodeSemCidade:
             coords = vc.geocode_sem_cidade(
                 logradouro="Rua C", bairro="Centro", estado_uf="SP"
             )
-        assert coords == (-22.93, -45.47)
-        # Não deve nunca chamar Google.
+        assert coords is not None
+        assert coords[0:2] == (-22.93, -45.47)
         assert all("maps.googleapis.com" not in c for c in fake.chamadas)
 
     def test_query_vazia_nao_chama_http(self, monkeypatch):
@@ -409,3 +411,367 @@ class TestValidarMunicipioCard:
                 cidade_alvo="SAO PAULO",
             )
         assert r.valido is True
+
+
+# ----------------------- camada texto local (cidade_no_markdown) ---------------
+
+class TestCamadaTextoLocal:
+    """Quando o extrator viu a cidade-alvo no markdown, validamos sem geocode
+    (e obtemos coords COM cidade)."""
+
+    def test_match_textual_aceita_sem_consultar_reverse(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+        chamadas: list[str] = []
+
+        def fake(url, headers=None, timeout=12.0):
+            chamadas.append(url)
+            # Geocode COM cidade devolve coords precisas.
+            if "address=" in url and "Pindamonhangaba" in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {"geometry": {"location": {"lat": -22.92, "lng": -45.46}}}
+                    ],
+                }
+            return None
+
+        with patch.object(vc, "_http_get_json", side_effect=fake):
+            r = vc.validar_municipio_card(
+                logradouro="Rua Cônego João",
+                bairro="Santana",
+                estado_uf="SP",
+                cidade_alvo="Pindamonhangaba",
+                cidade_no_markdown="Pindamonhangaba",
+            )
+        assert r.valido is True
+        assert r.motivo == "ok_texto_local"
+        assert r.municipio_real == "Pindamonhangaba"
+        assert r.coordenadas == (-22.92, -45.46)
+        # NUNCA chamou reverse (latlng=)
+        assert all("latlng=" not in u for u in chamadas)
+
+    def test_texto_local_acentuacao_caixa(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+        with patch.object(vc, "_http_get_json", lambda *a, **k: None), patch.object(
+            vc, "_rate_limit_nominatim", lambda: None
+        ):
+            r = vc.validar_municipio_card(
+                logradouro="Rua X",
+                bairro="Centro",
+                estado_uf="SP",
+                cidade_alvo="São Paulo",
+                cidade_no_markdown="SAO PAULO",
+            )
+        # Mesmo sem chave Google e Nominatim devolvendo None, aceitamos via texto.
+        assert r.valido is True
+        assert r.motivo == "ok_texto_local"
+        assert r.coordenadas is None  # geocode com cidade falhou, mas validamos mesmo assim
+
+    def test_texto_local_diferente_da_cidade_alvo_nao_aplica(self, monkeypatch):
+        """Se cidade_no_markdown não bate com a cidade-alvo, ignora a camada 1."""
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+        # Cai na camada 2 normalmente — mockamos geocode + reverse OK.
+        def fake(url, headers=None, timeout=12.0):
+            if "maps.googleapis.com/maps/api/geocode" in url and "latlng=" not in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {"geometry": {"location": {"lat": -22.92, "lng": -45.46}}}
+                    ],
+                }
+            if "latlng=" in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {
+                            "address_components": [
+                                {"long_name": "Pindamonhangaba", "types": ["locality"]}
+                            ]
+                        }
+                    ],
+                }
+            return None
+
+        with patch.object(vc, "_http_get_json", side_effect=fake):
+            r = vc.validar_municipio_card(
+                logradouro="Rua X",
+                bairro="Centro",
+                estado_uf="SP",
+                cidade_alvo="Pindamonhangaba",
+                cidade_no_markdown="Outracidade",
+            )
+        # Caiu na camada 2 (reverse OK)
+        assert r.valido is True
+        assert r.motivo == "ok"
+
+
+# ----------------------- camada página confirmada (rescue) --------------------
+
+class TestCamadaPaginaConfirmada:
+    """Quando geocode falha/diverge mas a página foi confirmada, aceitamos."""
+
+    def test_geocode_diverge_mas_pagina_confirmada(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+
+        def fake(url, headers=None, timeout=12.0):
+            # Geocode SEM cidade devolve SBC (errado)
+            if "address=" in url and "Pindamonhangaba" not in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {"geometry": {"location": {"lat": -23.69, "lng": -46.56}}}
+                    ],
+                }
+            # Reverse devolve SBC
+            if "latlng=" in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {
+                            "address_components": [
+                                {"long_name": "São Bernardo do Campo", "types": ["locality"]}
+                            ]
+                        }
+                    ],
+                }
+            # Geocode COM cidade devolve coords corretas
+            if "address=" in url and "Pindamonhangaba" in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {"geometry": {"location": {"lat": -22.93, "lng": -45.47}}}
+                    ],
+                }
+            return None
+
+        with patch.object(vc, "_http_get_json", side_effect=fake):
+            r = vc.validar_municipio_card(
+                logradouro="Rua X",
+                bairro="Santana",
+                estado_uf="SP",
+                cidade_alvo="Pindamonhangaba",
+                pagina_confirmada=True,
+            )
+        assert r.valido is True
+        assert r.motivo == "ok_pagina_confirmada"
+        assert r.municipio_real == "Pindamonhangaba"
+        assert r.coordenadas == (-22.93, -45.47)
+
+    def test_geocode_falhou_mas_pagina_confirmada(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+
+        def fake(url, headers=None, timeout=12.0):
+            if "address=" in url and "Pindamonhangaba" in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {"geometry": {"location": {"lat": -22.93, "lng": -45.47}}}
+                    ],
+                }
+            return {"status": "ZERO_RESULTS", "results": []}
+
+        with patch.object(vc, "_http_get_json", side_effect=fake), patch.object(
+            vc, "_rate_limit_nominatim", lambda: None
+        ):
+            r = vc.validar_municipio_card(
+                logradouro="Rua Y",
+                bairro="",
+                estado_uf="SP",
+                cidade_alvo="Pindamonhangaba",
+                pagina_confirmada=True,
+            )
+        assert r.valido is True
+        assert r.motivo == "ok_pagina_confirmada"
+
+    def test_pagina_NAO_confirmada_e_geocode_diverge_descarta(self, monkeypatch):
+        """Sem rescue: comportamento idêntico ao antigo (regressão)."""
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+
+        def fake(url, headers=None, timeout=12.0):
+            if "address=" in url and "Pindamonhangaba" not in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {"geometry": {"location": {"lat": -23.69, "lng": -46.56}}}
+                    ],
+                }
+            if "latlng=" in url:
+                return {
+                    "status": "OK",
+                    "results": [
+                        {
+                            "address_components": [
+                                {"long_name": "São Bernardo do Campo", "types": ["locality"]}
+                            ]
+                        }
+                    ],
+                }
+            return None
+
+        with patch.object(vc, "_http_get_json", side_effect=fake):
+            r = vc.validar_municipio_card(
+                logradouro="Rua X",
+                bairro="Anchieta",
+                estado_uf="SP",
+                cidade_alvo="Pindamonhangaba",
+                pagina_confirmada=False,
+            )
+        assert r.deve_descartar
+        assert r.motivo == "municipio_diferente"
+
+
+# ----------------------- obter_coordenadas_com_cidade -------------------------
+
+class TestObterCoordenadasComCidade:
+    def test_query_inclui_cidade(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+        capturadas: list[str] = []
+
+        def fake(url, headers=None, timeout=12.0):
+            capturadas.append(url)
+            return {
+                "status": "OK",
+                "results": [
+                    {"geometry": {"location": {"lat": -22.92, "lng": -45.46}}}
+                ],
+            }
+
+        with patch.object(vc, "_http_get_json", side_effect=fake):
+            coords = vc.obter_coordenadas_com_cidade(
+                logradouro="Rua X 100",
+                bairro="Centro",
+                cidade="Pindamonhangaba",
+                estado_uf="SP",
+            )
+        assert coords is not None
+        assert coords[0:2] == (-22.92, -45.46)
+        assert isinstance(coords[2], str)
+        assert any("Pindamonhangaba" in u for u in capturadas)
+
+    def test_sem_cidade_devolve_none(self):
+        coords = vc.obter_coordenadas_com_cidade(
+            logradouro="Rua X", bairro="", cidade="", estado_uf="SP"
+        )
+        assert coords is None
+
+    def test_fallback_nominatim_quando_google_falha(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+        fake = _FakeHttp(
+            [
+                ("maps.googleapis.com", {"status": "ZERO_RESULTS"}),
+                (
+                    "nominatim.openstreetmap.org",
+                    [{"lat": "-22.93", "lon": "-45.47"}],
+                ),
+            ]
+        )
+        with patch.object(vc, "_http_get_json", side_effect=fake), patch.object(
+            vc, "_rate_limit_nominatim", lambda: None
+        ):
+            coords = vc.obter_coordenadas_com_cidade(
+                logradouro="Rua X",
+                bairro="Centro",
+                cidade="Pindamonhangaba",
+                estado_uf="SP",
+            )
+        assert coords is not None
+        assert coords[0:2] == (-22.93, -45.47)
+
+
+# ----------------------- classificação de precisão ---------------------------
+
+class TestClassificarPrecisaoGoogle:
+    def test_rooftop(self):
+        r = {"geometry": {"location_type": "ROOFTOP"}, "types": ["street_address"]}
+        assert vc._classificar_precisao_google(r) == vc.PRECISAO_ROOFTOP
+
+    def test_range_interpolated_eh_rooftop(self):
+        r = {"geometry": {"location_type": "RANGE_INTERPOLATED"}, "types": ["route"]}
+        assert vc._classificar_precisao_google(r) == vc.PRECISAO_ROOFTOP
+
+    def test_route_geometric_center(self):
+        r = {"geometry": {"location_type": "GEOMETRIC_CENTER"}, "types": ["route"]}
+        assert vc._classificar_precisao_google(r) == vc.PRECISAO_RUA
+
+    def test_sublocality(self):
+        r = {
+            "geometry": {"location_type": "GEOMETRIC_CENTER"},
+            "types": ["sublocality_level_1", "political"],
+        }
+        assert vc._classificar_precisao_google(r) == vc.PRECISAO_BAIRRO
+
+    def test_locality(self):
+        r = {
+            "geometry": {"location_type": "APPROXIMATE"},
+            "types": ["locality", "political"],
+        }
+        assert vc._classificar_precisao_google(r) == vc.PRECISAO_CIDADE
+
+    def test_geometric_center_sem_types_eh_rua(self):
+        r = {"geometry": {"location_type": "GEOMETRIC_CENTER"}, "types": []}
+        assert vc._classificar_precisao_google(r) == vc.PRECISAO_RUA
+
+    def test_approximate_sem_types_eh_cidade(self):
+        r = {"geometry": {"location_type": "APPROXIMATE"}, "types": []}
+        assert vc._classificar_precisao_google(r) == vc.PRECISAO_CIDADE
+
+    def test_vazio_eh_desconhecido(self):
+        assert vc._classificar_precisao_google({}) == vc.PRECISAO_DESCONHECIDA
+
+
+class TestClassificarPrecisaoNominatim:
+    def test_house(self):
+        r = {"class": "place", "type": "house", "addresstype": "house"}
+        assert vc._classificar_precisao_nominatim(r) == vc.PRECISAO_ROOFTOP
+
+    def test_highway_residential(self):
+        r = {"class": "highway", "type": "residential", "addresstype": "road"}
+        assert vc._classificar_precisao_nominatim(r) == vc.PRECISAO_RUA
+
+    def test_suburb(self):
+        r = {"class": "place", "type": "suburb", "addresstype": "suburb"}
+        assert vc._classificar_precisao_nominatim(r) == vc.PRECISAO_BAIRRO
+
+    def test_city(self):
+        r = {"class": "place", "type": "city", "addresstype": "city"}
+        assert vc._classificar_precisao_nominatim(r) == vc.PRECISAO_CIDADE
+
+    def test_vazio_eh_desconhecido(self):
+        assert vc._classificar_precisao_nominatim({}) == vc.PRECISAO_DESCONHECIDA
+
+
+class TestPrecisaoFluiNoResultado:
+    """Garante que ResultadoValidacaoMunicipio.precisao_geo é preenchido."""
+
+    def test_ok_texto_local_propaga_precisao(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "fake-key")
+        fake = _FakeHttp(
+            [
+                (
+                    "maps.googleapis.com",
+                    {
+                        "status": "OK",
+                        "results": [
+                            {
+                                "geometry": {
+                                    "location": {"lat": -22.92, "lng": -45.46},
+                                    "location_type": "GEOMETRIC_CENTER",
+                                },
+                                "types": ["sublocality"],
+                            }
+                        ],
+                    },
+                )
+            ]
+        )
+        with patch.object(vc, "_http_get_json", side_effect=fake):
+            r = vc.validar_municipio_card(
+                logradouro="Rua A",
+                bairro="Centro",
+                estado_uf="SP",
+                cidade_alvo="Pindamonhangaba",
+                cidade_no_markdown="Pindamonhangaba",
+            )
+        assert r.valido is True
+        assert r.motivo == "ok_texto_local"
+        assert r.precisao_geo == vc.PRECISAO_BAIRRO

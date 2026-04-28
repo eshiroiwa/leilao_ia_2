@@ -1,20 +1,18 @@
 """
 Wrapper de Firecrawl Search com orçamento e filtragem de URLs aproveitáveis.
 
-Diferenças face ao módulo antigo (`leilao_ia_v2/fc_search/search_client.py`):
+Características:
 
 - **Não decide o limit sozinho**: o caller passa explicitamente, e o orçamento
-  é validado *antes* da chamada (`OrcamentoFirecrawl.pode_search`). Isto remove
-  o caminho silencioso de gastar mais créditos do que o configurado.
-- **Conta créditos pelo custo real** (`custo_search` = 2 / 10 results), em vez
-  de fixar 1 crédito por chamada como o velho fazia.
+  é validado *antes* da chamada (:meth:`OrcamentoFirecrawl.pode_search`).
+- **Conta créditos pelo custo real** (:func:`custo_search` = 2 / 10 results).
 - **Filtra URLs aproveitáveis** logo na origem usando
   :func:`comparaveis.extrator.url_eh_anuncio_aproveitavel`, deduplica e ordena
   por relevância (a ordem que o Firecrawl devolve já é boa proxy de relevância).
 - **Devolve estrutura imutável** (:class:`ResultadoBusca`) com listas separadas
   para URLs aceites e descartadas — útil para logs e métricas no pipeline.
 
-Esta função é o único ponto onde o pacote `comparaveis` invoca a API Firecrawl
+Esta função é o único ponto onde o pacote ``comparaveis`` invoca a API Firecrawl
 para *search* (scrape vive em :mod:`comparaveis.scrape`).
 """
 

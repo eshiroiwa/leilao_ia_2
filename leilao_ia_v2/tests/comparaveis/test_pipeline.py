@@ -26,8 +26,33 @@ from leilao_ia_v2.comparaveis.pipeline import (
     ResultadoPipeline,
     executar_pipeline,
 )
+from leilao_ia_v2.comparaveis.refino_individual import ResultadoRefino
 from leilao_ia_v2.comparaveis.scrape import ResultadoScrape
 from leilao_ia_v2.comparaveis.validacao_cidade import ResultadoValidacaoMunicipio
+
+
+def _refino_noop(cards_validados, **kw) -> ResultadoRefino:
+    """Mock de refino que devolve os cards inalterados.
+
+    Os testes do pipeline focam-se nos passos search → scrape → filtro → extract
+    → validar → persistir. O refino tem testes próprios em
+    ``test_refino_individual.py``; aqui injectamos um no-op para isolar.
+    """
+    return ResultadoRefino(cards_finais=list(cards_validados))
+
+
+@pytest.fixture(autouse=True)
+def _patch_refino_default(monkeypatch):
+    """Substitui o default de :func:`refinar_cards_top_n` no módulo pipeline.
+
+    Sem isto, os testes que não passam ``fn_refino=`` invocariam o refino real
+    (que chama Firecrawl). Como cada teste injecta os outros hooks à mão,
+    fazemos o mesmo para o refino — automaticamente — para não poluir cada
+    chamada com ``fn_refino=_refino_noop``.
+    """
+    import leilao_ia_v2.comparaveis.pipeline as pl
+
+    monkeypatch.setattr(pl, "refinar_cards_top_n", _refino_noop)
 
 
 # -----------------------------------------------------------------------------
@@ -93,7 +118,7 @@ def _filtro(status=StatusPagina.CONFIRMADA, motivo="ok", concorrentes=()):
     )
 
 
-def _card(url, valor=350_000.0, area=65.0, bairro="Centro"):
+def _card(url, valor=350_000.0, area=65.0, bairro="Centro", cidade_no_markdown=""):
     return CardExtraido(
         url_anuncio=url,
         portal="zapimoveis.com.br",
@@ -102,6 +127,7 @@ def _card(url, valor=350_000.0, area=65.0, bairro="Centro"):
         titulo=f"Apto {area}m² {bairro}",
         logradouro_inferido="Rua Tal 100",
         bairro_inferido=bairro,
+        cidade_no_markdown=cidade_no_markdown,
     )
 
 
@@ -132,7 +158,7 @@ def _val_reprovado(motivo="municipio_diferente", real="São Bernardo do Campo", 
 
 class TestAborts:
     def test_frase_vazia_aborta_sem_consumir_creditos(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         fn_search = MagicMock()
         fn_persistir = MagicMock(return_value=0)
         r = executar_pipeline(
@@ -152,7 +178,7 @@ class TestAborts:
         fn_persistir.assert_not_called()
 
     def test_busca_nao_executada_propaga_motivo(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         fn_search = MagicMock(return_value=ResultadoBusca(
             executada=False,
             motivo_nao_executada="orcamento_insuficiente",
@@ -182,7 +208,7 @@ class TestFluxoCompleto:
     def test_pipeline_feliz_persiste_apenas_aprovados(self):
         """Cenário: 2 URLs, 2 scrapes, 2 cards por página = 4 cards;
         1 deles fica em São Bernardo (reprovado), 3 em Pindamonhangaba."""
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         url2 = "https://www.vivareal.com.br/imovel/2/"
         cards_por_url = {
@@ -206,14 +232,11 @@ class TestFluxoCompleto:
         fn_search = MagicMock(return_value=_busca_ok((url1, url2)))
         fn_scrape = MagicMock(side_effect=lambda u, **kw: _scrape_ok(u))
         fn_filtro = MagicMock(return_value=_filtro())
-        fn_extrai = MagicMock(side_effect=lambda md: cards_por_url[
-            url1 if "1" in md else url2  # nunca executa, vamos sobrescrever abaixo
-        ])
         # Simplificado: associamos extrair_cards ao url visto no scrape via closure
         chamadas_extracao = {"i": 0}
         ordem_urls = [url1, url2]
 
-        def extrai(md):
+        def extrai(md, **kw):
             u = ordem_urls[chamadas_extracao["i"]]
             chamadas_extracao["i"] += 1
             return cards_por_url[u]
@@ -260,7 +283,7 @@ class TestFluxoCompleto:
     def test_pindamonhangaba_para_sao_bernardo_zero_persistidos(self):
         """Regressão dura do bug original: TODOS os cards extraídos do
         markdown caem em SBC após reverse-geocode → nada persiste."""
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         cards = [_card(url=f"{url1}#x"), _card(url=f"{url1}#y")]
         fn_search = MagicMock(return_value=_busca_ok((url1,)))
@@ -296,7 +319,7 @@ class TestFluxoCompleto:
 
 class TestFiltroPaginaRejeita:
     def test_paginas_rejeitadas_pulam_extracao(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         fn_search = MagicMock(return_value=_busca_ok((url1,)))
         fn_scrape = MagicMock(return_value=_scrape_ok(url1))
@@ -328,7 +351,7 @@ class TestFiltroPaginaRejeita:
 
     def test_paginas_apenas_mencionada_continuam(self):
         """Status MENCIONADA NÃO é REJEITADA — pipeline continua."""
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         fn_filtro = MagicMock(return_value=_filtro(status=StatusPagina.MENCIONADA))
         fn_extrai = MagicMock(return_value=[_card(url=f"{url1}#a")])
@@ -391,7 +414,7 @@ class TestOrcamentoEsgotaMeio:
         assert r.estatisticas.creditos_gastos == 4
 
     def test_scrape_falhou_nao_quebra_loop(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         urls = ("https://www.zapimoveis.com.br/imovel/1/", "https://www.zapimoveis.com.br/imovel/2/")
         def scrape(u, *, orcamento, cliente=None):
             if "1" in u:
@@ -421,7 +444,7 @@ class TestOrcamentoEsgotaMeio:
 
 class TestCacheHits:
     def test_cache_hits_contabilizados(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         fn_persistir = MagicMock(return_value=1)
         r = executar_pipeline(
@@ -446,7 +469,7 @@ class TestCacheHits:
 
 class TestDryRun:
     def test_persistir_false_calcula_mas_nao_persiste(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         fn_persistir = MagicMock()
         r = executar_pipeline(
@@ -470,7 +493,7 @@ class TestDryRun:
         with pytest.raises(ValueError, match="supabase_client"):
             executar_pipeline(
                 _leilao(),
-                orcamento=OrcamentoFirecrawl(cap=15),
+                orcamento=OrcamentoFirecrawl(cap=20),
                 supabase_client=None,
                 persistir=True,
             )
@@ -482,7 +505,7 @@ class TestDryRun:
 
 class TestPersistenciaResiliente:
     def test_excecao_em_persistencia_nao_quebra_pipeline(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         fn_persistir = MagicMock(side_effect=RuntimeError("supabase down"))
         r = executar_pipeline(
@@ -509,7 +532,7 @@ class TestPersistenciaResiliente:
 
 class TestCidadesConcorrentes:
     def test_lista_passada_ao_filtro(self):
-        orc = OrcamentoFirecrawl(cap=15)
+        orc = OrcamentoFirecrawl(cap=20)
         url1 = "https://www.zapimoveis.com.br/imovel/1/"
         fn_filtro = MagicMock(return_value=_filtro())
         executar_pipeline(
@@ -532,6 +555,77 @@ class TestCidadesConcorrentes:
 
 
 # -----------------------------------------------------------------------------
+# Propagação de cidade_alvo / cidade_no_markdown / pagina_confirmada
+# -----------------------------------------------------------------------------
+
+class TestPropagacaoSinaisCidade:
+    def test_cidade_alvo_passada_ao_extrator(self):
+        orc = OrcamentoFirecrawl(cap=20)
+        url1 = "https://www.zapimoveis.com.br/imovel/1/"
+        fn_extrai = MagicMock(return_value=[])
+        executar_pipeline(
+            _leilao(cidade="Pindamonhangaba"),
+            orcamento=orc,
+            supabase_client=object(),
+            fn_montar_frase=lambda **kw: _frase(),
+            fn_search=MagicMock(return_value=_busca_ok((url1,))),
+            fn_scrape=MagicMock(return_value=_scrape_ok(url1)),
+            fn_filtro_pagina=MagicMock(return_value=_filtro()),
+            fn_extrai_cards=fn_extrai,
+            fn_valida_municipio=MagicMock(),
+            fn_persistir=MagicMock(return_value=0),
+        )
+        # cidade_alvo é passada como kwarg
+        kwargs = fn_extrai.call_args.kwargs
+        assert kwargs["cidade_alvo"] == "Pindamonhangaba"
+
+    def test_cidade_no_markdown_e_pagina_confirmada_propagados(self):
+        """Pipeline encaminha (a) cidade_no_markdown do card e
+        (b) pagina_confirmada do filtro à validação."""
+        orc = OrcamentoFirecrawl(cap=20)
+        url1 = "https://www.zapimoveis.com.br/imovel/1/"
+        card = _card(url=f"{url1}#a", cidade_no_markdown="Pindamonhangaba")
+        fn_valida = MagicMock(return_value=_val_ok())
+        executar_pipeline(
+            _leilao(),
+            orcamento=orc,
+            supabase_client=object(),
+            fn_montar_frase=lambda **kw: _frase(),
+            fn_search=MagicMock(return_value=_busca_ok((url1,))),
+            fn_scrape=MagicMock(return_value=_scrape_ok(url1)),
+            fn_filtro_pagina=MagicMock(return_value=_filtro(status=StatusPagina.CONFIRMADA)),
+            fn_extrai_cards=MagicMock(return_value=[card]),
+            fn_valida_municipio=fn_valida,
+            fn_persistir=MagicMock(return_value=1),
+        )
+        kwargs = fn_valida.call_args.kwargs
+        assert kwargs["cidade_no_markdown"] == "Pindamonhangaba"
+        assert kwargs["pagina_confirmada"] is True
+        assert kwargs["cidade_alvo"] == "Pindamonhangaba"
+
+    def test_pagina_mencionada_NAO_eh_confirmada(self):
+        """Status MENCIONADA não dá rescue (apenas CONFIRMADA dá)."""
+        orc = OrcamentoFirecrawl(cap=20)
+        url1 = "https://www.zapimoveis.com.br/imovel/1/"
+        card = _card(url=f"{url1}#a")
+        fn_valida = MagicMock(return_value=_val_ok())
+        executar_pipeline(
+            _leilao(),
+            orcamento=orc,
+            supabase_client=object(),
+            fn_montar_frase=lambda **kw: _frase(),
+            fn_search=MagicMock(return_value=_busca_ok((url1,))),
+            fn_scrape=MagicMock(return_value=_scrape_ok(url1)),
+            fn_filtro_pagina=MagicMock(return_value=_filtro(status=StatusPagina.MENCIONADA)),
+            fn_extrai_cards=MagicMock(return_value=[card]),
+            fn_valida_municipio=fn_valida,
+            fn_persistir=MagicMock(return_value=1),
+        )
+        kwargs = fn_valida.call_args.kwargs
+        assert kwargs["pagina_confirmada"] is False
+
+
+# -----------------------------------------------------------------------------
 # Resumo serializável
 # -----------------------------------------------------------------------------
 
@@ -544,7 +638,7 @@ class TestResumo:
             cards_aprovados_validacao=2,
             persistidos=2,
             creditos_gastos=4,
-            creditos_cap=15,
+            creditos_cap=20,
         )
         d = s.resumo()
         for k in (

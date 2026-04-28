@@ -105,7 +105,7 @@ def test_insert_sem_duplicata():
                         return_value={"id": "novo-id"},
                     ) as ins:
                         with patch(
-                            "leilao_ia_v2.pipeline.ingestao_edital.comparaveis_pos_ingestao.executar_comparaveis_apos_ingestao_leilao",
+                            "leilao_ia_v2.pipeline.ingestao_edital.comparaveis_integracao.executar_comparaveis_pos_ingestao",
                             return_value={"ok": True, "anuncios_salvos": 2, "firecrawl_chamadas_api": 1},
                         ) as cmp:
                             with patch(
@@ -125,9 +125,9 @@ def test_insert_sem_duplicata():
     assert r.pos_cache.get("ok") is False
     ins.assert_called_once()
     cmp.assert_called_once()
-    assert cmp.call_args.kwargs.get("max_chamadas_api_firecrawl") == 14
+    assert cmp.call_args.kwargs.get("max_chamadas_api_firecrawl") == 19
     res_cache.assert_called_once()
-    assert res_cache.call_args.kwargs.get("max_chamadas_api_firecrawl") == 13
+    assert res_cache.call_args.kwargs.get("max_chamadas_api_firecrawl") == 18
     upd.assert_called_once()
 
 

@@ -1,18 +1,17 @@
 """
-Contador determinístico de créditos Firecrawl para o pipeline novo de comparáveis.
+Contador determinístico de créditos Firecrawl para o pipeline de comparáveis.
 
 A documentação do Firecrawl cobra:
 
-- ``search``: **2 créditos por bloco de 10 resultados** (`limit=10` → 2; `limit=11` → 4
-  porque arredonda para o próximo múltiplo de 10).
+- ``search``: **2 créditos por bloco de 10 resultados** (``limit=10`` → 2;
+  ``limit=11`` → 4 porque arredonda para o próximo múltiplo de 10).
 - ``scrape``: **1 crédito por chamada** (independente do tamanho da página).
 
-O pacote `fc_search/` antigo conta cada `search` como 1 crédito (subestima 4×) e
-isto é uma das duas causas-raiz do gasto de 38 créditos numa única ingestão.
 Este módulo expõe uma API explícita que **bloqueia** chamadas que ultrapassem o
-cap configurado, em vez de apenas avisar depois.
+cap configurado, em vez de apenas avisar depois — defesa em profundidade contra
+gasto descontrolado de créditos.
 
-Uso pretendido (PRs 3 e 4)::
+Uso típico::
 
     o = OrcamentoFirecrawl(cap=15)
     if o.pode_search(limit=10):
@@ -35,7 +34,7 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 
-CAP_PADRAO_CREDITOS: int = 15
+CAP_PADRAO_CREDITOS: int = 20
 
 
 def custo_search(limit: int) -> int:

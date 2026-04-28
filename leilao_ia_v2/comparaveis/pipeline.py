@@ -58,6 +58,11 @@ from leilao_ia_v2.comparaveis.persistencia import (
     montar_linha,
     persistir_lote,
 )
+from leilao_ia_v2.comparaveis.refino_individual import (
+    MAX_REFINO_TOP_N,
+    ResultadoRefino,
+    refinar_cards_top_n,
+)
 from leilao_ia_v2.comparaveis.scrape import (
     ResultadoScrape,
     scrape_url,
@@ -74,9 +79,10 @@ logger = logging.getLogger(__name__)
 _TipoFnSearch = Callable[..., ResultadoBusca]
 _TipoFnScrape = Callable[..., ResultadoScrape]
 _TipoFnFiltro = Callable[..., ResultadoFiltroPagina]
-_TipoFnExtrai = Callable[[str], list[CardExtraido]]
+_TipoFnExtrai = Callable[..., list[CardExtraido]]
 _TipoFnValida = Callable[..., ResultadoValidacaoMunicipio]
 _TipoFnPersist = Callable[[Any, list[LinhaPersistir]], int]
+_TipoFnRefino = Callable[..., ResultadoRefino]
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,10 @@ class EstatisticasPipeline:
     persistidos: int = 0
     creditos_gastos: int = 0
     creditos_cap: int = 0
+    refino_n_refinados: int = 0
+    refino_n_descartados: int = 0
+    refino_n_revertidos: int = 0
+    refino_creditos_gastos: int = 0
     abortado: bool = False
     motivo_aborto: str = ""
 
@@ -128,6 +138,10 @@ class EstatisticasPipeline:
             "persistidos": self.persistidos,
             "creditos_gastos": self.creditos_gastos,
             "creditos_cap": self.creditos_cap,
+            "refino_n_refinados": self.refino_n_refinados,
+            "refino_n_descartados": self.refino_n_descartados,
+            "refino_n_revertidos": self.refino_n_revertidos,
+            "refino_creditos_gastos": self.refino_creditos_gastos,
             "abortado": self.abortado,
             "motivo_aborto": self.motivo_aborto,
         }
@@ -149,6 +163,8 @@ def executar_pipeline(
     supabase_client: Any = None,
     cliente_firecrawl: Any = None,
     cidades_conhecidas: Optional[list[str]] = None,
+    min_amostras_refino: int = 4,
+    max_refino_top_n: int = MAX_REFINO_TOP_N,
     # Hooks (defaults usam as implementações reais; testes substituem.)
     fn_montar_frase: Callable[..., FraseBusca] = montar_frase_busca,
     fn_search: _TipoFnSearch = executar_search,
@@ -156,6 +172,7 @@ def executar_pipeline(
     fn_filtro_pagina: _TipoFnFiltro = avaliar_pagina,
     fn_extrai_cards: _TipoFnExtrai = extrair_cards,
     fn_valida_municipio: _TipoFnValida = validar_municipio_card,
+    fn_refino: Optional[_TipoFnRefino] = None,
     fn_persistir: _TipoFnPersist = persistir_lote,
     persistir: bool = True,
 ) -> ResultadoPipeline:
@@ -227,7 +244,7 @@ def executar_pipeline(
         "cards_descartados_validacao": 0,
     }
 
-    linhas_a_persistir: list[LinhaPersistir] = []
+    cards_aprovados: list[tuple[CardExtraido, ResultadoValidacaoMunicipio]] = []
 
     for url in busca.urls_aceites:
         if not orcamento.pode_scrape():
@@ -259,8 +276,10 @@ def executar_pipeline(
             )
             continue
 
-        cards = fn_extrai_cards(sc.markdown)
+        cards = fn_extrai_cards(sc.markdown, cidade_alvo=leilao.cidade)
         estats["cards_extraidos"] += len(cards)
+
+        pagina_confirmada = filtro.status == StatusPagina.CONFIRMADA
 
         for card in cards:
             validacao = fn_valida_municipio(
@@ -268,27 +287,69 @@ def executar_pipeline(
                 bairro=card.bairro_inferido,
                 estado_uf=leilao.estado_uf,
                 cidade_alvo=leilao.cidade,
+                cidade_no_markdown=card.cidade_no_markdown,
+                pagina_confirmada=pagina_confirmada,
             )
             if validacao.deve_descartar:
                 estats["cards_descartados_validacao"] += 1
                 motivos_validacao[validacao.motivo] = motivos_validacao.get(validacao.motivo, 0) + 1
                 continue
-            try:
-                linha = montar_linha(
-                    card,
-                    validacao,
-                    tipo_imovel=leilao.tipo_imovel,
-                    estado_uf=leilao.estado_uf,
-                    fonte_busca=frase.texto,
-                )
-            except Exception:
-                logger.exception("Falha a montar linha para card %s — descartando.", card.url_anuncio)
-                estats["cards_descartados_validacao"] += 1
-                motivos_validacao["erro_montar_linha"] = motivos_validacao.get("erro_montar_linha", 0) + 1
-                continue
-
-            linhas_a_persistir.append(linha)
+            cards_aprovados.append((card, validacao))
             estats["cards_aprovados_validacao"] += 1
+
+    refino_stats = {
+        "refinados": 0,
+        "descartados": 0,
+        "revertidos": 0,
+        "creditos_gastos": 0,
+    }
+    if cards_aprovados and orcamento.pode_scrape():
+        # Resolve em runtime: a lookup no globals deste módulo permite que
+        # testes substituam ``refinar_cards_top_n`` via ``monkeypatch.setattr``
+        # sem precisar passar ``fn_refino=`` em cada chamada.
+        fn_refino_efetivo = fn_refino if fn_refino is not None else refinar_cards_top_n
+        try:
+            res_refino = fn_refino_efetivo(
+                cards_aprovados,
+                cidade_alvo=leilao.cidade,
+                estado_uf=leilao.estado_uf,
+                area_alvo=leilao.area_m2,
+                orcamento=orcamento,
+                min_amostras=min_amostras_refino,
+                cliente_firecrawl=cliente_firecrawl,
+                fn_scrape=fn_scrape,
+                max_top_n=max_refino_top_n,
+            )
+            cards_aprovados = res_refino.cards_finais
+            refino_stats["refinados"] = res_refino.n_refinados
+            refino_stats["descartados"] = res_refino.n_descartados_cidade_diferente
+            refino_stats["revertidos"] = res_refino.n_revertidos
+            refino_stats["creditos_gastos"] = res_refino.creditos_gastos
+            for d in res_refino.detalhes:
+                logger.info("Pipeline.refino: %s", d)
+        except Exception:
+            logger.exception("Pipeline: refino falhou — mantém cards originais.")
+
+    linhas_a_persistir: list[LinhaPersistir] = []
+    for card, validacao in cards_aprovados:
+        try:
+            linha = montar_linha(
+                card,
+                validacao,
+                tipo_imovel=leilao.tipo_imovel,
+                estado_uf=leilao.estado_uf,
+                fonte_busca=frase.texto,
+            )
+        except Exception:
+            logger.exception("Falha a montar linha para card %s — descartando.", card.url_anuncio)
+            estats["cards_descartados_validacao"] += 1
+            motivos_validacao["erro_montar_linha"] = motivos_validacao.get("erro_montar_linha", 0) + 1
+            estats["cards_aprovados_validacao"] = max(0, estats["cards_aprovados_validacao"] - 1)
+            continue
+        linhas_a_persistir.append(linha)
+
+    # Atualiza contagem de aprovados se o refino descartou cards.
+    estats["cards_aprovados_validacao"] = len(linhas_a_persistir)
 
     persistidos = 0
     if persistir and linhas_a_persistir:
@@ -313,6 +374,10 @@ def executar_pipeline(
         persistidos=persistidos,
         creditos_gastos=orcamento.gasto,
         creditos_cap=orcamento.cap,
+        refino_n_refinados=refino_stats["refinados"],
+        refino_n_descartados=refino_stats["descartados"],
+        refino_n_revertidos=refino_stats["revertidos"],
+        refino_creditos_gastos=refino_stats["creditos_gastos"],
     )
 
     return ResultadoPipeline(

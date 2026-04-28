@@ -48,9 +48,9 @@ class TestCustoScrape:
 class TestOrcamentoFirecrawl:
     def test_cap_padrao(self):
         o = OrcamentoFirecrawl()
-        assert o.cap == CAP_PADRAO_CREDITOS == 15
+        assert o.cap == CAP_PADRAO_CREDITOS == 20
         assert o.gasto == 0
-        assert o.restante == 15
+        assert o.restante == 20
 
     def test_cap_customizado(self):
         o = OrcamentoFirecrawl(cap=10)
@@ -71,7 +71,7 @@ class TestOrcamentoFirecrawl:
             OrcamentoFirecrawl(cap=10, gasto=11)
 
     def test_pode_search_dentro_do_orcamento(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         assert o.pode_search(limit=10) is True
         assert o.pode_search(limit=20) is True
 
@@ -81,10 +81,10 @@ class TestOrcamentoFirecrawl:
         assert o.pode_search(limit=10) is False
 
     def test_consumir_search_atualiza_gasto_e_restante(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         custo = o.consumir_search(limit=10, query="apartamento Pindamonhangaba SP")
         assert custo == 2
-        assert o.gasto == 2 and o.restante == 13
+        assert o.gasto == 2 and o.restante == 18
         assert len(o.eventos) == 1
         assert o.eventos[0].tipo == "search"
         assert "apartamento" in o.eventos[0].detalhe
@@ -98,9 +98,9 @@ class TestOrcamentoFirecrawl:
         assert o.gasto == 0
 
     def test_consumir_scrape_atualiza_gasto(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         o.consumir_scrape(url="https://exemplo.com/x")
-        assert o.gasto == 1 and o.restante == 14
+        assert o.gasto == 1 and o.restante == 19
         assert o.eventos[-1].tipo == "scrape"
         assert "exemplo.com" in o.eventos[-1].detalhe
 
@@ -111,35 +111,35 @@ class TestOrcamentoFirecrawl:
             o.consumir_scrape(url="x")
 
     def test_cenario_realista_um_search_e_varios_scrapes(self):
-        """Simula o orçamento alvo (decisão 2-C): 15 créditos = 1 search 10 + ~13 scrapes."""
-        o = OrcamentoFirecrawl(cap=15)
+        """Simula o orçamento alvo: 20 créditos = 1 search 10 (2cr) + ~18 scrapes."""
+        o = OrcamentoFirecrawl(cap=20)
         o.consumir_search(limit=10, query="casa Taubaté SP")
         scrapes = 0
         while o.pode_scrape():
             o.consumir_scrape(url=f"https://portal.example/{scrapes}")
             scrapes += 1
-        assert scrapes == 13
-        assert o.gasto == 15 and o.restante == 0
+        assert scrapes == 18
+        assert o.gasto == 20 and o.restante == 0
 
     def test_cenario_dois_searches_e_scrapes(self):
-        """2 searches (4 créditos) + scrapes até esgotar (11)."""
-        o = OrcamentoFirecrawl(cap=15)
+        """2 searches (4 créditos) + scrapes até esgotar (16)."""
+        o = OrcamentoFirecrawl(cap=20)
         o.consumir_search(limit=10, query="q1")
         o.consumir_search(limit=10, query="q2")
-        assert o.gasto == 4 and o.restante == 11
+        assert o.gasto == 4 and o.restante == 16
         scrapes = 0
         while o.pode_scrape():
             o.consumir_scrape(url=f"u{scrapes}")
             scrapes += 1
-        assert scrapes == 11
+        assert scrapes == 16
         assert o.restante == 0
 
     def test_resumo_serializavel(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         o.consumir_search(limit=10, query="q")
         o.consumir_scrape(url="https://x.com/a")
         r = o.resumo()
-        assert r["cap"] == 15 and r["gasto"] == 3 and r["restante"] == 12
+        assert r["cap"] == 20 and r["gasto"] == 3 and r["restante"] == 17
         assert r["n_search"] == 1 and r["n_scrape"] == 1
         assert isinstance(r["eventos"], list) and len(r["eventos"]) == 2
         assert r["eventos"][0]["tipo"] == "search"

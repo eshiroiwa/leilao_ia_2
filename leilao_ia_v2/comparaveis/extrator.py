@@ -1,29 +1,25 @@
 """
 Extrator de cards de anúncios a partir de markdown — **sem inventar cidade**.
 
-Diferenças críticas em relação ao parser antigo
-(`leilao_ia_v2/fc_search/parser.py::_card_de_url_janela`):
+Princípio crítico: o extrator devolve apenas o que está **provado** no markdown:
+``url, portal, valor_venda, area_m2, titulo, logradouro_inferido,
+bairro_inferido``. **Cidade, UF e bairro definitivos são preenchidos pela
+validação por geocode** (módulo :mod:`comparaveis.validacao_cidade`).
 
-- O parser antigo recebia ``cidade_ref`` / ``estado_ref`` / ``bairro_ref`` (do
-  leilão original) e atribuía esses valores a **todos** os cards extraídos,
-  independente do conteúdo da página. Foi a causa-raiz #1 do bug
-  Pindamonhangaba → São Bernardo.
-- Este novo extrator devolve apenas o que está **provado** no markdown:
-  ``url, portal, valor_venda, area_m2, titulo, logradouro_inferido,
-  bairro_inferido``. **Cidade, UF e bairro definitivos são preenchidos pela
-  validação por geocode** (módulo :mod:`comparaveis.validacao_cidade`).
+Esta separação é a defesa-em-profundidade contra o bug histórico em que cards
+recebiam a cidade do leilão por *fallback* (Pindamonhangaba → São Bernardo).
 
-Mantém a heurística "preço e área mais próximos da URL na janela" porque
-funciona bem para os portais (Zap, Quinto Andar, OLX, Loft, Imovelweb,
-Chaves na Mão), mas **a janela é mais conservadora** e os filtros de URL
-foram simplificados para o módulo ser facilmente testável.
+A heurística "preço e área mais próximos da URL na janela" é conservadora e
+funciona bem para os portais cobertos (Zap, Quinto Andar, OLX, Loft, Imovelweb,
+Chaves na Mão).
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+import unicodedata
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -94,6 +90,12 @@ class CardExtraido:
     Atenção: ``cidade``, ``estado_uf`` e ``bairro_confirmado`` são preenchidos
     posteriormente pelo pipeline (em :mod:`comparaveis.persistencia`) com base
     no resultado de :func:`comparaveis.validacao_cidade.validar_municipio_card`.
+
+    ``cidade_no_markdown`` é uma evidência **textual local**: contém o nome da
+    cidade-alvo se ele apareceu na janela do card no markdown bruto. Serve como
+    sinal forte para a hierarquia de validação (validacao_cidade), evitando o
+    descarte de cards quando a página foi confirmada como sendo da cidade-alvo
+    mas a rua/bairro genérico geocodifica para outra cidade.
     """
 
     url_anuncio: str
@@ -103,6 +105,7 @@ class CardExtraido:
     titulo: str = ""
     logradouro_inferido: str = ""
     bairro_inferido: str = ""
+    cidade_no_markdown: str = ""
 
     @property
     def preco_m2(self) -> float:
@@ -186,10 +189,22 @@ _RE_QA_LISTAGEM = re.compile(
 
 
 def _url_eh_listagem(url: str) -> bool:
-    """Páginas de listagem (resultados de busca, hubs por bairro, etc.)."""
+    """Heurística informativa: a URL aparenta ser uma página de **listagem**?
+
+    .. note::
+
+       Esta função **não** é usada para descartar URLs em
+       :func:`url_eh_anuncio_aproveitavel`. Ela existe apenas como sinal para
+       métricas/logs e para o pipeline ajustar heurísticas quando necessário.
+
+    Por que aceitamos listagens? Em cidades menores (Pindamonhangaba, Cruzeiro,
+    Atibaia, …) os portais raramente indexam anúncios individuais; o que aparece
+    nos motores de busca são páginas-hub do tipo *"Apartamentos à venda em
+    Santana, Pindamonhangaba — SP"*. O extrator é capaz de iterar **vários**
+    cards por página e a validação por geocode garante que cards de outras
+    cidades sejam descartados depois.
+    """
     u = (url or "").lower()
-    # Quinto Andar: /comprar/imovel/cidade-uf-brasil/tipo é hub SEO de listagem,
-    # mesmo contendo "/imovel/" no path.
     if "quintoandar.com.br" in u:
         if _RE_QA_LISTAGEM.search(u):
             return True
@@ -227,7 +242,17 @@ def _portal_aceito(url: str) -> bool:
 
 
 def url_eh_anuncio_aproveitavel(url: str) -> bool:
-    """API pública para validar URLs antes de gastar scrape."""
+    """API pública para validar URLs antes de gastar scrape.
+
+    Aceita tanto **anúncios individuais** quanto **páginas de listagem** dos
+    portais reconhecidos. Listagens são especialmente importantes em cidades
+    menores (onde portais não indexam anúncios isolados); o extrator extrai
+    múltiplos cards por página e a validação por geocode descarta cards que
+    não são da cidade-alvo.
+
+    Rejeita: domínios fora da lista, recursos estáticos (jpg, png, …) e URLs
+    de **aluguel**.
+    """
     if not url:
         return False
     if _url_eh_recurso_estatico(url):
@@ -235,8 +260,6 @@ def url_eh_anuncio_aproveitavel(url: str) -> bool:
     if not _portal_aceito(url):
         return False
     if _url_eh_aluguel(url):
-        return False
-    if _url_eh_listagem(url):
         return False
     return True
 
@@ -325,6 +348,118 @@ def _inferir_logradouro_do_titulo(titulo: str) -> str:
     return m.group(0).strip()[:160]
 
 
+# -----------------------------------------------------------------------------
+# Extracção de endereço completo a partir de página de anúncio individual
+# -----------------------------------------------------------------------------
+
+# Tipos de logradouro reconhecidos. Inclui formas abreviadas e plurais
+# para apanhar variações dos portais.
+_RE_LOGRADOURO_TIPOS = (
+    r"Rua|R\.|Avenida|Av\.|Alameda|Al\.|Travessa|Tv\.|Estrada|"
+    r"Rodovia|Rod\.|Praça|Pç\.|Pca\.|Largo|Beco|Servidão|Via"
+)
+
+# Padrão para "Rua X, 123" ou "Av. Y, 45 — Apto 67". Captura logradouro
+# com tipo + nome próprio (até quebra de linha ou pontuação) opcionalmente
+# seguido de número. O lookahead final exige separador "forte" (vírgula,
+# en-dash, em-dash, ponto, parêntese, fim de linha) — *não* aceita simples
+# espaço, para não cortar "Rua das Flores" em "Rua das".
+_RE_RUA_COM_NUMERO = re.compile(
+    rf"\b({_RE_LOGRADOURO_TIPOS})\s+"
+    r"([A-Za-zÀ-ÿ][\wÀ-ÿ\s\-'.]{2,100}?)"
+    r"(?:\s*[,–—\-]\s*(?:n[º°ºo]?\s*)?(\d{1,5}[A-Za-z]?))?"
+    r"(?=\s*(?:[,–—\-\.\(\)]|\n|$))",
+    re.IGNORECASE,
+)
+
+# Labels comuns em páginas de anúncio individual: "Endereço:", "Localização:",
+# "Bairro:" — capturam o que vem na MESMA linha (até quebra ou outro label).
+_RE_LABEL_ENDERECO = re.compile(
+    r"(?:^|\n)\s*(?:\*\*)?\s*(?:Endere[çc]o|Localiza[çc][ãa]o|Address)\s*(?:\*\*)?\s*"
+    r"[:：]\s*(?:\*\*)?\s*([^\n*]{8,300})",
+    re.IGNORECASE,
+)
+_RE_LABEL_BAIRRO = re.compile(
+    r"(?:^|\n)\s*(?:\*\*)?\s*Bairro\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*"
+    r"([A-Za-zÀ-ÿ][\wÀ-ÿ\s\-'.]{1,80})",
+    re.IGNORECASE,
+)
+
+# Padrão "no bairro Foo" / "do bairro Foo" / "Bairro Foo" no corpo do texto.
+_RE_BAIRRO_INLINE = re.compile(
+    r"\b(?:no|do|da|de|em|bairro)\s+(?:bairro\s+)?"
+    r"([A-Z][A-Za-zÀ-ÿ][\wÀ-ÿ\s\-']{2,60})",
+    re.UNICODE,
+)
+
+
+def extrair_endereco_anuncio_individual(markdown: str) -> tuple[str, str]:
+    """Extrai (logradouro, bairro) de uma página de anúncio individual.
+
+    Aplica heurísticas mais agressivas que :func:`_inferir_logradouro_do_titulo`
+    porque uma página de anúncio individual costuma ter:
+
+    - Labels explícitos: ``Endereço: Rua X, 123 - Bairro``.
+    - Padrão "Rua/Av Foo, 123" no corpo (mesmo sem label).
+    - Bairro mencionado em "no bairro Foo" ou label próprio.
+
+    Devolve strings vazias quando não encontra. O caller (refino) pode
+    decidir manter as coords antigas se o resultado for vazio.
+
+    Args:
+        markdown: texto bruto do scrape do anúncio individual.
+
+    Returns:
+        Tupla ``(logradouro, bairro)`` — ambas strings podem estar vazias.
+        ``logradouro`` inclui tipo + nome (e número quando disponível),
+        truncado a 200 chars. ``bairro`` é truncado a 80 chars.
+    """
+    md = markdown or ""
+    if not md.strip():
+        return ("", "")
+
+    logradouro = ""
+    bairro = ""
+
+    m_end = _RE_LABEL_ENDERECO.search(md)
+    if m_end:
+        endereco_linha = m_end.group(1).strip()
+        m_rua = _RE_RUA_COM_NUMERO.search(endereco_linha)
+        if m_rua:
+            logradouro = _formatar_logradouro(m_rua)
+        elif endereco_linha and len(endereco_linha) >= 5:
+            logradouro = endereco_linha[:200]
+
+    if not logradouro:
+        for m in _RE_RUA_COM_NUMERO.finditer(md):
+            logradouro = _formatar_logradouro(m)
+            if m.group(3):
+                break
+
+    m_bai_label = _RE_LABEL_BAIRRO.search(md)
+    if m_bai_label:
+        bairro = m_bai_label.group(1).strip()[:80]
+    else:
+        m_bai_inline = _RE_BAIRRO_INLINE.search(md)
+        if m_bai_inline:
+            cand = m_bai_inline.group(1).strip()
+            if not _RE_TITULO_GENERICO.match(cand) and len(cand) >= 3:
+                bairro = cand[:80]
+
+    return (logradouro.strip()[:200], bairro.strip()[:80])
+
+
+def _formatar_logradouro(m: "re.Match[str]") -> str:
+    """Junta tipo + nome (+ número, se houver) num formato canónico."""
+    tipo = (m.group(1) or "").strip()
+    nome = (m.group(2) or "").strip().rstrip(",.- ")
+    numero = (m.group(3) or "").strip() if m.lastindex and m.lastindex >= 3 else ""
+    base = f"{tipo} {nome}".strip()
+    if numero:
+        base = f"{base}, {numero}"
+    return base[:200]
+
+
 def _titulo_proximo(md: str, pos: int) -> str:
     """Tenta título via negrito/heading antes da URL ou ALT de imagem próxima."""
     bloco = md[max(0, pos - 240) : pos]
@@ -397,10 +532,46 @@ def _iter_urls_no_markdown(md: str) -> list[tuple[str, int, str]]:
 
 
 # -----------------------------------------------------------------------------
+# Detecção textual de cidade-alvo na janela do card
+# -----------------------------------------------------------------------------
+
+def _normalizar_para_match(s: str) -> str:
+    """Lowercase, strip de acentos, colapsa não-alfanuméricos em um único espaço.
+
+    >>> _normalizar_para_match("Pindamonhangaba/SP — Centro")
+    'pindamonhangaba sp centro'
+    """
+    base = unicodedata.normalize("NFD", (s or "").lower())
+    base = "".join(c for c in base if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^a-z0-9]+", " ", base).strip()
+
+
+def _detectar_cidade_no_texto(texto: str, cidade_alvo: str) -> bool:
+    """Verdadeiro se o nome da cidade-alvo aparece no texto (com boundaries).
+
+    Usa normalização (sem acentos, lowercase, pontuação → espaço) e busca por
+    sequência exata, evitando falsos positivos do tipo *"saopaulo"* matchando
+    *"saopaulonorte"*. Rejeita cidades com nome muito curto (<4 chars) para
+    evitar matches espúrios.
+    """
+    if not cidade_alvo or not texto:
+        return False
+    alvo = _normalizar_para_match(cidade_alvo)
+    if len(alvo) < 4:
+        return False
+    txt = _normalizar_para_match(texto)
+    return f" {alvo} " in f" {txt} "
+
+
+# -----------------------------------------------------------------------------
 # API pública: extrair_cards
 # -----------------------------------------------------------------------------
 
-def extrair_cards(markdown: str) -> list[CardExtraido]:
+def extrair_cards(
+    markdown: str,
+    *,
+    cidade_alvo: str = "",
+) -> list[CardExtraido]:
     """Extrai todos os cards (URL + R$ + m²) de uma página de markdown.
 
     NÃO devolve cidade, UF nem bairro definitivos — apenas o que se pode inferir
@@ -410,6 +581,9 @@ def extrair_cards(markdown: str) -> list[CardExtraido]:
 
     Args:
         markdown: texto bruto do Firecrawl scrape.
+        cidade_alvo: nome da cidade do leilão. Se passado, cada card terá
+            ``cidade_no_markdown`` preenchido com este valor sempre que o nome
+            aparecer na janela do card (sinal forte para a validação posterior).
 
     Returns:
         Lista (eventualmente vazia) de :class:`CardExtraido`. Sem duplicatas
@@ -435,6 +609,12 @@ def extrair_cards(markdown: str) -> list[CardExtraido]:
         if titulo and _RE_TITULO_GENERICO.match(titulo):
             titulo = _titulo_proximo(md, pos) or titulo
 
+        cidade_local = (
+            cidade_alvo
+            if cidade_alvo and _detectar_cidade_no_texto(janela, cidade_alvo)
+            else ""
+        )
+
         cards.append(
             CardExtraido(
                 url_anuncio=url,
@@ -444,8 +624,14 @@ def extrair_cards(markdown: str) -> list[CardExtraido]:
                 titulo=titulo[:300],
                 logradouro_inferido=_inferir_logradouro_do_titulo(titulo),
                 bairro_inferido=_inferir_bairro_do_titulo(titulo),
+                cidade_no_markdown=cidade_local,
             )
         )
 
-    logger.info("Extrator: %s cards extraídos (%s URLs candidatas)", len(cards), len(candidatos))
+    logger.info(
+        "Extrator: %s cards extraídos (%s URLs candidatas, cidade_alvo=%r)",
+        len(cards),
+        len(candidatos),
+        cidade_alvo,
+    )
     return cards

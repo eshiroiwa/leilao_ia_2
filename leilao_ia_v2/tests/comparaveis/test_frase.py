@@ -1,4 +1,9 @@
-"""Testes da construção de UMA frase de busca focada (PR1)."""
+"""Testes da construção de UMA frase de busca natural.
+
+A frase usa **plural** + ``"à venda em"`` + bairro/cidade/UF, alinhando-se com
+a forma como portais imobiliários (Viva Real, Zap, Chaves na Mão, etc.)
+indexam suas páginas de listagem. Não inclui área em m² (restritivo demais).
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,7 @@ class TestFraseBasica:
     def test_apenas_cidade_e_uf(self):
         f = montar_frase_busca(cidade="Pindamonhangaba", estado_uf="SP")
         assert isinstance(f, FraseBusca)
-        assert f.texto == "Pindamonhangaba SP"
+        assert f.texto == "imóveis à venda em Pindamonhangaba SP"
         assert f.componentes == {"cidade": "Pindamonhangaba", "uf": "SP"}
 
     def test_cidade_vazia_invalida(self):
@@ -34,57 +39,49 @@ class TestFraseBasica:
 
 class TestFraseTipo:
     @pytest.mark.parametrize(
-        "tipo_in,tipo_canonico",
+        "tipo_in,tipo_singular,plural_no_texto",
         [
-            ("Apartamento", "apartamento"),
-            ("APARTAMENTO PADRÃO", "apartamento"),
-            ("Casa", "casa"),
-            ("sobrado", "sobrado"),
-            ("LOTE", "terreno"),
-            ("terreno", "terreno"),
-            ("gleba", "terreno"),
-            ("loja", "loja"),
-            ("galpão", "galpão"),
+            ("Apartamento", "apartamento", "apartamentos"),
+            ("APARTAMENTO PADRÃO", "apartamento", "apartamentos"),
+            ("Casa", "casa", "casas"),
+            ("sobrado", "sobrado", "sobrados"),
+            ("LOTE", "terreno", "terrenos"),
+            ("terreno", "terreno", "terrenos"),
+            ("gleba", "terreno", "terrenos"),
+            ("loja", "loja", "lojas"),
+            ("galpão", "galpão", "galpões"),
         ],
     )
-    def test_tipo_canonicalizado(self, tipo_in, tipo_canonico):
+    def test_tipo_canonicalizado_em_plural(self, tipo_in, tipo_singular, plural_no_texto):
         f = montar_frase_busca(
             cidade="Pindamonhangaba", estado_uf="SP", tipo_imovel=tipo_in
         )
-        assert tipo_canonico in f.texto
-        assert f.componentes["tipo"] == tipo_canonico
+        assert f.texto.startswith(plural_no_texto + " à venda")
+        assert f.componentes["tipo"] == tipo_singular
 
-    def test_tipo_desconhecido_omitido(self):
+    def test_tipo_desconhecido_usa_imoveis(self):
         f = montar_frase_busca(
             cidade="Pindamonhangaba", estado_uf="SP", tipo_imovel="xpto blabla"
         )
+        assert f.texto.startswith("imóveis à venda em")
         assert "xpto" not in f.texto
         assert "tipo" not in f.componentes
 
 
-class TestFraseAreaPlausivel:
-    def test_area_plausivel_incluida(self):
-        f = montar_frase_busca(
-            cidade="Taubaté", estado_uf="SP", tipo_imovel="apartamento", area_m2=68.0
-        )
-        assert "68 m²" in f.texto
-        assert f.componentes["area_m2"] == "68"
+class TestFraseSemArea:
+    """Área em m² é intencionalmente descartada para favorecer páginas de
+    listagem (que tipicamente agregam vários tamanhos)."""
 
-    def test_area_arredondada(self):
-        f = montar_frase_busca(cidade="Taubaté", estado_uf="SP", area_m2=67.6)
-        assert "68 m²" in f.texto
-
-    @pytest.mark.parametrize("a", [0, 1, 14, 0.0, 1001, 999999, -10])
-    def test_area_implausivel_omitida(self, a):
+    @pytest.mark.parametrize("area", [50.0, 67.5, 99.99, 200, 1, None])
+    def test_area_nunca_no_texto(self, area):
         f = montar_frase_busca(
-            cidade="Taubaté", estado_uf="SP", tipo_imovel="apartamento", area_m2=a
+            cidade="Taubaté",
+            estado_uf="SP",
+            tipo_imovel="apartamento",
+            area_m2=area,
         )
         assert "m²" not in f.texto
         assert "area_m2" not in f.componentes
-
-    def test_area_none_omitida(self):
-        f = montar_frase_busca(cidade="Taubaté", estado_uf="SP", area_m2=None)
-        assert "m²" not in f.texto
 
 
 class TestFraseBairro:
@@ -97,12 +94,15 @@ class TestFraseBairro:
         )
         assert "Vila São José" in f.texto
         assert f.componentes["bairro"] == "Vila São José"
+        # Ordem: <plural> à venda em <bairro> <cidade> <UF>
+        assert f.texto == "apartamentos à venda em Vila São José Taubaté SP"
 
     def test_bairro_vazio_omitido(self):
         f = montar_frase_busca(
             cidade="Taubaté", estado_uf="SP", tipo_imovel="apartamento", bairro=""
         )
         assert "bairro" not in f.componentes
+        assert f.texto == "apartamentos à venda em Taubaté SP"
 
     def test_caracteres_especiais_removidos(self):
         f = montar_frase_busca(
@@ -126,13 +126,13 @@ class TestFraseFocoNaCidade:
         )
         assert f.texto.endswith("Pindamonhangaba SP")
 
-    def test_ordem_completa(self):
-        """tipo + área + bairro + cidade + UF, nesta ordem (regressão)."""
+    def test_ordem_completa_pinda(self):
+        """Cenário do bug: tipo plural + 'à venda em' + bairro + cidade + UF."""
         f = montar_frase_busca(
             cidade="Pindamonhangaba",
             estado_uf="SP",
             tipo_imovel="apartamento",
-            bairro="Centro",
-            area_m2=70,
+            bairro="Santana",
+            area_m2=65,
         )
-        assert f.texto == "apartamento 70 m² Centro Pindamonhangaba SP"
+        assert f.texto == "apartamentos à venda em Santana Pindamonhangaba SP"

@@ -1,7 +1,10 @@
-"""Testes do router :mod:`comparaveis.integracao` (PR5).
+"""Testes do adaptador :mod:`comparaveis.integracao`.
 
-Cobre flag on/off + mapeamento de :class:`EstatisticasPipeline` para o dict
-consumido pelo pipeline de ingestão.
+Cobre:
+
+- :func:`executar_comparaveis_pos_ingestao` — entrada do pipeline de ingestão.
+- :func:`executar_comparaveis_para_cache` — entrada do cache de média.
+- Mapeamento :class:`EstatisticasPipeline` → dict consumido pelo pipeline.
 """
 
 from __future__ import annotations
@@ -12,10 +15,9 @@ import pytest
 
 from leilao_ia_v2.comparaveis import integracao
 from leilao_ia_v2.comparaveis.integracao import (
-    FLAG_ENV,
-    URL_LISTAGEM_V2,
+    URL_LISTAGEM,
+    executar_comparaveis_para_cache,
     executar_comparaveis_pos_ingestao,
-    flag_v2_ativa,
 )
 from leilao_ia_v2.comparaveis.orcamento import OrcamentoFirecrawl
 from leilao_ia_v2.comparaveis.persistencia import LinhaPersistir
@@ -65,7 +67,7 @@ def _stats(**overrides) -> EstatisticasPipeline:
         motivos_descarte_validacao={"municipio_diferente": 1},
         persistidos=3,
         creditos_gastos=4,
-        creditos_cap=15,
+        creditos_cap=20,
     )
     base.update(overrides)
     return EstatisticasPipeline(**base)
@@ -95,69 +97,11 @@ def _linha_dummy(i: int) -> LinhaPersistir:
 
 
 # -----------------------------------------------------------------------------
-# flag_v2_ativa
+# executar_comparaveis_pos_ingestao
 # -----------------------------------------------------------------------------
 
-class TestFlag:
-    def test_flag_off_por_default(self, monkeypatch):
-        monkeypatch.delenv(FLAG_ENV, raising=False)
-        assert flag_v2_ativa() is False
-
-    def test_flag_off_string_vazia(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "")
-        assert flag_v2_ativa() is False
-
-    def test_flag_off_zero(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "0")
-        assert flag_v2_ativa() is False
-
-    def test_flag_off_false(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "false")
-        assert flag_v2_ativa() is False
-
-    @pytest.mark.parametrize("v", ["1", "true", "TRUE", "on", "yes", "sim", " 1 ", "Sim"])
-    def test_flag_on_valores_aceites(self, monkeypatch, v):
-        monkeypatch.setenv(FLAG_ENV, v)
-        assert flag_v2_ativa() is True
-
-
-# -----------------------------------------------------------------------------
-# Router: flag off → delega ao antigo
-# -----------------------------------------------------------------------------
-
-class TestRouterFlagOff:
-    def test_flag_off_delega_v1(self, monkeypatch):
-        monkeypatch.delenv(FLAG_ENV, raising=False)
-        client = object()
-        extn = _extn()
-        v1_mock = MagicMock(return_value={"ok": True, "anuncios_salvos": 7})
-        with patch(
-            "leilao_ia_v2.services.comparaveis_pos_ingestao.executar_comparaveis_apos_ingestao_leilao",
-            v1_mock,
-        ):
-            r = executar_comparaveis_pos_ingestao(
-                client,
-                leilao_imovel_id="abc",
-                extn=extn,
-                ignorar_cache_firecrawl=True,
-                max_chamadas_api_firecrawl=10,
-            )
-        assert r == {"ok": True, "anuncios_salvos": 7}
-        v1_mock.assert_called_once()
-        kwargs = v1_mock.call_args.kwargs
-        assert kwargs["leilao_imovel_id"] == "abc"
-        assert kwargs["extn"] is extn
-        assert kwargs["ignorar_cache_firecrawl"] is True
-        assert kwargs["max_chamadas_api_firecrawl"] == 10
-
-
-# -----------------------------------------------------------------------------
-# Router: flag on → executa v2
-# -----------------------------------------------------------------------------
-
-class TestRouterFlagOn:
-    def test_flag_on_chama_executar_pipeline_com_args_corretos(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "1")
+class TestExecutarPosIngestao:
+    def test_chama_executar_pipeline_com_args_corretos(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
         client = object()
         extn = _extn()
@@ -169,13 +113,13 @@ class TestRouterFlagOn:
             fake,
         ), patch(
             "leilao_ia_v2.comparaveis.integracao._resolver_cap",
-            return_value=15,
+            return_value=20,
         ):
             r = executar_comparaveis_pos_ingestao(
                 client,
                 leilao_imovel_id="abc",
                 extn=extn,
-                max_chamadas_api_firecrawl=15,
+                max_chamadas_api_firecrawl=20,
             )
         fake.assert_called_once()
         args, kwargs = fake.call_args
@@ -186,95 +130,140 @@ class TestRouterFlagOn:
         assert args[0].bairro == "Centro"
         assert args[0].area_m2 == 65.0
         assert isinstance(kwargs["orcamento"], OrcamentoFirecrawl)
-        assert kwargs["orcamento"].cap == 15
+        assert kwargs["orcamento"].cap == 20
         assert kwargs["supabase_client"] is client
-        # E o dict de retorno é compatível com o formato do antigo
         assert r["ok"] is True
         assert r["anuncios_salvos"] == 3
-        assert r["url_listagem"] == URL_LISTAGEM_V2
+        assert r["url_listagem"] == URL_LISTAGEM
 
-    def test_flag_on_sem_cidade_omitido(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "1")
+    def test_sem_cidade_omitido(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
         fake = MagicMock()
         with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline", fake):
             r = executar_comparaveis_pos_ingestao(
-                object(),
-                leilao_imovel_id="abc",
-                extn=_extn(cidade=""),
+                object(), leilao_imovel_id="abc", extn=_extn(cidade=""),
             )
         assert r["omitido"] is True
         assert r["motivo"] == "sem_cidade_ou_estado"
         fake.assert_not_called()
 
-    def test_flag_on_sem_estado_omitido(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "1")
+    def test_sem_estado_omitido(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
         fake = MagicMock()
         with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline", fake):
             r = executar_comparaveis_pos_ingestao(
-                object(),
-                leilao_imovel_id="abc",
-                extn=_extn(estado=""),
+                object(), leilao_imovel_id="abc", extn=_extn(estado=""),
             )
         assert r["omitido"] is True
         assert r["motivo"] == "sem_cidade_ou_estado"
         fake.assert_not_called()
 
-    def test_flag_on_sem_api_key_omitido(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "1")
+    def test_sem_api_key_omitido(self, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         fake = MagicMock()
         with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline", fake):
             r = executar_comparaveis_pos_ingestao(
-                object(),
-                leilao_imovel_id="abc",
-                extn=_extn(),
+                object(), leilao_imovel_id="abc", extn=_extn(),
             )
         assert r["omitido"] is True
         assert r["motivo"] == "FIRECRAWL_API_KEY_ausente"
         fake.assert_not_called()
 
-    def test_flag_on_cap_zero_omitido(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "1")
+    def test_cap_zero_omitido(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
         fake = MagicMock()
         with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline", fake):
             r = executar_comparaveis_pos_ingestao(
-                object(),
-                leilao_imovel_id="abc",
-                extn=_extn(),
+                object(), leilao_imovel_id="abc", extn=_extn(),
                 max_chamadas_api_firecrawl=0,
             )
         assert r["omitido"] is True
         assert r["motivo"] == "firecrawl_orcamento_analise_esgotado"
         fake.assert_not_called()
 
-    def test_flag_on_excecao_v2_nao_propaga(self, monkeypatch):
-        monkeypatch.setenv(FLAG_ENV, "1")
+    def test_excecao_nao_propaga(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
         with patch(
             "leilao_ia_v2.comparaveis.integracao.executar_pipeline",
             side_effect=RuntimeError("boom"),
         ):
             r = executar_comparaveis_pos_ingestao(
-                object(),
-                leilao_imovel_id="abc",
-                extn=_extn(),
-                max_chamadas_api_firecrawl=15,
+                object(), leilao_imovel_id="abc", extn=_extn(),
+                max_chamadas_api_firecrawl=20,
             )
         assert r["ok"] is False
-        assert "comparaveis_v2_excecao_ver_log" in r["erro"]
+        assert "comparaveis_excecao_ver_log" in r["erro"]
 
 
 # -----------------------------------------------------------------------------
-# Mapeamento ResultadoPipeline → dict (para o pipeline de ingestão)
+# executar_comparaveis_para_cache (helper para cache_media_leilao)
+# -----------------------------------------------------------------------------
+
+class TestExecutarParaCache:
+    def test_devolve_persistidos_e_chamadas(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
+        stats = _stats(persistidos=4, paginas_scrapadas=3, paginas_cache_hit=1, urls_busca=10)
+        resultado = _resultado(stats, n_linhas=4)
+        with patch(
+            "leilao_ia_v2.comparaveis.integracao.executar_pipeline",
+            return_value=resultado,
+        ):
+            n_salvos, n_api = executar_comparaveis_para_cache(
+                object(),
+                cidade="Pindamonhangaba",
+                estado_raw="SP",
+                bairro="Centro",
+                tipo_imovel="apartamento",
+                area_ref=65.0,
+                max_chamadas_api=20,
+            )
+        assert n_salvos == 4
+        # 1 search + (3-1) scrapes pagos = 3
+        assert n_api == 3
+
+    def test_sem_cidade_devolve_zeros(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
+        with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline") as fake:
+            n, k = executar_comparaveis_para_cache(
+                object(), cidade="", estado_raw="SP", bairro="x", tipo_imovel="apartamento",
+            )
+        assert (n, k) == (0, 0)
+        fake.assert_not_called()
+
+    def test_sem_api_key_devolve_zeros(self, monkeypatch):
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline") as fake:
+            n, k = executar_comparaveis_para_cache(
+                object(), cidade="X", estado_raw="SP", bairro="y", tipo_imovel="casa",
+            )
+        assert (n, k) == (0, 0)
+        fake.assert_not_called()
+
+    def test_excecao_devolve_zeros(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
+        with patch(
+            "leilao_ia_v2.comparaveis.integracao.executar_pipeline",
+            side_effect=RuntimeError("boom"),
+        ):
+            n, k = executar_comparaveis_para_cache(
+                object(),
+                cidade="Pindamonhangaba",
+                estado_raw="SP",
+                bairro="Centro",
+                tipo_imovel="apartamento",
+                max_chamadas_api=20,
+            )
+        assert (n, k) == (0, 0)
+
+
+# -----------------------------------------------------------------------------
+# Mapeamento ResultadoPipeline → dict
 # -----------------------------------------------------------------------------
 
 class TestMapeamento:
     def test_resultado_normal_mapeia_chaves_esperadas(self):
         stats = _stats()
-        orc = OrcamentoFirecrawl(cap=15, gasto=4)
+        orc = OrcamentoFirecrawl(cap=20, gasto=4)
         d = integracao._resultado_para_dict(_resultado(stats, n_linhas=3), orc)
         for k in (
             "ok", "anuncios_salvos", "url_listagem", "n_geocodificados",
@@ -286,17 +275,17 @@ class TestMapeamento:
         assert d["anuncios_salvos"] == 3
         assert d["n_geocodificados"] == 3
         assert d["markdown_insuficiente"] is False
-        assert d["url_listagem"] == URL_LISTAGEM_V2
+        assert d["url_listagem"] == URL_LISTAGEM
         assert d["falha_por_filtros_persistencia"] is False
 
     def test_zero_persistidos_marca_markdown_insuficiente(self):
         stats = _stats(persistidos=0, cards_aprovados_validacao=0)
-        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=15))
+        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=20))
         assert d["anuncios_salvos"] == 0
         assert d["markdown_insuficiente"] is True
 
     def test_cards_extraidos_mas_todos_descartados_marca_falha_por_filtros(self):
-        """Cenário Pindamonhangaba → SBC: 4 cards, todos reprovados na validação."""
+        """Pindamonhangaba → SBC: 4 cards, todos reprovados na validação."""
         stats = _stats(
             persistidos=0,
             cards_extraidos=4,
@@ -304,7 +293,7 @@ class TestMapeamento:
             cards_descartados_validacao=4,
             motivos_descarte_validacao={"municipio_diferente": 4},
         )
-        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=15))
+        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=20))
         assert d["anuncios_salvos"] == 0
         assert d["falha_por_filtros_persistencia"] is True
 
@@ -320,16 +309,13 @@ class TestMapeamento:
             cards_descartados_validacao=0,
             persistidos=0,
         )
-        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=15))
+        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=20))
         assert d["omitido"] is True
         assert d["motivo"] == "frase_vazia"
-        assert d["anuncios_salvos"] == 0
-        assert d["url_listagem"] == URL_LISTAGEM_V2
 
     def test_chamadas_api_descontam_cache_hits(self):
         stats = _stats(paginas_scrapadas=5, paginas_cache_hit=3, urls_busca=10)
-        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=15))
-        # 1 search + (5 - 3) scrapes pagos = 3
+        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=20))
         assert d["firecrawl_chamadas_api"] == 3
 
     def test_chamadas_api_zero_quando_nao_houve_busca(self):
@@ -339,17 +325,17 @@ class TestMapeamento:
             cards_extraidos=0, cards_aprovados_validacao=0,
             cards_descartados_validacao=0, persistidos=0,
         )
-        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=15))
+        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=20))
         assert d["firecrawl_chamadas_api"] == 0
 
     def test_diagnostico_inclui_metricas_chave(self):
         stats = _stats()
-        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=15, gasto=4))
+        d = integracao._resultado_para_dict(_resultado(stats), OrcamentoFirecrawl(cap=20, gasto=4))
         diag = d["diagnostico_firecrawl_search"]
         assert "v2" in diag
         assert "persistidos=3" in diag
         assert "cards=4" in diag
-        assert "creditos=4/15" in diag
+        assert "creditos=4/20" in diag
         assert "municipio_diferente=1" in diag
 
 
@@ -372,12 +358,12 @@ class TestResolverCap:
             m.return_value.max_firecrawl_creditos_analise = 12
             assert integracao._resolver_cap(None) == 12
 
-    def test_arg_none_e_parametro_indisponivel_devolve_15(self):
+    def test_arg_none_e_parametro_indisponivel_devolve_20(self):
         with patch(
             "leilao_ia_v2.config.busca_mercado_parametros.get_busca_mercado_parametros",
             side_effect=RuntimeError("config off"),
         ):
-            assert integracao._resolver_cap(None) == 15
+            assert integracao._resolver_cap(None) == 20
 
 
 class TestAreaReferencia:

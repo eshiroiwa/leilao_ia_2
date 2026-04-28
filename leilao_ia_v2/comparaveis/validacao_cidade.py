@@ -1,24 +1,44 @@
 """
-Validação dura de município por geocode + reverse geocode.
+Validação de município por evidência **em camadas** + precisão de geocode.
 
-Esta é a peça que impede o bug "anúncio de São Bernardo aparecer como
-Pindamonhangaba" descrito pelo usuário. A lógica é simples e brutal:
+Para cidades pequenas (Pindamonhangaba, Cruzeiro, Atibaia, …) o geocode "sem
+cidade" frequentemente falha ou desambigua para o município errado quando o
+anúncio só expõe um bairro genérico ("Centro", "Santana"). Para reduzir o
+descarte de cards legítimos sem perder a defesa contra o bug
+*"Pindamonhangaba → São Bernardo"*, a validação tem **três camadas de
+evidência** com pesos progressivamente mais altos:
 
-1. Geocodifica o endereço do card **sem fornecer cidade** (usa apenas o que o
-   próprio anúncio expõe: rua, bairro, eventualmente o título).
-2. Reverse-geocodifica as coordenadas obtidas para descobrir o município real.
-3. Compara o município real com o município alvo (slug normalizado: lowercase,
-   sem acentos, alfanumérico).
-4. Se ≠, **descarta o card** com motivo registado.
+1. **Texto local**: o nome da cidade-alvo aparece no markdown da janela do
+   card (campo ``cidade_no_markdown`` produzido pelo extrator). Match
+   determinístico, sem chamada de rede.
+2. **Geocode + reverse** (camada original): geocodifica rua/bairro/UF SEM
+   incluir cidade, depois reverse-geocodifica para descobrir o município real
+   e compara com o alvo.
+3. **Página confirmada**: a página inteira foi marcada como ``CONFIRMADA``
+   pelo :mod:`comparaveis.pagina_filtro` (cidade-alvo em H1/título/breadcrumb).
+   Se o geocode da camada 2 falhou ou divergiu, ainda assim aceitamos o card.
 
-Provider primário é Google Maps (decidido pelo utilizador na fase de design,
-opção 3-A: "mais preciso, ~$0.005/chamada"). Quando ``GOOGLE_MAPS_API_KEY``
-não está disponível, cai para Nominatim como fallback determinístico.
+Quando a validação passa por (1) ou (3) — ou seja, **sem** geocode válido —,
+chamamos :func:`obter_coordenadas_com_cidade` para obter lat/lng precisos
+**incluindo** o nome da cidade-alvo na query (só é seguro porque já temos
+evidência textual independente).
 
-Este módulo NÃO depende do pacote `services/geocoding.py` antigo para evitar
-acoplamento circular (e porque aquele módulo aceita `cidade` como hint, o que
-é exactamente o que estamos a tentar evitar). As chamadas HTTP são pequenas
-e isoladas para que os testes possam mockar facilmente.
+**Precisão do geocode** (decisão A do plano A+B):
+:func:`obter_coordenadas_com_cidade` e :func:`geocode_sem_cidade` devolvem,
+para além de ``(lat, lon)``, uma classificação textual da precisão:
+
+- ``"rooftop"``  — número exacto (Google: ``ROOFTOP`` / ``RANGE_INTERPOLATED``).
+- ``"rua"``       — centróide de uma rua (sem número).
+- ``"bairro"``    — centróide de bairro/sublocality.
+- ``"cidade"``    — centróide de município/locality.
+- ``"desconhecido"`` — fallback inseguro (raro).
+
+A precisão é exposta em :class:`ResultadoValidacaoMunicipio.precisao_geo` para
+o caller (persistência, refino) decidir como usar a coordenada.
+
+Provider primário é Google Maps (decisão 3-A: ~$0.005/chamada). Quando
+``GOOGLE_MAPS_API_KEY`` não está disponível, cai para Nominatim. As chamadas
+HTTP são isoladas para mock fácil em testes.
 """
 
 from __future__ import annotations
@@ -46,6 +66,22 @@ _NOMINATIM_MIN_INTERVAL = 1.1
 
 _nominatim_lock = threading.Lock()
 _nominatim_last_call_ts = 0.0
+
+
+# Classificações canónicas de precisão (ordem da maior para a menor).
+PRECISAO_ROOFTOP = "rooftop"
+PRECISAO_RUA = "rua"
+PRECISAO_BAIRRO = "bairro"
+PRECISAO_CIDADE = "cidade"
+PRECISAO_DESCONHECIDA = "desconhecido"
+
+_PRECISOES_VALIDAS: tuple[str, ...] = (
+    PRECISAO_ROOFTOP,
+    PRECISAO_RUA,
+    PRECISAO_BAIRRO,
+    PRECISAO_CIDADE,
+    PRECISAO_DESCONHECIDA,
+)
 
 
 def _slug(s: str) -> str:
@@ -101,6 +137,117 @@ def _http_get_json(url: str, *, headers: Optional[dict[str, str]] = None, timeou
 
 
 # -----------------------------------------------------------------------------
+# Classificação de precisão (Google + Nominatim)
+# -----------------------------------------------------------------------------
+
+# Tipos no Google address_components / result.types que indicam o nível
+# de granularidade do geocode.
+_GOOGLE_TIPOS_RUA: frozenset[str] = frozenset({"route", "street_address"})
+_GOOGLE_TIPOS_ROOFTOP: frozenset[str] = frozenset({"premise", "subpremise", "street_address"})
+_GOOGLE_TIPOS_BAIRRO: frozenset[str] = frozenset(
+    {
+        "sublocality",
+        "sublocality_level_1",
+        "sublocality_level_2",
+        "neighborhood",
+        "postal_code",
+    }
+)
+_GOOGLE_TIPOS_CIDADE_LOCALIDADE: frozenset[str] = frozenset(
+    {
+        "locality",
+        "postal_town",
+        "administrative_area_level_2",
+        "administrative_area_level_3",
+        "administrative_area_level_4",
+    }
+)
+
+
+def _classificar_precisao_google(result: dict) -> str:
+    """Classifica a precisão de UM resultado de Google Geocoding.
+
+    Combina ``geometry.location_type`` com ``types`` do próprio resultado:
+
+    - ``ROOFTOP`` / ``RANGE_INTERPOLATED``                 → rooftop
+    - ``GEOMETRIC_CENTER`` ou ``APPROXIMATE`` + types:
+        - ``route``/``street_address``                       → rua
+        - ``sublocality*`` / ``neighborhood`` / ``postal_code`` → bairro
+        - ``locality`` / ``administrative_area_level_*``     → cidade
+    - tudo o resto                                          → desconhecido
+    """
+    if not isinstance(result, dict):
+        return PRECISAO_DESCONHECIDA
+    geom = result.get("geometry") or {}
+    loc_type = str(geom.get("location_type") or "").upper()
+    if loc_type in ("ROOFTOP", "RANGE_INTERPOLATED"):
+        return PRECISAO_ROOFTOP
+
+    types = {str(t).lower() for t in (result.get("types") or [])}
+    if types & _GOOGLE_TIPOS_RUA:
+        return PRECISAO_RUA
+    if types & _GOOGLE_TIPOS_BAIRRO:
+        return PRECISAO_BAIRRO
+    if types & _GOOGLE_TIPOS_CIDADE_LOCALIDADE:
+        return PRECISAO_CIDADE
+    if loc_type == "GEOMETRIC_CENTER":
+        return PRECISAO_RUA
+    if loc_type == "APPROXIMATE":
+        return PRECISAO_CIDADE
+    return PRECISAO_DESCONHECIDA
+
+
+# Combinações class/type do Nominatim que indicam o nível de granularidade.
+_NOMINATIM_TIPOS_ROOFTOP: frozenset[str] = frozenset(
+    {"building", "house", "residential", "apartments", "house_number"}
+)
+_NOMINATIM_TIPOS_RUA: frozenset[str] = frozenset(
+    {"residential", "primary", "secondary", "tertiary", "unclassified", "service", "road"}
+)
+_NOMINATIM_TIPOS_BAIRRO: frozenset[str] = frozenset(
+    {"suburb", "neighbourhood", "quarter", "city_block", "borough"}
+)
+_NOMINATIM_TIPOS_CIDADE: frozenset[str] = frozenset(
+    {"city", "town", "village", "municipality", "hamlet", "administrative"}
+)
+
+
+def _classificar_precisao_nominatim(item: dict) -> str:
+    """Classifica a precisão de UM resultado Nominatim via class/type/addresstype.
+
+    Nominatim devolve ``class`` (categoria geral, ex.: ``highway``) e
+    ``type`` (subtipo, ex.: ``residential``). ``addresstype`` (quando
+    presente) é o melhor indicador agregado.
+
+    Ordem de prioridade: rua (class=highway/addresstype=road) > rooftop
+    (building/house/apartments) > bairro > cidade. ``class=highway`` força
+    rua mesmo quando ``type=residential`` (porque "residential" como tipo de
+    via designa rua residencial, não imóvel residencial).
+    """
+    if not isinstance(item, dict):
+        return PRECISAO_DESCONHECIDA
+    addresstype = str(item.get("addresstype") or "").lower()
+    klass = str(item.get("class") or "").lower()
+    tipo = str(item.get("type") or "").lower()
+
+    if klass == "highway" or addresstype == "road":
+        return PRECISAO_RUA
+    if (
+        addresstype in _NOMINATIM_TIPOS_ROOFTOP
+        or tipo in _NOMINATIM_TIPOS_ROOFTOP
+        or klass == "building"
+    ):
+        return PRECISAO_ROOFTOP
+    if tipo in _NOMINATIM_TIPOS_RUA:
+        return PRECISAO_RUA
+    if addresstype in _NOMINATIM_TIPOS_BAIRRO or tipo in _NOMINATIM_TIPOS_BAIRRO:
+        return PRECISAO_BAIRRO
+    if addresstype in _NOMINATIM_TIPOS_CIDADE or tipo in _NOMINATIM_TIPOS_CIDADE:
+        return PRECISAO_CIDADE
+    return PRECISAO_DESCONHECIDA
+
+
+# -----------------------------------------------------------------------------
 # Geocode "forward" SEM cidade: textos curtos só com rua + bairro + UF + país.
 # -----------------------------------------------------------------------------
 
@@ -128,7 +275,11 @@ def _construir_query_sem_cidade(*, logradouro: str, bairro: str, estado_uf: str)
     return ", ".join(partes)
 
 
-def _geocode_google_sem_cidade(query: str) -> Optional[tuple[float, float]]:
+def _geocode_google(query: str) -> Optional[tuple[float, float, str]]:
+    """Invoca Google Geocoding e devolve (lat, lon, precisao).
+
+    ``query`` já contém (ou omite, conforme o caller) o nome da cidade.
+    """
     key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
     if not key or not query:
         return None
@@ -149,14 +300,16 @@ def _geocode_google_sem_cidade(query: str) -> Optional[tuple[float, float]]:
     rs = data.get("results") or []
     if not rs:
         return None
-    loc = ((rs[0].get("geometry") or {}).get("location") or {})
+    primeiro = rs[0]
+    loc = ((primeiro.get("geometry") or {}).get("location") or {})
     lat, lng = loc.get("lat"), loc.get("lng")
     if lat is None or lng is None:
         return None
-    return (float(lat), float(lng))
+    return (float(lat), float(lng), _classificar_precisao_google(primeiro))
 
 
-def _geocode_nominatim_sem_cidade(query: str) -> Optional[tuple[float, float]]:
+def _geocode_nominatim(query: str) -> Optional[tuple[float, float, str]]:
+    """Invoca Nominatim e devolve (lat, lon, precisao)."""
     if not query:
         return None
     _rate_limit_nominatim()
@@ -166,7 +319,7 @@ def _geocode_nominatim_sem_cidade(query: str) -> Optional[tuple[float, float]]:
             "format": "json",
             "limit": "1",
             "countrycodes": "br",
-            "addressdetails": "0",
+            "addressdetails": "1",
         }
     )
     data = _http_get_json(
@@ -177,19 +330,21 @@ def _geocode_nominatim_sem_cidade(query: str) -> Optional[tuple[float, float]]:
         return None
     item = data[0]
     try:
-        return (float(item["lat"]), float(item["lon"]))
+        lat = float(item["lat"])
+        lon = float(item["lon"])
     except (KeyError, ValueError, TypeError):
         return None
+    return (lat, lon, _classificar_precisao_nominatim(item))
 
 
 def geocode_sem_cidade(
     *, logradouro: str, bairro: str, estado_uf: str
-) -> Optional[tuple[float, float]]:
+) -> Optional[tuple[float, float, str]]:
     """Geocodifica um endereço **sem fornecer cidade**.
 
-    Usa Google quando ``GOOGLE_MAPS_API_KEY`` está definida; Nominatim caso
-    contrário. Retorna ``None`` se nada for encontrado (caller deve descartar
-    o card nesse caso).
+    Devolve ``(lat, lon, precisao)`` onde ``precisao`` é uma das constantes
+    ``PRECISAO_*``. Usa Google quando ``GOOGLE_MAPS_API_KEY`` está definida;
+    Nominatim caso contrário. Retorna ``None`` se nada for encontrado.
     """
     query = _construir_query_sem_cidade(
         logradouro=logradouro, bairro=bairro, estado_uf=estado_uf
@@ -197,11 +352,11 @@ def geocode_sem_cidade(
     if not query:
         return None
     if _provider_geocode() == "google":
-        coords = _geocode_google_sem_cidade(query)
+        coords = _geocode_google(query)
         if coords is not None:
             return coords
-        return _geocode_nominatim_sem_cidade(query)
-    return _geocode_nominatim_sem_cidade(query)
+        return _geocode_nominatim(query)
+    return _geocode_nominatim(query)
 
 
 # -----------------------------------------------------------------------------
@@ -279,12 +434,85 @@ def reverse_municipio(lat: float, lon: float) -> Optional[str]:
 
 
 # -----------------------------------------------------------------------------
+# Geocode COM cidade (apenas para coords finais, depois de validada por outras
+# evidências independentes — texto local ou página confirmada)
+# -----------------------------------------------------------------------------
+
+def _construir_query_com_cidade(
+    *,
+    logradouro: str,
+    bairro: str,
+    cidade: str,
+    estado_uf: str,
+) -> str:
+    """Monta query free-text incluindo a cidade.
+
+    Só deve ser usada quando já existe evidência **independente** de que o card
+    pertence à cidade — caso contrário, viola a separação que protege contra o
+    bug Pindamonhangaba → São Bernardo (a cidade do leilão enviesaria o
+    geocoding).
+    """
+    cid = (cidade or "").strip()
+    uf = (estado_uf or "").strip().upper()
+    if not cid:
+        return ""
+    partes = [
+        (logradouro or "").strip(),
+        (bairro or "").strip(),
+        cid,
+        uf,
+        "Brasil",
+    ]
+    return ", ".join(p for p in partes if p)
+
+
+def obter_coordenadas_com_cidade(
+    *,
+    logradouro: str,
+    bairro: str,
+    cidade: str,
+    estado_uf: str,
+) -> Optional[tuple[float, float, str]]:
+    """Geocode lat/lng usando o nome da cidade como hint (mais preciso).
+
+    Devolve ``(lat, lon, precisao)`` onde precisao ∈ ``PRECISAO_*``.
+
+    .. warning::
+
+       **Só** chame esta função para um card cuja pertença à ``cidade`` já tenha
+       sido confirmada por evidência independente (``cidade_no_markdown`` ou
+       ``pagina_confirmada``). Se chamar antes da validação, a query enviesa
+       o geocode e o controlo contra o bug histórico fica derrotado.
+
+    Usa Google quando há ``GOOGLE_MAPS_API_KEY``; cai para Nominatim como
+    fallback. Retorna ``None`` se ambos falharem (caller pode persistir sem
+    coordenadas).
+    """
+    query = _construir_query_com_cidade(
+        logradouro=logradouro, bairro=bairro, cidade=cidade, estado_uf=estado_uf
+    )
+    if not query:
+        return None
+    if _provider_geocode() == "google":
+        coords = _geocode_google(query)
+        if coords is not None:
+            return coords
+        return _geocode_nominatim(query)
+    return _geocode_nominatim(query)
+
+
+# -----------------------------------------------------------------------------
 # API pública: validar_municipio_card
 # -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ResultadoValidacaoMunicipio:
-    """Resultado imutável da validação. Use em logs e na decisão de descartar."""
+    """Resultado imutável da validação. Use em logs e na decisão de descartar.
+
+    O campo :attr:`precisao_geo` reporta a precisão do geocode usado na coord
+    final (uma das constantes ``PRECISAO_*``). Quando a validação reprova
+    (``valido=False``) ou as coordenadas são ``None``, o valor fica vazio.
+    """
 
     valido: bool
     motivo: str
@@ -292,10 +520,25 @@ class ResultadoValidacaoMunicipio:
     coordenadas: Optional[tuple[float, float]] = None
     municipio_alvo_slug: str = ""
     municipio_real_slug: str = ""
+    precisao_geo: str = ""
 
     @property
     def deve_descartar(self) -> bool:
         return not self.valido
+
+
+def _coords_xy(t: Optional[tuple[float, float, str]]) -> Optional[tuple[float, float]]:
+    """Extrai (lat, lon) de uma tupla com precisão; devolve None se falhar."""
+    if t is None:
+        return None
+    return (t[0], t[1])
+
+
+def _coords_precisao(t: Optional[tuple[float, float, str]]) -> str:
+    """Extrai a string de precisão de uma tupla; devolve "" se faltar."""
+    if t is None or len(t) < 3:
+        return ""
+    return str(t[2] or "")
 
 
 def validar_municipio_card(
@@ -304,22 +547,41 @@ def validar_municipio_card(
     bairro: str,
     estado_uf: str,
     cidade_alvo: str,
+    cidade_no_markdown: str = "",
+    pagina_confirmada: bool = False,
 ) -> ResultadoValidacaoMunicipio:
     """Valida que o endereço do card pertence à cidade-alvo do leilão.
 
-    Fluxo:
+    Hierarquia de evidência (camadas em ordem de preferência):
 
-    1. Constrói query SEM cidade (rua + bairro + UF + Brasil).
-    2. Geocodifica → coordenadas.
-    3. Reverse-geocodifica → município real.
-    4. Compara slug(cidade_alvo) == slug(municipio_real).
+    1. **Texto local** — ``cidade_no_markdown`` (preenchido pelo extrator
+       quando o nome da cidade-alvo está na janela do card).
+       *Sem chamada de rede.* Se confere, motivo ``ok_texto_local``.
+    2. **Geocode + reverse** (camada original) — geocodifica rua+bairro+UF
+       sem cidade, depois reverse para descobrir o município real.
+       Se confere, motivo ``ok``.
+    3. **Página confirmada** — ``pagina_confirmada=True`` significa que o
+       :mod:`pagina_filtro` viu a cidade-alvo em posição privilegiada (H1,
+       título, breadcrumb). Se a camada 2 falhou ou divergiu, ainda assim
+       aceitamos o card. Motivo: ``ok_pagina_confirmada``.
+
+    Quando passamos por (1) ou (3), as coordenadas finais são obtidas via
+    :func:`obter_coordenadas_com_cidade` (geocode COM cidade, mais preciso),
+    pois nessa altura já temos garantia independente de pertencimento.
+
+    O campo ``precisao_geo`` no resultado expõe a precisão da coord final
+    para o caller (persistência) decidir se grava lat/lon, aplica jitter
+    ou apenas marca o anúncio como aproximado.
 
     Args:
         logradouro: rua do anúncio (extraída do markdown ou do título).
         bairro: bairro do anúncio (extraído do anúncio, NÃO do leilão).
-        estado_uf: UF de 2 letras (vem do leilão; é o único hint geográfico
-            permitido porque o anúncio raramente vai para outro estado).
+        estado_uf: UF de 2 letras (vem do leilão).
         cidade_alvo: município do leilão (será comparado por slug).
+        cidade_no_markdown: nome da cidade-alvo se o extrator a encontrou na
+            janela do card (sinal forte e gratuito).
+        pagina_confirmada: True se :mod:`pagina_filtro` confirmou a página
+            inteira como sendo da cidade-alvo. Permite rescue da camada 3.
 
     Returns:
         :class:`ResultadoValidacaoMunicipio` com bandeira ``valido``.
@@ -332,41 +594,73 @@ def validar_municipio_card(
             municipio_alvo_slug="",
         )
 
+    if cidade_no_markdown and _slug(cidade_no_markdown) == alvo_slug:
+        coords_local = obter_coordenadas_com_cidade(
+            logradouro=logradouro,
+            bairro=bairro,
+            cidade=cidade_alvo,
+            estado_uf=estado_uf,
+        )
+        return ResultadoValidacaoMunicipio(
+            valido=True,
+            motivo="ok_texto_local",
+            municipio_real=cidade_alvo,
+            coordenadas=_coords_xy(coords_local),
+            municipio_alvo_slug=alvo_slug,
+            municipio_real_slug=alvo_slug,
+            precisao_geo=_coords_precisao(coords_local),
+        )
+
     coords = geocode_sem_cidade(
         logradouro=logradouro, bairro=bairro, estado_uf=estado_uf
     )
+    municipio_real: Optional[str] = None
+    real_slug = ""
+    motivo_fallback_geocode = ""
+
     if coords is None:
-        return ResultadoValidacaoMunicipio(
-            valido=False,
-            motivo="geocode_falhou",
-            municipio_alvo_slug=alvo_slug,
-        )
+        motivo_fallback_geocode = "geocode_falhou"
+    else:
+        municipio_real = reverse_municipio(coords[0], coords[1])
+        if not municipio_real:
+            motivo_fallback_geocode = "reverse_falhou"
+        else:
+            real_slug = _slug(municipio_real)
+            if real_slug == alvo_slug:
+                return ResultadoValidacaoMunicipio(
+                    valido=True,
+                    motivo="ok",
+                    municipio_real=municipio_real,
+                    coordenadas=_coords_xy(coords),
+                    municipio_alvo_slug=alvo_slug,
+                    municipio_real_slug=real_slug,
+                    precisao_geo=_coords_precisao(coords),
+                )
+            motivo_fallback_geocode = "municipio_diferente"
 
-    municipio = reverse_municipio(coords[0], coords[1])
-    if not municipio:
-        return ResultadoValidacaoMunicipio(
-            valido=False,
-            motivo="reverse_falhou",
-            coordenadas=coords,
-            municipio_alvo_slug=alvo_slug,
+    if pagina_confirmada:
+        coords_pag = obter_coordenadas_com_cidade(
+            logradouro=logradouro,
+            bairro=bairro,
+            cidade=cidade_alvo,
+            estado_uf=estado_uf,
         )
-
-    real_slug = _slug(municipio)
-    if real_slug != alvo_slug:
         return ResultadoValidacaoMunicipio(
-            valido=False,
-            motivo="municipio_diferente",
-            municipio_real=municipio,
-            coordenadas=coords,
+            valido=True,
+            motivo="ok_pagina_confirmada",
+            municipio_real=cidade_alvo,
+            coordenadas=_coords_xy(coords_pag),
             municipio_alvo_slug=alvo_slug,
-            municipio_real_slug=real_slug,
+            municipio_real_slug=alvo_slug,
+            precisao_geo=_coords_precisao(coords_pag),
         )
 
     return ResultadoValidacaoMunicipio(
-        valido=True,
-        motivo="ok",
-        municipio_real=municipio,
-        coordenadas=coords,
+        valido=False,
+        motivo=motivo_fallback_geocode,
+        municipio_real=municipio_real,
+        coordenadas=_coords_xy(coords),
         municipio_alvo_slug=alvo_slug,
         municipio_real_slug=real_slug,
+        precisao_geo=_coords_precisao(coords),
     )

@@ -1499,33 +1499,30 @@ def _uma_coleta_firecrawl_search(
     bairro: str,
     tipo_imovel: str,
     area_ref: float,
-    leilao_id: str,
-    ignorar_cache_firecrawl: bool,
+    leilao_id: str,  # noqa: ARG001 - mantido por compat; v2 não usa (anúncios não são por leilão)
+    ignorar_cache_firecrawl: bool,  # noqa: ARG001 - cache de scrape sempre reusado (gratuito)
     max_chamadas_api: int | None = None,
-    frase_busca_override: str | None = None,
+    frase_busca_override: str | None = None,  # noqa: ARG001 - v2 usa frase determinística
 ) -> tuple[int, int]:
-    """Devolve ``(n_anuncios_gravados, n_chamadas_api_estimadas)``."""
-    if not os.getenv("FIRECRAWL_API_KEY", "").strip():
-        return 0, 0
-    try:
-        from leilao_ia_v2.fc_search.pipeline import complementar_anuncios_firecrawl_search
+    """Devolve ``(n_anuncios_gravados, n_chamadas_api_estimadas)``.
 
-        n_fc, _diag, n_api = complementar_anuncios_firecrawl_search(
-            client,
-            leilao_imovel_id=str(leilao_id),
-            cidade=cidade,
-            estado_raw=estado_raw,
-            bairro=bairro,
-            tipo_imovel=tipo_imovel,
-            area_ref=float(area_ref or 0),
-            ignorar_cache_firecrawl=ignorar_cache_firecrawl,
-            max_chamadas_api=max_chamadas_api,
-            frase_busca_override=frase_busca_override,
-        )
-        return int(n_fc or 0), int(n_api or 0)
-    except Exception:
-        logger.exception("Complemento anúncios via Firecrawl Search (cache de média)")
-        return 0, 0
+    Implementação v2: delega ao :mod:`leilao_ia_v2.comparaveis.integracao`.
+    Os parâmetros ``leilao_id``, ``ignorar_cache_firecrawl`` e
+    ``frase_busca_override`` são mantidos para compatibilidade da assinatura
+    com chamadores antigos, mas ignorados pelo pipeline v2 (a frase é
+    determinística por design e o cache em disco é sempre reusado).
+    """
+    from leilao_ia_v2.comparaveis.integracao import executar_comparaveis_para_cache
+
+    return executar_comparaveis_para_cache(
+        client,
+        cidade=cidade,
+        estado_raw=estado_raw,
+        bairro=bairro,
+        tipo_imovel=tipo_imovel,
+        area_ref=float(area_ref or 0.0),
+        max_chamadas_api=max_chamadas_api,
+    )
 
 
 def _montar_payload_cache(
@@ -1592,7 +1589,18 @@ def _montar_payload_cache(
             d = float(haversine_km(float(lat0), float(lon0), float(la), float(lo)))
             dists.append(d)
             q = _penalidade_qualidade_geo_anuncio(a)
-            q_geo_pts.append(100.0 if q == 0 else 80.0 if q == 1 else 55.0 if q == 2 else 20.0)
+            # Pontuação por nível: rooftop=100, rua=80, bairro=55, cidade=30, sem coords/desconhecido=20.
+            if q == 0:
+                pt = 100.0
+            elif q == 1:
+                pt = 80.0
+            elif q == 2:
+                pt = 55.0
+            elif q == 3:
+                pt = 30.0
+            else:
+                pt = 20.0
+            q_geo_pts.append(pt)
         if not _url_indica_cidade_diferente_do_alvo(str(a.get("url_anuncio") or ""), cidade_ref):
             n_url_ok += 1
     n_am = max(1, len(amostras))
@@ -1942,15 +1950,36 @@ def _logradouro_tem_numero(logradouro: Any) -> bool:
 def _penalidade_qualidade_geo_anuncio(a: dict[str, Any]) -> int:
     """
     Menor é melhor:
-    0 = coordenada com logradouro mais específico (com número);
-    1 = coordenada válida, mas logradouro pouco específico;
-    2 = coordenada de fallback aproximado (centroide/fallback);
-    3 = sem coordenadas.
+    0 = rooftop (número exacto) — geocode preciso ou logradouro com número;
+    1 = rua (centróide de rua, sem número);
+    2 = bairro (centróide de bairro, com jitter ±80 m aplicado na persistência);
+    3 = cidade (centróide do município) — só usado se faltarem alternativas;
+    4 = sem coordenadas / desconhecido.
+
+    Lê primeiro o marcador explícito ``metadados_json.precisao_geo`` produzido
+    pelo :mod:`comparaveis.persistencia` (valores possíveis: ``rooftop``,
+    ``rua``, ``bairro_centroide``, ``cidade_centroide``, ``desconhecido``).
+    Se o marcador não existir (anúncios antigos), faz fallback para a
+    heurística antiga baseada em texto livre nos metadados + ``logradouro``.
     """
     la, lo = coords_de_anuncio(a)
     if la is None or lo is None:
-        return 3
+        return 4
+
     md = _metadados_anuncio_como_dict(a)
+    marcador = str(md.get("precisao_geo") or "").strip().lower()
+    if marcador:
+        if marcador == "rooftop":
+            return 0
+        if marcador == "rua":
+            return 1
+        if marcador == "bairro_centroide":
+            return 2
+        if marcador == "cidade_centroide":
+            return 3
+        if marcador == "desconhecido":
+            return 4
+
     txt_md = " ".join(f"{k}:{v}" for k, v in md.items()).lower()
     if "centroide" in txt_md or "fallback" in txt_md:
         return 2

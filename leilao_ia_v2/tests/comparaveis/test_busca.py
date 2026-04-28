@@ -44,7 +44,7 @@ def _resp_web(*urls: str) -> dict:
 
 class TestPreCondicoes:
     def test_query_vazia_nao_executa(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake()
         r = executar_search("", limit=10, orcamento=o, cliente=cli)
         assert isinstance(r, ResultadoBusca)
@@ -53,7 +53,7 @@ class TestPreCondicoes:
         assert o.gasto == 0
 
     def test_query_so_espacos_nao_executa(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake()
         r = executar_search("   \n  ", limit=10, orcamento=o, cliente=cli)
         assert not r.executada
@@ -92,19 +92,19 @@ class TestOrcamentoBloqueia:
 
 class TestLimit:
     def test_limit_maior_que_max_clampado(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(_resp_web())
         executar_search("q", limit=999, orcamento=o, cliente=cli)
         assert cli.chamadas[0][1] == 20  # _LIMIT_MAX
 
     def test_limit_menor_que_um_clampado(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(_resp_web())
         executar_search("q", limit=0, orcamento=o, cliente=cli)
         assert cli.chamadas[0][1] >= 1
 
     def test_limit_default_quando_omitido(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(_resp_web())
         executar_search("q", orcamento=o, cliente=cli)
         assert cli.chamadas[0][1] == 10
@@ -116,23 +116,28 @@ class TestLimit:
 
 class TestFiltragemUrls:
     def test_urls_aceites_e_descartadas_separadas(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(
             _resp_web(
-                "https://www.zapimoveis.com.br/imovel/casa-x/",       # aceite
-                "https://www.zapimoveis.com.br/venda/sp/sao-paulo/",  # listagem → descarta
+                "https://www.zapimoveis.com.br/imovel/casa-x/",       # aceite (anúncio)
+                "https://www.zapimoveis.com.br/venda/sp/sao-paulo/",  # aceite (listagem)
                 "https://blogimoveis.com/dicas",                       # domínio fora → descarta
                 "https://www.vivareal.com.br/imovel/aluguel-x/",       # aluguel → descarta
             )
         )
         r = executar_search("q", limit=10, orcamento=o, cliente=cli)
         assert r.executada
-        assert r.urls_aceites == ("https://www.zapimoveis.com.br/imovel/casa-x/",)
-        assert len(r.urls_descartadas) == 3
+        # Listagens são aceites: o extrator processa todos os cards na página
+        # e a validação por geocode descarta cards de outras cidades.
+        assert set(r.urls_aceites) == {
+            "https://www.zapimoveis.com.br/imovel/casa-x/",
+            "https://www.zapimoveis.com.br/venda/sp/sao-paulo/",
+        }
+        assert len(r.urls_descartadas) == 2
         assert r.total_resultados == 4
 
     def test_dedup_por_url(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(
             _resp_web(
                 "https://www.zapimoveis.com.br/imovel/x/",
@@ -144,7 +149,7 @@ class TestFiltragemUrls:
         assert len(r.urls_aceites) == 1
 
     def test_resposta_sem_web_devolve_listas_vazias(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake({})  # sem 'web'
         r = executar_search("q", limit=10, orcamento=o, cliente=cli)
         assert r.executada
@@ -166,7 +171,7 @@ class TestRespostaModelo:
                 self.chamadas.append((query, limit))
                 return {"web": [_Item("https://www.zapimoveis.com.br/imovel/y/")]}
 
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         r = executar_search("q", orcamento=o, cliente=_CliObj())
         assert r.urls_aceites == ("https://www.zapimoveis.com.br/imovel/y/",)
 
@@ -177,7 +182,7 @@ class TestRespostaModelo:
 
 class TestErros:
     def test_excecao_da_api_devolve_executada_false(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(exception=RuntimeError("boom"))
         r = executar_search("q", orcamento=o, cliente=cli)
         assert not r.executada
@@ -194,12 +199,12 @@ class TestErros:
             def search(self, query, *, limit):
                 raise OrcamentoExcedido("inesperado")
 
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         with pytest.raises(OrcamentoExcedido):
             executar_search("q", orcamento=o, cliente=_CliRaiseOrc())
 
     def test_sem_api_key_e_sem_cliente_levanta(self, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         with pytest.raises(FirecrawlSearchIndisponivel):
             executar_search("q", orcamento=o)

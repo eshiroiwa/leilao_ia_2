@@ -40,7 +40,7 @@ class _ClienteFake:
 
 class TestPreCondicoes:
     def test_url_vazia_nao_executa(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="x")
         r = scrape_url("", orcamento=o, cliente=cli)
         assert isinstance(r, ResultadoScrape)
@@ -49,7 +49,7 @@ class TestPreCondicoes:
         assert o.gasto == 0
 
     def test_url_so_espacos(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="x")
         r = scrape_url("   \n", orcamento=o, cliente=cli)
         assert not r.executado
@@ -61,7 +61,7 @@ class TestPreCondicoes:
 
 class TestCache:
     def test_cache_hit_nao_consome_credito(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="da api")
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
@@ -80,7 +80,7 @@ class TestCache:
         assert cli.chamadas == []  # API não é chamada
 
     def test_cache_miss_chama_api_e_grava(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="md fresco")
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
@@ -102,7 +102,7 @@ class TestCache:
         mock_grava.assert_called_once()
 
     def test_ignorar_cache_forca_api_mesmo_com_hit(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="fresco")
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
@@ -121,7 +121,7 @@ class TestCache:
         assert o.gasto == 1
 
     def test_gravar_cache_false_nao_grava(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="md")
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
@@ -177,7 +177,7 @@ class TestOrcamentoBloqueia:
         assert r.teve_sucesso and r.fonte == "cache"
 
     def test_consome_exatamente_um_credito(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="md")
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
@@ -187,7 +187,7 @@ class TestOrcamentoBloqueia:
         ):
             scrape_url("https://www.vivareal.com.br/imovel/y/", orcamento=o, cliente=cli)
             scrape_url("https://www.vivareal.com.br/imovel/z/", orcamento=o, cliente=cli)
-        assert o.gasto == 2 and o.restante == 13
+        assert o.gasto == 2 and o.restante == 18
 
 
 # -----------------------------------------------------------------------------
@@ -196,7 +196,7 @@ class TestOrcamentoBloqueia:
 
 class TestErros:
     def test_excecao_api_devolve_executado_false(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(exception=RuntimeError("boom"))
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
@@ -212,7 +212,7 @@ class TestErros:
         assert o.gasto == 0
 
     def test_markdown_vazio_devolve_executado_true_sem_sucesso(self):
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         cli = _ClienteFake(markdown="   ")
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
@@ -235,7 +235,7 @@ class TestErros:
             def scrape(self, url, *, formats):
                 raise OrcamentoExcedido("race")
 
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
             return_value=None,
@@ -249,7 +249,7 @@ class TestErros:
 
     def test_sem_api_key_e_sem_cliente_levanta(self, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
-        o = OrcamentoFirecrawl(cap=15)
+        o = OrcamentoFirecrawl(cap=20)
         with patch(
             "leilao_ia_v2.comparaveis.scrape.disk_cache.ler_markdown_cache",
             return_value=None,
