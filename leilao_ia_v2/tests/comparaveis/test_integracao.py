@@ -84,6 +84,7 @@ def _linha_dummy(i: int) -> LinhaPersistir:
         url_anuncio=f"https://www.zapimoveis.com.br/imovel/{i}/",
         portal="zapimoveis.com.br",
         tipo_imovel="apartamento",
+        logradouro="",
         bairro="Centro",
         cidade="Pindamonhangaba",
         estado="SP",

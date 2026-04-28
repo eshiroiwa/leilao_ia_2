@@ -43,6 +43,11 @@ from leilao_ia_v2.comparaveis.extrator import (
     CardExtraido,
     extrair_cards,
 )
+from leilao_ia_v2.comparaveis.filtragem_persistencia import (
+    MAX_PERSISTIR_POR_INGESTAO,
+    ResultadoFiltragem,
+    filtrar_e_capar,
+)
 from leilao_ia_v2.comparaveis.frase import (
     FraseBusca,
     montar_frase_busca,
@@ -83,6 +88,7 @@ _TipoFnExtrai = Callable[..., list[CardExtraido]]
 _TipoFnValida = Callable[..., ResultadoValidacaoMunicipio]
 _TipoFnPersist = Callable[[Any, list[LinhaPersistir]], int]
 _TipoFnRefino = Callable[..., ResultadoRefino]
+_TipoFnFiltragem = Callable[..., ResultadoFiltragem]
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,9 @@ class EstatisticasPipeline:
     refino_n_descartados: int = 0
     refino_n_revertidos: int = 0
     refino_creditos_gastos: int = 0
+    # Filtragem pré-persistência (Sprint 1):
+    cards_descartados_lixo: int = 0
+    cards_acima_do_cap: int = 0
     abortado: bool = False
     motivo_aborto: str = ""
 
@@ -142,6 +151,8 @@ class EstatisticasPipeline:
             "refino_n_descartados": self.refino_n_descartados,
             "refino_n_revertidos": self.refino_n_revertidos,
             "refino_creditos_gastos": self.refino_creditos_gastos,
+            "cards_descartados_lixo": self.cards_descartados_lixo,
+            "cards_acima_do_cap": self.cards_acima_do_cap,
             "abortado": self.abortado,
             "motivo_aborto": self.motivo_aborto,
         }
@@ -165,6 +176,7 @@ def executar_pipeline(
     cidades_conhecidas: Optional[list[str]] = None,
     min_amostras_refino: int = 4,
     max_refino_top_n: int = MAX_REFINO_TOP_N,
+    max_persistir_por_ingestao: int = MAX_PERSISTIR_POR_INGESTAO,
     # Hooks (defaults usam as implementações reais; testes substituem.)
     fn_montar_frase: Callable[..., FraseBusca] = montar_frase_busca,
     fn_search: _TipoFnSearch = executar_search,
@@ -173,6 +185,7 @@ def executar_pipeline(
     fn_extrai_cards: _TipoFnExtrai = extrair_cards,
     fn_valida_municipio: _TipoFnValida = validar_municipio_card,
     fn_refino: Optional[_TipoFnRefino] = None,
+    fn_filtragem: _TipoFnFiltragem = filtrar_e_capar,
     fn_persistir: _TipoFnPersist = persistir_lote,
     persistir: bool = True,
 ) -> ResultadoPipeline:
@@ -330,6 +343,27 @@ def executar_pipeline(
         except Exception:
             logger.exception("Pipeline: refino falhou — mantém cards originais.")
 
+    # Filtragem pré-persistência (Sprint 1):
+    #   1. descarta "lixo" geográfico (cidade_centroide sem rua/bairro)
+    #      QUANDO há amostras melhores no mesmo lote;
+    #   2. corta o lote em ``max_persistir_por_ingestao`` mantendo os
+    #      cards de maior score de fit. Isso evita inflar o cache com
+    #      29 cards de uma página de listagem rica em SEO mas pobre em
+    #      relevância para precificar este leilão específico.
+    res_filtragem = fn_filtragem(
+        cards_aprovados,
+        area_alvo=leilao.area_m2,
+        cap=max_persistir_por_ingestao,
+    )
+    cards_aprovados = res_filtragem.cards_aprovados
+    if res_filtragem.n_descartados_lixo or res_filtragem.n_acima_do_cap:
+        logger.info(
+            "Pipeline.filtragem: lixo=%s acima_cap=%s aprovados_finais=%s",
+            res_filtragem.n_descartados_lixo,
+            res_filtragem.n_acima_do_cap,
+            len(cards_aprovados),
+        )
+
     linhas_a_persistir: list[LinhaPersistir] = []
     for card, validacao in cards_aprovados:
         try:
@@ -348,7 +382,7 @@ def executar_pipeline(
             continue
         linhas_a_persistir.append(linha)
 
-    # Atualiza contagem de aprovados se o refino descartou cards.
+    # Atualiza contagem de aprovados após refino + filtragem.
     estats["cards_aprovados_validacao"] = len(linhas_a_persistir)
 
     persistidos = 0
@@ -378,6 +412,8 @@ def executar_pipeline(
         refino_n_descartados=refino_stats["descartados"],
         refino_n_revertidos=refino_stats["revertidos"],
         refino_creditos_gastos=refino_stats["creditos_gastos"],
+        cards_descartados_lixo=res_filtragem.n_descartados_lixo,
+        cards_acima_do_cap=res_filtragem.n_acima_do_cap,
     )
 
     return ResultadoPipeline(

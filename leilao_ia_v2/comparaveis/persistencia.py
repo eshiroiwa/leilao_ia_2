@@ -72,11 +72,19 @@ _MARCADOR_POR_PRECISAO: dict[str, str] = {
 
 @dataclass(frozen=True)
 class LinhaPersistir:
-    """Estrutura intermediária — útil em testes para inspeccionar antes do upsert."""
+    """Estrutura intermediária — útil em testes para inspeccionar antes do upsert.
+
+    ``logradouro`` é gravado como **coluna do banco** (existe em
+    ``leilao_ia_v2/sql/006_anuncios_mercado.sql`` como ``text default ''``)
+    para permitir queries SQL diretas sem ter que extrair de
+    ``metadados_json``. Vazio quando não foi possível extrair (não
+    inventamos rua).
+    """
 
     url_anuncio: str
     portal: str
     tipo_imovel: str
+    logradouro: str
     bairro: str
     cidade: str
     estado: str
@@ -92,6 +100,7 @@ class LinhaPersistir:
             "url_anuncio": self.url_anuncio,
             "portal": self.portal,
             "tipo_imovel": self.tipo_imovel,
+            "logradouro": self.logradouro,
             "bairro": self.bairro,
             "cidade": self.cidade,
             "estado": self.estado,
@@ -140,6 +149,29 @@ def _jitter_deterministico(url: str, latitude: float) -> tuple[float, float]:
         cos_lat = 1e-6
     delta_lon_graus = ny * JITTER_BAIRRO_METROS * _GRAUS_POR_METRO_LAT / cos_lat
     return (delta_lat_graus, delta_lon_graus)
+
+
+def _classificar_logradouro_origem(card: CardExtraido) -> str:
+    """Devolve a "origem" textual do ``logradouro_inferido`` final do card.
+
+    Valores possíveis (gravados em ``metadados_json.logradouro_origem``):
+
+    - ``"pagina_individual"`` — refino top-N com sucesso e a página individual
+      forneceu rua nova (``refino_status == "ok_pagina"``).
+    - ``"titulo"`` — o card tem ``logradouro_inferido`` mas veio do título do
+      próprio card de listagem (sem refino, ou refino com extracção vazia).
+    - ``"none"`` — não há logradouro inferido em lado nenhum.
+
+    Esta separação permite, em SQL, identificar quanta da precisão "rua"/
+    "rooftop" gravada vem efectivamente do scrape individual versus do
+    geocode primário.
+    """
+    status = (card.refino_status or "").strip()
+    if status == "ok_pagina":
+        return "pagina_individual"
+    if (card.logradouro_inferido or "").strip():
+        return "titulo"
+    return "none"
 
 
 def _aplicar_politica_precisao(
@@ -229,6 +261,11 @@ def montar_linha(
         "logradouro_inferido": card.logradouro_inferido,
         "titulo_anuncio": card.titulo,
         "precisao_geo": marcador_precisao,
+        # Auditoria do refino top-N (gravado mesmo quando False/"" para que
+        # consultas SQL possam contar/filtrar sem precisar de COALESCE):
+        "refinado_top_n": bool(card.refinado_top_n),
+        "refino_status": card.refino_status or "",
+        "logradouro_origem": _classificar_logradouro_origem(card),
     }
     if fonte_busca:
         metadados["fonte_busca"] = fonte_busca
@@ -237,6 +274,7 @@ def montar_linha(
         url_anuncio=card.url_anuncio,
         portal=card.portal,
         tipo_imovel=(tipo_imovel or "desconhecido").strip().lower(),
+        logradouro=(card.logradouro_inferido or "").strip(),
         bairro=(card.bairro_inferido or "").strip(),
         cidade=cidade_real,
         estado=uf,

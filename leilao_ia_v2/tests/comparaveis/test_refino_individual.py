@@ -12,6 +12,11 @@ from leilao_ia_v2.comparaveis.extrator import CardExtraido
 from leilao_ia_v2.comparaveis.orcamento import OrcamentoFirecrawl
 from leilao_ia_v2.comparaveis.refino_individual import (
     MAX_REFINO_TOP_N,
+    STATUS_GEOCODE_FALHOU,
+    STATUS_OK_PAGINA,
+    STATUS_OK_TITULO,
+    STATUS_REVERTIDO,
+    STATUS_SCRAPE_FALHOU,
     calcular_score_fit,
     refinar_cards_top_n,
 )
@@ -352,3 +357,165 @@ class TestRefinarCardsTopN:
         assert r.creditos_gastos == 5
         assert r.n_refinados == 5
         assert len(r.cards_finais) == 15  # outros 10 mantêm-se intactos
+
+
+# -----------------------------------------------------------------------------
+# Marcadores ``refinado_top_n`` / ``refino_status`` propagados aos cards
+# (alimentam ``persistencia.montar_linha`` e por sua vez ``metadados_json``).
+# -----------------------------------------------------------------------------
+
+class TestMarcadoresRefino:
+    def test_card_nao_refinado_fica_intacto_quando_orcamento_zera(self):
+        # Apenas 1 scrape possível: dos 5 cards, só 1 entra no refino;
+        # os outros 4 devem manter ``refinado_top_n=False``, ``refino_status=""``.
+        orc = OrcamentoFirecrawl(cap=1)
+        cards = [(_card(url=f"https://portal/{i}/"), _val(PRECISAO_BAIRRO)) for i in range(5)]
+
+        def fake_scrape(url, *, orcamento, cliente=None):
+            orcamento.consumir_scrape(url=url)
+            return _scrape_ok(url, "x")
+
+        r = refinar_cards_top_n(
+            cards,
+            cidade_alvo="Pindamonhangaba",
+            estado_uf="SP",
+            area_alvo=65.0,
+            orcamento=orc,
+            min_amostras=4,
+            fn_scrape=fake_scrape,
+            fn_extrai_endereco=lambda md: ("Rua X 1", ""),
+            fn_obter_coords=lambda **kw: (-22.93, -45.47, PRECISAO_ROOFTOP),
+            fn_reverse=lambda lat, lon: "Pindamonhangaba",
+        )
+        refinados = [c for c, _ in r.cards_finais if c.refinado_top_n]
+        nao_refinados = [c for c, _ in r.cards_finais if not c.refinado_top_n]
+        assert len(refinados) == 1
+        assert len(nao_refinados) == 4
+        assert all(c.refino_status == "" for c in nao_refinados)
+
+    def test_sucesso_com_pagina_marca_ok_pagina(self):
+        orc = OrcamentoFirecrawl(cap=20)
+        cards = [(_card(), _val(PRECISAO_BAIRRO))]
+
+        def fake_scrape(url, *, orcamento, cliente=None):
+            orcamento.consumir_scrape(url=url)
+            return _scrape_ok(url, "**Endereço:** Rua Nova, 10")
+
+        r = refinar_cards_top_n(
+            cards,
+            cidade_alvo="Pindamonhangaba",
+            estado_uf="SP",
+            area_alvo=65.0,
+            orcamento=orc,
+            min_amostras=4,
+            fn_scrape=fake_scrape,
+            fn_extrai_endereco=lambda md: ("Rua Nova, 10", "Centro"),
+            fn_obter_coords=lambda **kw: (-22.93, -45.47, PRECISAO_ROOFTOP),
+            fn_reverse=lambda lat, lon: "Pindamonhangaba",
+        )
+        card_final, _ = r.cards_finais[0]
+        assert card_final.refinado_top_n is True
+        assert card_final.refino_status == STATUS_OK_PAGINA
+        assert card_final.logradouro_inferido == "Rua Nova, 10"
+
+    def test_sucesso_sem_pagina_mas_com_titulo_marca_ok_titulo(self):
+        # Página individual scraped mas sem rua (extrai_endereco devolve "");
+        # o card original tinha logradouro no título → re-geocode usa esse.
+        orc = OrcamentoFirecrawl(cap=20)
+        cards = [(_card(logradouro_inferido="Rua Antiga 5"), _val(PRECISAO_BAIRRO))]
+
+        def fake_scrape(url, *, orcamento, cliente=None):
+            orcamento.consumir_scrape(url=url)
+            return _scrape_ok(url, "(página sem endereço)")
+
+        r = refinar_cards_top_n(
+            cards,
+            cidade_alvo="Pindamonhangaba",
+            estado_uf="SP",
+            area_alvo=65.0,
+            orcamento=orc,
+            min_amostras=4,
+            fn_scrape=fake_scrape,
+            fn_extrai_endereco=lambda md: ("", ""),
+            fn_obter_coords=lambda **kw: (-22.93, -45.47, PRECISAO_RUA),
+            fn_reverse=lambda lat, lon: "Pindamonhangaba",
+        )
+        card_final, _ = r.cards_finais[0]
+        assert card_final.refinado_top_n is True
+        assert card_final.refino_status == STATUS_OK_TITULO
+        assert card_final.logradouro_inferido == "Rua Antiga 5"
+
+    def test_scrape_falhou_marca_card_com_status(self):
+        orc = OrcamentoFirecrawl(cap=20)
+        cards = [(_card(), _val(PRECISAO_BAIRRO))]
+
+        def fake_scrape(url, *, orcamento, cliente=None):
+            orcamento.consumir_scrape(url=url)
+            return _scrape_fail(url, "rede")
+
+        r = refinar_cards_top_n(
+            cards,
+            cidade_alvo="Pindamonhangaba",
+            estado_uf="SP",
+            area_alvo=65.0,
+            orcamento=orc,
+            min_amostras=4,
+            fn_scrape=fake_scrape,
+            fn_extrai_endereco=lambda md: ("", ""),
+            fn_obter_coords=lambda **kw: None,
+            fn_reverse=lambda lat, lon: None,
+        )
+        card_final, _ = r.cards_finais[0]
+        assert card_final.refinado_top_n is True
+        assert card_final.refino_status == STATUS_SCRAPE_FALHOU
+
+    def test_geocode_falhou_marca_card_com_status(self):
+        orc = OrcamentoFirecrawl(cap=20)
+        cards = [(_card(), _val(PRECISAO_BAIRRO))]
+
+        def fake_scrape(url, *, orcamento, cliente=None):
+            orcamento.consumir_scrape(url=url)
+            return _scrape_ok(url, "x")
+
+        r = refinar_cards_top_n(
+            cards,
+            cidade_alvo="Pindamonhangaba",
+            estado_uf="SP",
+            area_alvo=65.0,
+            orcamento=orc,
+            min_amostras=4,
+            fn_scrape=fake_scrape,
+            fn_extrai_endereco=lambda md: ("Rua X 1", ""),
+            fn_obter_coords=lambda **kw: None,
+            fn_reverse=lambda lat, lon: None,
+        )
+        card_final, _ = r.cards_finais[0]
+        assert card_final.refinado_top_n is True
+        assert card_final.refino_status == STATUS_GEOCODE_FALHOU
+
+    def test_revertido_marca_card_com_status(self):
+        # Apenas 2 cards (< min=4) → política manda REVERTER quando cidade muda.
+        orc = OrcamentoFirecrawl(cap=20)
+        cards = [(_card(url=f"https://portal/{i}/"), _val(PRECISAO_BAIRRO)) for i in range(2)]
+
+        def fake_scrape(url, *, orcamento, cliente=None):
+            orcamento.consumir_scrape(url=url)
+            return _scrape_ok(url, "x")
+
+        r = refinar_cards_top_n(
+            cards,
+            cidade_alvo="Pindamonhangaba",
+            estado_uf="SP",
+            area_alvo=65.0,
+            orcamento=orc,
+            min_amostras=4,
+            fn_scrape=fake_scrape,
+            fn_extrai_endereco=lambda md: ("Rua X 1", ""),
+            fn_obter_coords=lambda **kw: (-23.69, -46.56, PRECISAO_RUA),
+            fn_reverse=lambda lat, lon: "São Bernardo do Campo",
+        )
+        # Todos 2 devem estar marcados como revertidos.
+        cartas_marcadas = [c for c, _ in r.cards_finais if c.refino_status == STATUS_REVERTIDO]
+        assert len(cartas_marcadas) == 2
+        # Coords antigas preservadas (não foi alterada na revalidação).
+        assert all(v.precisao_geo == PRECISAO_BAIRRO for _, v in r.cards_finais)

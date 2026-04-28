@@ -79,6 +79,16 @@ logger = logging.getLogger(__name__)
 # Decisão pergunta 2-C ("agressivo"): até 8 scrapes individuais por ingestão.
 MAX_REFINO_TOP_N: int = 8
 
+
+# Status registrado em ``CardExtraido.refino_status`` para auditoria posterior
+# (``metadados_json.refino_status`` no Supabase). ``""`` indica "não passou pelo
+# refino" (não estava no top-N ou orçamento esgotou antes).
+STATUS_OK_PAGINA: str = "ok_pagina"          # extraiu rua nova da página individual
+STATUS_OK_TITULO: str = "ok_titulo"          # scrape ok, mas página sem rua → manteve título
+STATUS_REVERTIDO: str = "revertido"          # re-geocode caiu noutra cidade, mantém antigo
+STATUS_SCRAPE_FALHOU: str = "scrape_falhou"  # firecrawl não devolveu markdown
+STATUS_GEOCODE_FALHOU: str = "geocode_falhou"  # scrape ok, geocode devolveu None
+
 # Pesos do score de fit (decisão pergunta 1-B):
 # - 0.50 — similaridade de área com o leilão.
 # - 0.30 — penalidade por outlier de preço (distância à mediana).
@@ -290,6 +300,10 @@ def refinar_cards_top_n(
             detalhes.append(
                 f"refino[{idx}]: scrape falhou ({sc.motivo_nao_executado or '?'})"
             )
+            cards_finais[idx] = (
+                _marcar_card(card_orig, status=STATUS_SCRAPE_FALHOU),
+                val_orig,
+            )
             continue
 
         novo_logr, novo_bairro = fn_extrai_endereco(sc.markdown)
@@ -309,6 +323,10 @@ def refinar_cards_top_n(
         if coords is None:
             n_geocode_falhou += 1
             detalhes.append(f"refino[{idx}]: re-geocode falhou (mantém antigo)")
+            cards_finais[idx] = (
+                _marcar_card(card_orig, status=STATUS_GEOCODE_FALHOU),
+                val_orig,
+            )
             continue
 
         nova_lat, nova_lon, nova_precisao = coords[0], coords[1], coords[2]
@@ -331,9 +349,18 @@ def refinar_cards_top_n(
                     f"refino[{idx}]: cidade nova={municipio_real!r} ≠ alvo "
                     f"→ REVERTE (restantes={n_aprovados_restantes} < min={min_amostras})"
                 )
+                cards_finais[idx] = (
+                    _marcar_card(card_orig, status=STATUS_REVERTIDO),
+                    val_orig,
+                )
             continue
 
         # Substitui pelo card refinado (URL imutável; mantém preço e área).
+        # O status distingue duas variantes de sucesso para auditoria posterior:
+        #   - ``ok_pagina``: extraímos rua nova da página individual (alta precisão).
+        #   - ``ok_titulo``: a página individual não tinha rua, mas o título do
+        #     card original já tinha → re-geocodámos com esse logradouro.
+        status_ok = STATUS_OK_PAGINA if novo_logr else STATUS_OK_TITULO
         card_refinado = CardExtraido(
             url_anuncio=card_orig.url_anuncio,
             portal=card_orig.portal,
@@ -343,6 +370,8 @@ def refinar_cards_top_n(
             logradouro_inferido=logr_efetivo,
             bairro_inferido=bairro_efetivo,
             cidade_no_markdown=card_orig.cidade_no_markdown,
+            refinado_top_n=True,
+            refino_status=status_ok,
         )
         val_refinada = ResultadoValidacaoMunicipio(
             valido=True,
@@ -356,8 +385,8 @@ def refinar_cards_top_n(
         cards_finais[idx] = (card_refinado, val_refinada)
         n_refinados += 1
         detalhes.append(
-            f"refino[{idx}]: ok score={score:.2f} precisao={nova_precisao!r} "
-            f"logr={logr_efetivo[:40]!r}"
+            f"refino[{idx}]: {status_ok} score={score:.2f} "
+            f"precisao={nova_precisao!r} logr={logr_efetivo[:40]!r}"
         )
 
     if indices_descartados:
@@ -380,6 +409,28 @@ def refinar_cards_top_n(
         n_geocode_falhou=n_geocode_falhou,
         creditos_gastos=creditos_gastos,
         detalhes=detalhes,
+    )
+
+
+def _marcar_card(card: CardExtraido, *, status: str) -> CardExtraido:
+    """Devolve cópia de ``card`` com ``refinado_top_n=True`` + ``refino_status``.
+
+    Usado quando o refino tentou mas não substituiu o card (scrape falhou,
+    geocode falhou, ou re-geocode caiu noutra cidade e foi revertido). Sem
+    isto, a auditoria não consegue distinguir "card que nem entrou no top-N"
+    de "card que entrou mas falhou no refino".
+    """
+    return CardExtraido(
+        url_anuncio=card.url_anuncio,
+        portal=card.portal,
+        valor_venda=card.valor_venda,
+        area_m2=card.area_m2,
+        titulo=card.titulo,
+        logradouro_inferido=card.logradouro_inferido,
+        bairro_inferido=card.bairro_inferido,
+        cidade_no_markdown=card.cidade_no_markdown,
+        refinado_top_n=True,
+        refino_status=status,
     )
 
 

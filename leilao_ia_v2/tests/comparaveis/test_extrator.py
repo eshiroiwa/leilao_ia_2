@@ -13,6 +13,26 @@ from leilao_ia_v2.comparaveis.extrator import (
 
 
 # -----------------------------------------------------------------------------
+# CardExtraido — defaults dos campos de auditoria (refino top-N)
+# -----------------------------------------------------------------------------
+
+class TestCardExtraidoDefaults:
+    """Cards criados sem mencionar refino (caminho normal do extractor) têm
+    ``refinado_top_n=False`` e ``refino_status=""``. Isto é o que a
+    persistência usa para gravar ``metadados_json.refinado_top_n=False``."""
+
+    def test_defaults_de_auditoria(self):
+        c = CardExtraido(
+            url_anuncio="https://x/",
+            portal="x.com",
+            valor_venda=100_000.0,
+            area_m2=50.0,
+        )
+        assert c.refinado_top_n is False
+        assert c.refino_status == ""
+
+
+# -----------------------------------------------------------------------------
 # url_eh_anuncio_aproveitavel
 # -----------------------------------------------------------------------------
 

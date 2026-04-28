@@ -3316,6 +3316,7 @@ def resolver_cache_media_pos_ingestao(
     log_ok.append(log_ok_extra)
     log_diag_final = "\n".join(log_ok)
     _tentar_gravar_roi_pos_cache(client, lid)
+    _tentar_gravar_precificacao_v2(client, lid)
     return ResultadoCriacaoCacheLeilao(
         True,
         msg,
@@ -3565,6 +3566,7 @@ def criar_caches_media_para_leilao(
     log_ok.append(liq_line)
 
     _tentar_gravar_roi_pos_cache(client, lid)
+    _tentar_gravar_precificacao_v2(client, lid)
     return ResultadoCriacaoCacheLeilao(
         True,
         f"Criado(s) {len(caches)} cache(s).",
@@ -3586,6 +3588,29 @@ def _tentar_gravar_roi_pos_cache(client: Client, leilao_imovel_id: str) -> None:
             logger.info("ROI pós-cache: ignorado (%s) leilao=%s", r.motivo, str(leilao_imovel_id)[:12])
     except Exception:
         logger.exception("ROI pós-cache falhou (leilao_id=%s)", str(leilao_imovel_id)[:12])
+
+
+def _tentar_gravar_precificacao_v2(client: Client, leilao_imovel_id: str) -> None:
+    """Hook do motor de precificação v2 (Sprint 2/3).
+
+    Roda em paralelo ao ``_tentar_gravar_roi_pos_cache`` legado: o motor
+    novo lê amostras de ``anuncios_mercado`` (não do cache agregado) e
+    grava o snapshot em ``leilao_extra_json.precificacao_v2``. Isolado em
+    try/except — uma falha aqui **não** interrompe a ingestão.
+    """
+    try:
+        from leilao_ia_v2.precificacao.integracao import precificar_leilao
+
+        r = precificar_leilao(client, leilao_imovel_id)
+        if r.ok:
+            logger.info("Precificação v2: %s leilao=%s", r.motivo, str(leilao_imovel_id)[:12])
+        else:
+            logger.info(
+                "Precificação v2: ignorada (%s) leilao=%s",
+                r.motivo, str(leilao_imovel_id)[:12],
+            )
+    except Exception:
+        logger.exception("Precificação v2 falhou (leilao_id=%s)", str(leilao_imovel_id)[:12])
 
 
 def recalcular_caches_mercado_para_leilao(

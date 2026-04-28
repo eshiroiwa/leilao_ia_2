@@ -106,6 +106,15 @@ class CardExtraido:
     logradouro_inferido: str = ""
     bairro_inferido: str = ""
     cidade_no_markdown: str = ""
+    # Auditoria do refino top-N (preenchido por refino_individual quando aplicável):
+    # - ``refinado_top_n`` é True quando o card foi alvo de scrape individual,
+    #   independentemente de o resultado ter sido aproveitado.
+    # - ``refino_status`` indica o desfecho: ``""`` (não refinado), ``"ok"``,
+    #   ``"revertido"``, ``"scrape_falhou"``, ``"extracao_vazia"`` ou
+    #   ``"geocode_falhou"``. Cards descartados por cidade diferente não chegam
+    #   à persistência, logo não precisam de marcador.
+    refinado_top_n: bool = False
+    refino_status: str = ""
 
     @property
     def preco_m2(self) -> float:

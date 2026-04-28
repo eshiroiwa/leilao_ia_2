@@ -123,6 +123,7 @@ _SIMOP_REFUI_SPECS: tuple[tuple[str, str], ...] = (
 )
 from leilao_ia_v2.schemas.relatorio_mercado_contexto import parse_relatorio_mercado_contexto_json
 from leilao_ia_v2.ui.dashboard_inicio import _roi_bruto_de_row
+from leilao_ia_v2.ui.precificacao_v2 import render_card as _render_card_precificacao_v2
 from leilao_ia_v2.services.roi_pos_cache_leilao import metricas_pos_cache_de_leilao_row
 from leilao_ia_v2.services.simulacao_operacao import (
     REFORMA_RS_M2,
@@ -3495,6 +3496,11 @@ def _render_painel_caches_leilao_selecionado_simulacao() -> None:
                 )
             _render_bloco_geo_auditoria_e_correcao(row, iid)
         _render_bloco_recalcular_caches_mercado(iid)
+    try:
+        _cli = get_supabase_client()
+    except Exception:
+        _cli = None
+    _render_card_precificacao_v2(row, client=_cli, key_prefix="sim_caches")
 
 
 def _lista_topo_reset_sel_se_invalido(key: str, opcoes: list[str]) -> None:

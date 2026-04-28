@@ -186,10 +186,23 @@ class TestParaDict:
         d = l.para_dict()
         # Campos obrigatórios para anuncios_mercado_repo.upsert_lote
         for k in (
-            "url_anuncio", "portal", "tipo_imovel", "bairro", "cidade", "estado",
-            "valor_venda", "area_construida_m2", "transacao", "metadados_json",
+            "url_anuncio", "portal", "tipo_imovel", "logradouro", "bairro",
+            "cidade", "estado", "valor_venda", "area_construida_m2",
+            "transacao", "metadados_json",
         ):
             assert k in d
+
+    def test_dict_inclui_logradouro_do_card(self):
+        c = _card(logradouro_inferido="Rua das Flores 100")
+        l = montar_linha(c, _validacao_ok(), tipo_imovel="casa", estado_uf="SP")
+        d = l.para_dict()
+        assert d["logradouro"] == "Rua das Flores 100"
+
+    def test_dict_logradouro_vazio_quando_card_sem_rua(self):
+        c = _card(logradouro_inferido="")
+        l = montar_linha(c, _validacao_ok(), tipo_imovel="casa", estado_uf="SP")
+        d = l.para_dict()
+        assert d["logradouro"] == ""
 
 
 # -----------------------------------------------------------------------------
@@ -276,6 +289,85 @@ class TestPoliticaPrecisao:
         l = montar_linha(_card(), v, tipo_imovel="apartamento", estado_uf="SP")
         assert l.latitude is None and l.longitude is None
         assert l.metadados_json["precisao_geo"] == "desconhecido"
+
+
+# -----------------------------------------------------------------------------
+# Marcadores de auditoria do refino top-N (refinado_top_n / refino_status /
+# logradouro_origem) gravados em metadados_json.
+# -----------------------------------------------------------------------------
+
+class TestMarcadoresAuditoria:
+    def test_card_nao_refinado_marca_false_e_titulo_quando_logradouro_presente(self):
+        c = _card(logradouro_inferido="Rua das Flores 100")
+        l = montar_linha(c, _validacao_ok(), tipo_imovel="casa", estado_uf="SP")
+        m = l.metadados_json
+        assert m["refinado_top_n"] is False
+        assert m["refino_status"] == ""
+        assert m["logradouro_origem"] == "titulo"
+
+    def test_card_nao_refinado_sem_logradouro_marca_none(self):
+        c = _card(logradouro_inferido="")
+        l = montar_linha(c, _validacao_ok(), tipo_imovel="casa", estado_uf="SP")
+        m = l.metadados_json
+        assert m["refinado_top_n"] is False
+        assert m["refino_status"] == ""
+        assert m["logradouro_origem"] == "none"
+
+    def test_card_refinado_ok_pagina_marca_pagina_individual(self):
+        c = CardExtraido(
+            url_anuncio="https://portal.com/x/",
+            portal="portal.com",
+            valor_venda=350_000.0,
+            area_m2=65.0,
+            titulo="t",
+            logradouro_inferido="Rua Nova, 10",
+            bairro_inferido="Centro",
+            refinado_top_n=True,
+            refino_status="ok_pagina",
+        )
+        l = montar_linha(c, _validacao_ok(precisao="rooftop"), tipo_imovel="casa", estado_uf="SP")
+        m = l.metadados_json
+        assert m["refinado_top_n"] is True
+        assert m["refino_status"] == "ok_pagina"
+        assert m["logradouro_origem"] == "pagina_individual"
+
+    def test_card_refinado_ok_titulo_marca_titulo(self):
+        c = CardExtraido(
+            url_anuncio="https://portal.com/x/",
+            portal="portal.com",
+            valor_venda=350_000.0,
+            area_m2=65.0,
+            titulo="t",
+            logradouro_inferido="Av. Antiga, 5",
+            bairro_inferido="Centro",
+            refinado_top_n=True,
+            refino_status="ok_titulo",
+        )
+        l = montar_linha(c, _validacao_ok(precisao="rua"), tipo_imovel="casa", estado_uf="SP")
+        m = l.metadados_json
+        assert m["refinado_top_n"] is True
+        assert m["refino_status"] == "ok_titulo"
+        # ok_titulo → o logradouro veio do título original do card.
+        assert m["logradouro_origem"] == "titulo"
+
+    @pytest.mark.parametrize("status", ["scrape_falhou", "geocode_falhou", "revertido"])
+    def test_card_refinado_com_falha_preserva_status_no_metadados(self, status):
+        c = CardExtraido(
+            url_anuncio="https://portal.com/x/",
+            portal="portal.com",
+            valor_venda=350_000.0,
+            area_m2=65.0,
+            titulo="t",
+            logradouro_inferido="",
+            bairro_inferido="Centro",
+            refinado_top_n=True,
+            refino_status=status,
+        )
+        l = montar_linha(c, _validacao_ok(precisao="cidade"), tipo_imovel="casa", estado_uf="SP")
+        m = l.metadados_json
+        assert m["refinado_top_n"] is True
+        assert m["refino_status"] == status
+        assert m["logradouro_origem"] == "none"
 
 
 # -----------------------------------------------------------------------------
