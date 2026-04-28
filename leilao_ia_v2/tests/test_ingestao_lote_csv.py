@@ -239,3 +239,126 @@ def test_url_foto_preserva_fragmento_preview():
     mp = mod.resolver_mapeamento_campos_csv([reg], permitir_llm=False)
     p = mod._payload_de_registro_csv(reg, url=mod._col_url(reg, mapeamento=mp), mapeamento=mp)
     assert p["url_foto_imovel"] == "https://site.exemplo/lote/1/#preview"
+
+
+# -----------------------------------------------------------------------------
+# B4 — pre-check de BD + cap por item
+# -----------------------------------------------------------------------------
+
+class TestCsvPreCheckBd:
+    def test_resolver_cap_item_zera_quando_bd_tem_amostras_suficientes(
+        self, monkeypatch
+    ):
+        """Quando o BD já tem >= MIN anúncios para a tupla, cap=0."""
+        anuncios_fake = [{"id": str(i)} for i in range(mod.CSV_BATCH_BD_PRE_CHECK_MIN + 2)]
+        monkeypatch.setattr(
+            mod.anuncios_mercado_repo,
+            "listar_por_cidade_estado_tipos",
+            lambda _cli, **_kw: anuncios_fake,
+        )
+        cache: dict = {}
+        cap = mod._resolver_cap_item_csv(
+            object(),
+            {"cidade": "Aparecida", "estado": "SP", "tipo_imovel": "casa"},
+            cache,
+            cap_default=5,
+        )
+        assert cap == 0
+        # Cache populado para reutilização posterior.
+        assert ("aparecida", "SP", "casa") in cache
+
+    def test_resolver_cap_item_usa_default_quando_bd_pobre(self, monkeypatch):
+        """BD com poucos anúncios → usa cap default (vai chamar Firecrawl)."""
+        monkeypatch.setattr(
+            mod.anuncios_mercado_repo,
+            "listar_por_cidade_estado_tipos",
+            lambda _cli, **_kw: [{"id": "1"}],  # 1 < MIN
+        )
+        cap = mod._resolver_cap_item_csv(
+            object(),
+            {"cidade": "Aparecida", "estado": "SP", "tipo_imovel": "casa"},
+            {},
+            cap_default=5,
+        )
+        assert cap == 5
+
+    def test_resolver_cap_item_reusa_cache_local(self, monkeypatch):
+        """Linhas seguintes da mesma tupla NÃO repetem o SELECT."""
+        n_chamadas = {"n": 0}
+
+        def _listar(_cli, **_kw):
+            n_chamadas["n"] += 1
+            return [{"id": str(i)} for i in range(mod.CSV_BATCH_BD_PRE_CHECK_MIN + 1)]
+
+        monkeypatch.setattr(
+            mod.anuncios_mercado_repo,
+            "listar_por_cidade_estado_tipos",
+            _listar,
+        )
+        cache: dict = {}
+        payload = {"cidade": "Aparecida", "estado": "SP", "tipo_imovel": "casa"}
+        for _ in range(5):
+            mod._resolver_cap_item_csv(object(), payload, cache, cap_default=5)
+        assert n_chamadas["n"] == 1
+
+    def test_resolver_cap_item_falha_select_usa_default(self, monkeypatch):
+        """Se a query do BD falhar, não trava: usa cap default."""
+        def _falha(*_a, **_kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            mod.anuncios_mercado_repo,
+            "listar_por_cidade_estado_tipos",
+            _falha,
+        )
+        cap = mod._resolver_cap_item_csv(
+            object(),
+            {"cidade": "Aparecida", "estado": "SP", "tipo_imovel": "casa"},
+            {},
+            cap_default=5,
+        )
+        assert cap == 5
+
+    def test_resolver_cap_item_payload_incompleto_usa_default(self):
+        """Sem cidade/estado/tipo, devolve default sem consultar BD."""
+        cap = mod._resolver_cap_item_csv(
+            object(),
+            {"cidade": "", "estado": "SP", "tipo_imovel": "casa"},
+            {},
+            cap_default=7,
+        )
+        assert cap == 7
+
+    def test_processar_lote_aplica_cap_default_conservador(self, monkeypatch):
+        """Sem max_chamadas_api_firecrawl_por_item explícito, usa default 5."""
+        monkeypatch.setattr(
+            mod,
+            "ler_registros_csv_leiloes",
+            lambda _p: [{"url": "https://x/1", "cidade": "X", "uf": "SP", "tipo_imovel": "casa"}],
+        )
+        monkeypatch.setattr(
+            mod,
+            "_upsert_leilao_por_csv",
+            lambda payload, _cli: ("id1", "inserido"),
+        )
+        # BD pobre — para garantir que o cap default seja usado.
+        monkeypatch.setattr(
+            mod.anuncios_mercado_repo,
+            "listar_por_cidade_estado_tipos",
+            lambda _cli, **_kw: [],
+        )
+
+        caps_capturados: list[int] = []
+
+        class _Res:
+            ok = True
+            mensagem = "ok"
+            firecrawl_chamadas_api = 0
+
+        def _resolver(_cli, _lid, **kw):
+            caps_capturados.append(int(kw.get("max_chamadas_api_firecrawl") or -1))
+            return _Res()
+
+        monkeypatch.setattr(mod, "resolver_cache_media_pos_ingestao", _resolver)
+        mod.processar_lote_csv_leiloes("x.csv", client=object())  # type: ignore[arg-type]
+        assert caps_capturados == [mod.CSV_BATCH_FIRECRAWL_DEFAULT_PER_ITEM]

@@ -209,7 +209,7 @@ class TestExecutarParaCache:
             "leilao_ia_v2.comparaveis.integracao.executar_pipeline",
             return_value=resultado,
         ):
-            n_salvos, n_api = executar_comparaveis_para_cache(
+            n_salvos, n_api, falha = executar_comparaveis_para_cache(
                 object(),
                 cidade="Pindamonhangaba",
                 estado_raw="SP",
@@ -221,23 +221,24 @@ class TestExecutarParaCache:
         assert n_salvos == 4
         # 1 search + (3-1) scrapes pagos = 3
         assert n_api == 3
+        assert falha is False  # houve persistidos > 0
 
     def test_sem_cidade_devolve_zeros(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
         with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline") as fake:
-            n, k = executar_comparaveis_para_cache(
+            n, k, f = executar_comparaveis_para_cache(
                 object(), cidade="", estado_raw="SP", bairro="x", tipo_imovel="apartamento",
             )
-        assert (n, k) == (0, 0)
+        assert (n, k, f) == (0, 0, False)
         fake.assert_not_called()
 
     def test_sem_api_key_devolve_zeros(self, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         with patch("leilao_ia_v2.comparaveis.integracao.executar_pipeline") as fake:
-            n, k = executar_comparaveis_para_cache(
+            n, k, f = executar_comparaveis_para_cache(
                 object(), cidade="X", estado_raw="SP", bairro="y", tipo_imovel="casa",
             )
-        assert (n, k) == (0, 0)
+        assert (n, k, f) == (0, 0, False)
         fake.assert_not_called()
 
     def test_excecao_devolve_zeros(self, monkeypatch):
@@ -246,7 +247,7 @@ class TestExecutarParaCache:
             "leilao_ia_v2.comparaveis.integracao.executar_pipeline",
             side_effect=RuntimeError("boom"),
         ):
-            n, k = executar_comparaveis_para_cache(
+            n, k, f = executar_comparaveis_para_cache(
                 object(),
                 cidade="Pindamonhangaba",
                 estado_raw="SP",
@@ -254,7 +255,57 @@ class TestExecutarParaCache:
                 tipo_imovel="apartamento",
                 max_chamadas_api=20,
             )
-        assert (n, k) == (0, 0)
+        assert (n, k, f) == (0, 0, False)
+
+    def test_falha_por_filtros_quando_cards_extraidos_mas_zero_persistidos(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
+        # Pipeline conseguiu extrair cards mas validação geográfica descartou todos.
+        stats = _stats(
+            persistidos=0,
+            cards_extraidos=8,
+            cards_descartados_validacao=8,
+            paginas_scrapadas=2,
+            urls_busca=5,
+        )
+        resultado = _resultado(stats, n_linhas=0)
+        with patch(
+            "leilao_ia_v2.comparaveis.integracao.executar_pipeline",
+            return_value=resultado,
+        ):
+            n_salvos, n_api, falha = executar_comparaveis_para_cache(
+                object(),
+                cidade="Pindamonhangaba",
+                estado_raw="SP",
+                bairro="Centro",
+                tipo_imovel="apartamento",
+                max_chamadas_api=20,
+            )
+        assert n_salvos == 0
+        assert falha is True
+
+    def test_nao_falha_por_filtros_quando_pipeline_nao_extraiu_cards(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
+        # Search devolveu 0 URLs (sem nada para extrair) — não é "falha por filtro",
+        # é simplesmente ausência de dados.
+        stats = _stats(persistidos=0, cards_extraidos=0, cards_descartados_validacao=0)
+        resultado = _resultado(stats, n_linhas=0)
+        with patch(
+            "leilao_ia_v2.comparaveis.integracao.executar_pipeline",
+            return_value=resultado,
+        ):
+            _, _, falha = executar_comparaveis_para_cache(
+                object(),
+                cidade="X",
+                estado_raw="SP",
+                bairro="Y",
+                tipo_imovel="casa",
+                max_chamadas_api=20,
+            )
+        assert falha is False
 
 
 # -----------------------------------------------------------------------------

@@ -1,0 +1,36 @@
+{
+  "descricao": "Quando o anúncio NÃO traz evidência independente de bairro (URL/título sem bairro reconhecível) e a única menção é igual à do leilão, o bairro persistido fica VAZIO — preferimos vazio a herdar o bairro do leilão e contaminar o cache.",
+  "pendente": "BUG-CONHECIDO: o regex _RE_BAIRRO_TITULO_PREP em normalizacao_anuncio.py extrai 'em <Cidade> <UF>' como bairro (ex.: 'em Aparecida SP' -> bairro='Aparecida SP'). Falta filtrar a cidade-alvo + UF na lista de stop-words. Quando corrigido, remover este campo 'pendente' e o caso deve passar.",
+  "leilao": {
+    "cidade": "Aparecida",
+    "estado_uf": "SP",
+    "tipo_imovel": "apartamento",
+    "bairro": "Centro",
+    "area_m2": 65
+  },
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/800/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/800/",
+      "markdown": "# Apartamentos à venda em Aparecida SP\n\nLista de apartamentos em Aparecida SP.\n\n[Apartamento 65 m² em Aparecida SP](https://www.zapimoveis.com.br/imovel/800/anuncio-aparecida/)\nRua Genérica, 50\nR$ 270.000\n65 m² - 2 dormitórios\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua generica, 50", "rua genérica, 50", "rua generica 50"],
+      "municipio": "Aparecida",
+      "lat": -22.847,
+      "lon": -45.236,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 1,
+    "cidades_anuncios": ["Aparecida"],
+    "bairros_proibidos": ["centro", "aparecida"]
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "descricao": "Pindamonhangaba/SP: cards extraídos onde o geocode retorna São Bernardo do Campo NÃO podem ser persistidos (regressão histórica do bug fallback-de-cidade).",
+  "leilao": {
+    "cidade": "Pindamonhangaba",
+    "estado_uf": "SP",
+    "tipo_imovel": "apartamento",
+    "bairro": "Centro",
+    "area_m2": 65
+  },
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/100/",
+      "https://www.vivareal.com.br/imovel/200/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/100/",
+      "markdown": "# Apartamento à venda em Centro, Pindamonhangaba SP\n\nÓtimo apartamento no Centro de Pindamonhangaba.\n\n[Apartamento 65 m² no Centro, Pindamonhangaba SP](https://www.zapimoveis.com.br/imovel/100/anuncio-1/)\nRua das Flores, 200\nR$ 320.000\n65 m² - 2 dormitórios\n\n[Apartamento 70 m² Centro Pindamonhangaba SP](https://www.zapimoveis.com.br/imovel/100/anuncio-2/)\nAv Brasil, 1000\nR$ 360.000\n70 m² - 2 dormitórios\n"
+    },
+    {
+      "url": "https://www.vivareal.com.br/imovel/200/",
+      "markdown": "# Apartamento à venda em São Bernardo do Campo SP\n\nApartamento de 80m².\n\n[Apartamento 80 m² Centro São Bernardo do Campo SP](https://www.vivareal.com.br/imovel/200/anuncio-3/)\nRua dos Pinheiros, 50\nR$ 480.000\n80 m² - 3 dormitórios\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua das flores, 200", "rua das flores 200"],
+      "municipio": "Pindamonhangaba",
+      "lat": -22.9234,
+      "lon": -45.4621,
+      "precisao": "rua"
+    },
+    {
+      "chaves": ["av brasil, 1000", "av brasil 1000"],
+      "municipio": "Pindamonhangaba",
+      "lat": -22.9255,
+      "lon": -45.4633,
+      "precisao": "rua"
+    },
+    {
+      "chaves": ["rua dos pinheiros, 50", "rua dos pinheiros 50"],
+      "municipio": "São Bernardo do Campo",
+      "lat": -23.6880,
+      "lon": -46.5660,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 2,
+    "cidades_anuncios": ["Pindamonhangaba"],
+    "cidades_proibidas": ["São Bernardo do Campo", "Sao Bernardo do Campo"],
+    "tipos": ["apartamento"]
+  }
+}

@@ -49,6 +49,7 @@ from leilao_ia_v2.comparaveis.validacao_cidade import (
     ResultadoValidacaoMunicipio,
 )
 from leilao_ia_v2.persistence import anuncios_mercado_repo
+from leilao_ia_v2.services import normalizacao_anuncio as norm_anuncio
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,7 @@ def montar_linha(
     tipo_imovel: str,
     estado_uf: str,
     fonte_busca: str = "",
+    leilao: Optional[dict[str, Any]] = None,
 ) -> LinhaPersistir:
     """Constrói a linha pronta para upsert a partir do card + validação.
 
@@ -227,6 +229,17 @@ def montar_linha(
         estado_uf: UF de 2 letras do leilão (consistente, vem do edital).
         fonte_busca: opcional — string identificando a query/origem
             (vai para `metadados_json.fonte_busca`).
+        leilao: opcional — dict do leilão alvo. Quando presente, aplicam-se
+            as regras de :mod:`services.normalizacao_anuncio`:
+
+            - **promoção** ``casa`` → ``casa_condominio`` quando o leilão (ou
+              o próprio anúncio) sinaliza condomínio real;
+            - **decisão de bairro** que prioriza evidência do anúncio (URL
+              ou título) e nunca herda o bairro do leilão silenciosamente.
+
+            Quando ``None``, mantém o comportamento legado (tipo do leilão
+            cru, bairro do extrator cru) — útil para testes que não montam
+            um dict de leilão completo.
 
     Returns:
         :class:`LinhaPersistir` imutável.
@@ -270,12 +283,25 @@ def montar_linha(
     if fonte_busca:
         metadados["fonte_busca"] = fonte_busca
 
+    tipo_final = _decidir_tipo_final(
+        tipo_leilao=tipo_imovel,
+        card=card,
+        leilao=leilao,
+        metadados=metadados,
+    )
+    bairro_final = _decidir_bairro_final(
+        card=card,
+        leilao=leilao,
+        cidade_real=cidade_real,
+        metadados=metadados,
+    )
+
     return LinhaPersistir(
         url_anuncio=card.url_anuncio,
         portal=card.portal,
-        tipo_imovel=(tipo_imovel or "desconhecido").strip().lower(),
+        tipo_imovel=tipo_final,
         logradouro=(card.logradouro_inferido or "").strip(),
-        bairro=(card.bairro_inferido or "").strip(),
+        bairro=bairro_final,
         cidade=cidade_real,
         estado=uf,
         valor_venda=float(card.valor_venda),
@@ -285,6 +311,65 @@ def montar_linha(
         longitude=lon,
         metadados_json=metadados,
     )
+
+
+def _decidir_tipo_final(
+    *,
+    tipo_leilao: str,
+    card: CardExtraido,
+    leilao: Optional[dict[str, Any]],
+    metadados: dict[str, Any],
+) -> str:
+    """Aplica :func:`norm_anuncio.decidir_tipo_imovel_anuncio` e regista a decisão.
+
+    Sem ``leilao``, devolve o comportamento legado (tipo do leilão cru) —
+    isso preserva todos os testes existentes que não passam dict de leilão.
+    """
+    base = (tipo_leilao or "desconhecido").strip().lower()
+    if leilao is None:
+        return base
+    flag_cond = norm_anuncio.leilao_indica_condominio(leilao)
+    final = norm_anuncio.decidir_tipo_imovel_anuncio(
+        tipo_leilao=base,
+        titulo=card.titulo,
+        url=card.url_anuncio,
+        leilao_indica_condominio_flag=flag_cond,
+    )
+    if final != base:
+        metadados["tipo_imovel_promocao"] = {
+            "de": base,
+            "para": final,
+            "leilao_indica_condominio": bool(flag_cond),
+        }
+    return final
+
+
+def _decidir_bairro_final(
+    *,
+    card: CardExtraido,
+    leilao: Optional[dict[str, Any]],
+    cidade_real: str,
+    metadados: dict[str, Any],
+) -> str:
+    """Aplica :func:`norm_anuncio.inferir_bairro_anuncio` e regista a origem.
+
+    Sem ``leilao``, devolve o ``bairro_inferido`` cru do extrator (compat).
+    Com ``leilao``, evita a "herança silenciosa" do bairro do leilão.
+    """
+    bairro_card = (card.bairro_inferido or "").strip()
+    if leilao is None:
+        return bairro_card
+    bairro_leilao = str(leilao.get("bairro") or "").strip()
+    cidade_leilao = str(leilao.get("cidade") or cidade_real or "").strip()
+    bairro_final, origem = norm_anuncio.inferir_bairro_anuncio(
+        bairro_card=bairro_card,
+        titulo=card.titulo,
+        url=card.url_anuncio,
+        bairro_leilao=bairro_leilao,
+        cidade_leilao=cidade_leilao,
+    )
+    metadados["bairro_origem"] = origem
+    return bairro_final
 
 
 def persistir_lote(

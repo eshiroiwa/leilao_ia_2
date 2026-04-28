@@ -649,3 +649,93 @@ class TestResumo:
             "creditos_cap", "abortado", "motivo_aborto",
         ):
             assert k in d
+
+
+# -----------------------------------------------------------------------------
+# B5 — Early exit do loop de scrape
+# -----------------------------------------------------------------------------
+
+class TestEarlyExitScrape:
+    def test_para_loop_quando_atinge_threshold(self):
+        """Com 5 URLs e cap_persistir=2 (threshold=12), gera 12+ aprovados:
+        deve parar antes de processar todas as URLs."""
+        orc = OrcamentoFirecrawl(cap=200)
+        urls = tuple(f"https://www.zapimoveis.com.br/imovel/{i}/" for i in range(5))
+        # Cada URL produz 6 cards aprovados (5*6=30 total).
+        cards_por_url = {
+            u: [_card(url=f"{u}#{i}") for i in range(6)] for u in urls
+        }
+
+        fn_search = MagicMock(return_value=_busca_ok(urls))
+        fn_scrape = MagicMock(side_effect=lambda u, **kw: _scrape_ok(u))
+        fn_filtro = MagicMock(return_value=_filtro())
+        idx = {"i": 0}
+
+        def extrai(md, **kw):
+            u = urls[idx["i"]]
+            idx["i"] += 1
+            return cards_por_url[u]
+
+        fn_extrai = MagicMock(side_effect=extrai)
+        fn_valida = MagicMock(return_value=_val_ok())
+        fn_persistir = MagicMock(return_value=2)
+
+        r = executar_pipeline(
+            _leilao(),
+            orcamento=orc,
+            supabase_client=object(),
+            fn_montar_frase=lambda **kw: _frase(),
+            fn_search=fn_search,
+            fn_scrape=fn_scrape,
+            fn_filtro_pagina=fn_filtro,
+            fn_extrai_cards=fn_extrai,
+            fn_valida_municipio=fn_valida,
+            fn_persistir=fn_persistir,
+            max_persistir_por_ingestao=2,  # threshold = max(12, 2*2) = 12
+        )
+        s = r.estatisticas
+        # Threshold = 12; cada URL gera 6 → 2 URLs (12) atinge, 3a nem deveria
+        # ser scrapeada. A checagem é feita no início da iteração — então
+        # após scrapar a 2a URL, ao iniciar a 3a o break acontece.
+        # NÃO devemos ter scrapeado as 5 URLs.
+        assert s.paginas_scrapadas < 5
+        # cards_extraidos reflete o que o loop processou (antes do cap).
+        assert s.cards_extraidos >= 12
+
+    def test_nao_para_quando_nao_atinge_threshold(self):
+        """Cards insuficientes → processa todas as URLs."""
+        orc = OrcamentoFirecrawl(cap=200)
+        urls = tuple(f"https://www.zapimoveis.com.br/imovel/{i}/" for i in range(3))
+        cards_por_url = {
+            u: [_card(url=f"{u}#a")] for u in urls  # apenas 1 card por URL
+        }
+
+        fn_search = MagicMock(return_value=_busca_ok(urls))
+        fn_scrape = MagicMock(side_effect=lambda u, **kw: _scrape_ok(u))
+        fn_filtro = MagicMock(return_value=_filtro())
+        idx = {"i": 0}
+
+        def extrai(md, **kw):
+            u = urls[idx["i"]]
+            idx["i"] += 1
+            return cards_por_url[u]
+
+        fn_extrai = MagicMock(side_effect=extrai)
+        fn_valida = MagicMock(return_value=_val_ok())
+        fn_persistir = MagicMock(return_value=3)
+
+        r = executar_pipeline(
+            _leilao(),
+            orcamento=orc,
+            supabase_client=object(),
+            fn_montar_frase=lambda **kw: _frase(),
+            fn_search=fn_search,
+            fn_scrape=fn_scrape,
+            fn_filtro_pagina=fn_filtro,
+            fn_extrai_cards=fn_extrai,
+            fn_valida_municipio=fn_valida,
+            fn_persistir=fn_persistir,
+            max_persistir_por_ingestao=10,
+        )
+        # 3 URLs = 3 cards, < threshold 12 → todas as URLs processadas
+        assert r.estatisticas.paginas_scrapadas == 3

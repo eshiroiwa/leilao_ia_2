@@ -1,0 +1,49 @@
+{
+  "descricao": "Aparecida/SP: cards cuja URL/markdown indica Franca/SP (cidade contaminante) NÃO podem entrar no cache.",
+  "leilao": {
+    "cidade": "Aparecida",
+    "estado_uf": "SP",
+    "tipo_imovel": "casa",
+    "bairro": "Centro",
+    "area_m2": 110
+  },
+  "cidades_conhecidas": ["Aparecida", "Franca", "Pindamonhangaba", "Taubaté"],
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/300/",
+      "https://www.zapimoveis.com.br/imovel/301/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/300/",
+      "markdown": "# Casas à venda em Aparecida SP\n\nAtualizada em Aparecida SP.\n\n[Casa 110 m² Centro Aparecida SP](https://www.zapimoveis.com.br/imovel/300/anuncio-aparecida/)\nRua Marechal Deodoro, 250 - Centro - Aparecida\nR$ 380.000\n110 m² - 3 dormitórios\n"
+    },
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/301/",
+      "markdown": "# Casas à venda em Franca SP\n\nLista de imóveis em Franca SP.\n\n[Casa 130 m² Centro Franca SP](https://www.zapimoveis.com.br/imovel/301/anuncio-franca/)\nAv Brasil, 500 - Centro - Franca\nR$ 450.000\n130 m² - 3 dormitórios\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua marechal deodoro, 250", "rua marechal deodoro 250"],
+      "municipio": "Aparecida",
+      "lat": -22.846,
+      "lon": -45.236,
+      "precisao": "rua"
+    },
+    {
+      "chaves": ["av brasil, 500", "av brasil 500"],
+      "municipio": "Franca",
+      "lat": -20.538,
+      "lon": -47.402,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 1,
+    "cidades_anuncios": ["Aparecida"],
+    "cidades_proibidas": ["Franca"],
+    "tipos": ["casa"]
+  }
+}

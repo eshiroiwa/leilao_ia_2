@@ -1,0 +1,48 @@
+{
+  "descricao": "Sufixos lixo no bairro ('-88m2', 'id-12345', 'id-1') devem ser saneados — o bairro persistido NÃO pode conter esses tokens. Quando há bairro válido, ele deve aparecer normalizado.",
+  "leilao": {
+    "cidade": "Pindamonhangaba",
+    "estado_uf": "SP",
+    "tipo_imovel": "apartamento",
+    "bairro": "Centro",
+    "area_m2": 88
+  },
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/parque-olimpico/600/",
+      "https://www.zapimoveis.com.br/imovel/jardim-paraiso/601/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/parque-olimpico/600/",
+      "markdown": "# Apartamento à venda no bairro Parque Olímpico-88m2 Pindamonhangaba SP\n\nÓtima localização em Pindamonhangaba SP.\n\n[Apartamento 88 m² no bairro Parque Olímpico-88m2 Pindamonhangaba SP](https://www.zapimoveis.com.br/imovel/parque-olimpico/600/anuncio-1/)\nRua dos Atletas, 100\nR$ 410.000\n88 m² - 3 dormitórios\n"
+    },
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/jardim-paraiso/601/",
+      "markdown": "# Apartamento Jardim Paraíso Pindamonhangaba SP\n\n[Apartamento 90 m² no bairro Jardim Paraíso id-12345 Pindamonhangaba SP](https://www.zapimoveis.com.br/imovel/jardim-paraiso/601/anuncio-2/)\nAv Paraíso, 500\nR$ 420.000\n90 m² - 3 dormitórios\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua dos atletas, 100", "rua dos atletas 100"],
+      "municipio": "Pindamonhangaba",
+      "lat": -22.924,
+      "lon": -45.461,
+      "precisao": "rua"
+    },
+    {
+      "chaves": ["av paraiso, 500", "av paraíso, 500", "av paraiso 500"],
+      "municipio": "Pindamonhangaba",
+      "lat": -22.925,
+      "lon": -45.462,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 2,
+    "cidades_anuncios": ["Pindamonhangaba"],
+    "bairros_contem": ["parque olímpico", "jardim paraíso"],
+    "bairros_proibidos": ["88m2", "id-", "id-12345", "id 12345"]
+  }
+}

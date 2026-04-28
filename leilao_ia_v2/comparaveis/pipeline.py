@@ -177,6 +177,7 @@ def executar_pipeline(
     min_amostras_refino: int = 4,
     max_refino_top_n: int = MAX_REFINO_TOP_N,
     max_persistir_por_ingestao: int = MAX_PERSISTIR_POR_INGESTAO,
+    leilao_dict: Optional[dict[str, Any]] = None,
     # Hooks (defaults usam as implementações reais; testes substituem.)
     fn_montar_frase: Callable[..., FraseBusca] = montar_frase_busca,
     fn_search: _TipoFnSearch = executar_search,
@@ -259,11 +260,27 @@ def executar_pipeline(
 
     cards_aprovados: list[tuple[CardExtraido, ResultadoValidacaoMunicipio]] = []
 
+    # Early exit: se já temos folga suficiente para o cap final + margem para
+    # refino/filtragem, paramos de scrapear. Evita queimar créditos em
+    # listagens-hub que retornam dezenas de cards quando 12-20 já bastam.
+    # Fórmula: 2x o cap final (margem para refino), mínimo absoluto 12.
+    early_exit_threshold = max(12, int(max_persistir_por_ingestao) * 2)
+
     for url in busca.urls_aceites:
         if not orcamento.pode_scrape():
             logger.info(
                 "Pipeline: orçamento esgotado antes de scrapear %s — interrompendo loop.",
                 url[:80],
+            )
+            break
+
+        if len(cards_aprovados) >= early_exit_threshold:
+            logger.info(
+                "Pipeline: early exit do loop de scrape — %s cards aprovados (threshold=%s) "
+                "antes de %s URLs restantes.",
+                len(cards_aprovados),
+                early_exit_threshold,
+                len(busca.urls_aceites) - busca.urls_aceites.index(url),
             )
             break
 
@@ -365,6 +382,7 @@ def executar_pipeline(
         )
 
     linhas_a_persistir: list[LinhaPersistir] = []
+    leilao_dict_efetivo = leilao_dict or _leilao_dict_de_alvo(leilao)
     for card, validacao in cards_aprovados:
         try:
             linha = montar_linha(
@@ -373,6 +391,7 @@ def executar_pipeline(
                 tipo_imovel=leilao.tipo_imovel,
                 estado_uf=leilao.estado_uf,
                 fonte_busca=frase.texto,
+                leilao=leilao_dict_efetivo,
             )
         except Exception:
             logger.exception("Falha a montar linha para card %s — descartando.", card.url_anuncio)
@@ -443,3 +462,24 @@ def _resultado_abortado(
             motivo_aborto=motivo,
         ),
     )
+
+
+def _leilao_dict_de_alvo(alvo: LeilaoAlvo) -> dict[str, Any]:
+    """Constrói um pseudo-dict do leilão a partir do :class:`LeilaoAlvo`.
+
+    Útil para que :func:`comparaveis.persistencia.montar_linha` consiga
+    aplicar as regras do módulo :mod:`services.normalizacao_anuncio` quando
+    o caller não tem o dict completo (caso típico:
+    :func:`executar_comparaveis_para_cache`, que não carrega o registro
+    bruto do Supabase).
+
+    Como o dict tem apenas o que o ``LeilaoAlvo`` carrega, a detecção de
+    condomínio aqui só dispara se ``tipo_imovel`` já for ``casa_condominio``
+    ou se um caller upstream popular ``leilao_dict`` com mais campos.
+    """
+    return {
+        "cidade": alvo.cidade,
+        "estado": alvo.estado_uf,
+        "bairro": alvo.bairro,
+        "tipo_imovel": alvo.tipo_imovel,
+    }

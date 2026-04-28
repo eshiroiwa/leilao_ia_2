@@ -403,3 +403,134 @@ class TestPersistirLote:
             "https://www.zapimoveis.com.br/imovel/a/",
             "https://www.zapimoveis.com.br/imovel/b/",
         }
+
+
+# -----------------------------------------------------------------------------
+# Integração com services.normalizacao_anuncio (Bloco A)
+# -----------------------------------------------------------------------------
+
+class TestMontarLinhaComLeilaoDict:
+    """Quando ``leilao=...`` é passado, montar_linha aplica as regras do
+    módulo central:
+
+    - promove ``casa`` → ``casa_condominio`` quando o leilão indica;
+    - decide bairro com proteção contra herança silenciosa do bairro do leilão;
+    - regista origem da decisão de bairro nos metadados.
+    """
+
+    def test_promove_casa_para_casa_condominio_quando_leilao_indica(self):
+        leilao = {
+            "cidade": "Taubaté",
+            "estado": "SP",
+            "bairro": "Vila Esplanada",
+            "tipo_imovel": "casa",
+            "leilao_extra_json": {
+                "nome_condominio": "Residencial Villagio di Italia",
+            },
+        }
+        l = montar_linha(
+            _card(bairro_inferido="Centro"),
+            _validacao_ok(municipio="Taubaté"),
+            tipo_imovel="casa",
+            estado_uf="SP",
+            leilao=leilao,
+        )
+        assert l.tipo_imovel == "casa_condominio"
+        assert l.metadados_json["tipo_imovel_promocao"]["de"] == "casa"
+        assert l.metadados_json["tipo_imovel_promocao"]["para"] == "casa_condominio"
+        assert l.metadados_json["tipo_imovel_promocao"]["leilao_indica_condominio"] is True
+
+    def test_nao_promove_quando_leilao_so_tem_boilerplate_caixa(self):
+        leilao = {
+            "cidade": "Taubaté",
+            "estado": "SP",
+            "bairro": "Centro",
+            "tipo_imovel": "casa",
+            "descricao": (
+                "REGRAS PARA PAGAMENTO DAS DESPESAS: Condomínio: Sob "
+                "responsabilidade do comprador, até o limite de 10% em "
+                "relação ao valor de avaliação."
+            ),
+        }
+        l = montar_linha(
+            _card(bairro_inferido="Vila Boa"),
+            _validacao_ok(municipio="Taubaté"),
+            tipo_imovel="casa",
+            estado_uf="SP",
+            leilao=leilao,
+        )
+        assert l.tipo_imovel == "casa"
+        assert "tipo_imovel_promocao" not in l.metadados_json
+
+    def test_promove_quando_anuncio_indica_condominio_no_titulo(self):
+        leilao = {"cidade": "Taubaté", "estado": "SP", "bairro": "X", "tipo_imovel": "casa"}
+        c = _card(titulo="Casa em condomínio fechado, 3 quartos", bairro_inferido="Vila Y")
+        l = montar_linha(
+            c,
+            _validacao_ok(municipio="Taubaté"),
+            tipo_imovel="casa",
+            estado_uf="SP",
+            leilao=leilao,
+        )
+        assert l.tipo_imovel == "casa_condominio"
+
+    def test_bairro_card_diferente_do_leilao_eh_preservado(self):
+        leilao = {"cidade": "Aparecida", "estado": "SP", "bairro": "Centro", "tipo_imovel": "apartamento"}
+        l = montar_linha(
+            _card(bairro_inferido="Vila Esplanada"),
+            _validacao_ok(municipio="Aparecida"),
+            tipo_imovel="apartamento",
+            estado_uf="SP",
+            leilao=leilao,
+        )
+        assert l.bairro == "Vila Esplanada"
+        assert l.metadados_json["bairro_origem"] == "card"
+
+    def test_bairro_card_igual_leilao_sem_evidencia_extra_vira_vazio(self):
+        # Bug histórico: o ad sem bairro real "herdava" o bairro do leilão
+        # e contaminava o cache (Aparecida/Taubaté). Agora vai vazio.
+        leilao = {"cidade": "Aparecida", "estado": "SP", "bairro": "Centro", "tipo_imovel": "apartamento"}
+        c = _card(
+            bairro_inferido="Centro",
+            titulo="Apartamento 65m² para venda",  # sem mencionar bairro
+            url="https://portal.com/imovel/sem-bairro-na-url-id-1/",
+        )
+        l = montar_linha(
+            c,
+            _validacao_ok(municipio="Aparecida"),
+            tipo_imovel="apartamento",
+            estado_uf="SP",
+            leilao=leilao,
+        )
+        assert l.bairro == ""
+        assert l.metadados_json["bairro_origem"] == "vazio_para_evitar_heranca"
+
+    def test_bairro_card_igual_leilao_com_titulo_concordando_eh_aceito(self):
+        leilao = {"cidade": "Aparecida", "estado": "SP", "bairro": "Centro", "tipo_imovel": "apartamento"}
+        c = _card(
+            bairro_inferido="Centro",
+            titulo="Apartamento no Bairro Centro, 2 dorms",
+        )
+        l = montar_linha(
+            c,
+            _validacao_ok(municipio="Aparecida"),
+            tipo_imovel="apartamento",
+            estado_uf="SP",
+            leilao=leilao,
+        )
+        assert l.bairro == "Centro"
+        assert l.metadados_json["bairro_origem"] == "card"
+
+    def test_sem_leilao_dict_mantem_comportamento_legado(self):
+        # Sem `leilao=`, NÃO há promoção de tipo nem decisão sofisticada
+        # de bairro — preservando todos os testes pre-Bloco-A.
+        l = montar_linha(
+            _card(bairro_inferido="Centro"),
+            _validacao_ok(),
+            tipo_imovel="casa",
+            estado_uf="SP",
+        )
+        assert l.tipo_imovel == "casa"
+        assert l.bairro == "Centro"
+        assert "tipo_imovel_promocao" not in l.metadados_json
+        assert "bairro_origem" not in l.metadados_json

@@ -25,12 +25,24 @@ from supabase import Client
 
 from leilao_ia_v2.constants import STATUS_PENDENTE
 from leilao_ia_v2.normalizacao import normalizar_tipo_imovel, normalizar_url_leilao
-from leilao_ia_v2.persistence import leilao_imoveis_repo
+from leilao_ia_v2.persistence import anuncios_mercado_repo, leilao_imoveis_repo
 from leilao_ia_v2.services.cache_media_leilao import resolver_cache_media_pos_ingestao
 from leilao_ia_v2.services.extracao_edital_llm import _deve_omitir_temperature, _extrair_json_objeto, _kwargs_limite_saida
 from leilao_ia_v2.services.geocoding import geocodificar_endereco
+from leilao_ia_v2.vivareal.uf_segmento import estado_livre_para_sigla_uf
 
 logger = logging.getLogger(__name__)
+
+
+# Default mais conservador que o pós-ingestão URL: em CSVs grandes, gastar 20
+# créditos por linha causa estouros. 5 créditos/item permite 1 search + 4
+# scrapes refinados, suficiente para a maioria dos casos com BD razoável.
+CSV_BATCH_FIRECRAWL_DEFAULT_PER_ITEM = 5
+
+# Quando o BD já tem ao menos esse número de anúncios distintos para
+# (cidade, UF, tipo), pulamos completamente Firecrawl no item — mesmo que o
+# usuário tenha configurado um cap > 0.
+CSV_BATCH_BD_PRE_CHECK_MIN = 10
 
 _URL_CANDS = (
     "url_leilao",
@@ -691,6 +703,62 @@ def _geocodificar_payload_csv(payload: dict[str, Any]) -> None:
         return
 
 
+def _resolver_cap_item_csv(
+    client: Client,
+    payload: dict[str, Any],
+    bd_count_cache: dict[tuple[str, str, str], int],
+    *,
+    cap_default: int,
+) -> int:
+    """Decide o cap de Firecrawl para esta linha do CSV.
+
+    Aplica um pre-check no BD: se a tupla (cidade, UF, tipo) já tem
+    ``CSV_BATCH_BD_PRE_CHECK_MIN`` ou mais anúncios persistidos, devolvemos
+    ``0`` (não vale a pena gastar Firecrawl quando o cache vai usar BD).
+
+    O resultado da contagem é memorizado em ``bd_count_cache`` para que
+    linhas seguintes da mesma cidade/UF/tipo não repitam o SELECT.
+    """
+    cidade = str(payload.get("cidade") or "").strip()
+    estado_raw = str(payload.get("estado") or "").strip()
+    tipo = str(payload.get("tipo_imovel") or "").strip().lower()
+    if not cidade or not estado_raw or not tipo:
+        return int(cap_default)
+    uf = (estado_livre_para_sigla_uf(estado_raw) or estado_raw[:2]).upper()
+    if len(uf) != 2:
+        return int(cap_default)
+    chave = (cidade.lower(), uf, tipo)
+    if chave not in bd_count_cache:
+        try:
+            ads = anuncios_mercado_repo.listar_por_cidade_estado_tipos(
+                client,
+                cidade=cidade,
+                estado_sigla=uf,
+                tipos_imovel=[tipo],
+                limite=max(50, CSV_BATCH_BD_PRE_CHECK_MIN * 2),
+            )
+            bd_count_cache[chave] = len(ads or [])
+        except Exception:
+            logger.exception(
+                "CSV pre-check BD falhou (cidade=%s uf=%s tipo=%s) — usando cap default",
+                cidade,
+                uf,
+                tipo,
+            )
+            bd_count_cache[chave] = -1  # marca falha para não retentar
+    n_bd = bd_count_cache.get(chave, -1)
+    if n_bd >= CSV_BATCH_BD_PRE_CHECK_MIN:
+        logger.info(
+            "CSV item: BD já tem %s anúncios (%s/%s/%s) — Firecrawl desativado.",
+            n_bd,
+            cidade,
+            uf,
+            tipo,
+        )
+        return 0
+    return int(cap_default)
+
+
 def processar_lote_csv_leiloes(
     caminho_csv: str | Path,
     client: Client,
@@ -709,6 +777,21 @@ def processar_lote_csv_leiloes(
     ok = erro = ignorados = processados = 0
     total_previsto = min(len(regs), int(max_itens)) if max_itens is not None and int(max_itens) > 0 else len(regs)
     cancelado = False
+
+    # Cache local entre linhas: contagem de anúncios já presentes no BD por
+    # (cidade, UF, tipo). Um item de Aparecida só consulta o BD uma vez —
+    # itens subsequentes da mesma cidade/tipo reusam o número.
+    bd_anuncios_count: dict[tuple[str, str, str], int] = {}
+
+    # Cap padrão por item — se o usuário não passou explicitamente, usamos o
+    # default conservador (5) em vez do default global da config (~20),
+    # evitando estouro em CSVs grandes.
+    cap_default_por_item = (
+        int(max_chamadas_api_firecrawl_por_item)
+        if max_chamadas_api_firecrawl_por_item is not None
+        else CSV_BATCH_FIRECRAWL_DEFAULT_PER_ITEM
+    )
+
     for i, reg in enumerate(regs, start=1):
         if should_stop is not None and should_stop():
             cancelado = True
@@ -735,11 +818,23 @@ def processar_lote_csv_leiloes(
             payload = _payload_de_registro_csv(reg, url=url, mapeamento=mapeamento)
             _geocodificar_payload_csv(payload)
             leilao_id, modo = _upsert_leilao_por_csv(payload, client)
+
+            # Pre-check de BD: se a (cidade, UF, tipo) deste item já tem N
+            # anúncios suficientes na base, passamos cap=0 para o resolver
+            # — vai listar do BD e nem chamar Firecrawl. Economiza chamadas
+            # em lotes onde várias linhas vêm da mesma cidade.
+            cap_do_item = _resolver_cap_item_csv(
+                client,
+                payload,
+                bd_anuncios_count,
+                cap_default=cap_default_por_item,
+            )
+
             res_cache = resolver_cache_media_pos_ingestao(
                 client,
                 leilao_id,
                 ignorar_cache_firecrawl=ignorar_cache_firecrawl,
-                max_chamadas_api_firecrawl=max_chamadas_api_firecrawl_por_item,
+                max_chamadas_api_firecrawl=cap_do_item,
             )
             firecrawl_calls = int(getattr(res_cache, "firecrawl_chamadas_api", 0) or 0)
             if res_cache.ok:

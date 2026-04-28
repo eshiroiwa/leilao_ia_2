@@ -1,0 +1,46 @@
+{
+  "descricao": "Leilão de casa em condomínio nomeado: cards persistidos como casa devem ser promovidos a casa_condominio (matching pelo nome do empreendimento no leilão_extra_json).",
+  "leilao": {
+    "cidade": "Taubaté",
+    "estado_uf": "SP",
+    "tipo_imovel": "casa",
+    "bairro": "Vila Esplanada",
+    "area_m2": 140,
+    "leilao_extra_json": {
+      "nome_empreendimento": "Condomínio Residencial Villagio di Italia"
+    }
+  },
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/400/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/400/",
+      "markdown": "# Casas em condomínio em Taubaté SP\n\nCasas no Condomínio Residencial Villagio di Italia.\n\n[Casa 140 m² Condomínio Villagio di Italia Taubaté SP](https://www.zapimoveis.com.br/imovel/400/casa-villagio/)\nRua das Acácias, 100 - Vila Esplanada - Taubaté\nR$ 620.000\n140 m² - 3 suítes\n\n[Casa 150 m² Villagio di Italia Taubaté SP](https://www.zapimoveis.com.br/imovel/400/casa-villagio-2/)\nRua das Acácias, 200 - Vila Esplanada - Taubaté\nR$ 680.000\n150 m² - 3 suítes\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua das acacias, 100", "rua das acacias 100", "rua das acácias, 100"],
+      "municipio": "Taubaté",
+      "lat": -23.026,
+      "lon": -45.555,
+      "precisao": "rua"
+    },
+    {
+      "chaves": ["rua das acacias, 200", "rua das acacias 200", "rua das acácias, 200"],
+      "municipio": "Taubaté",
+      "lat": -23.027,
+      "lon": -45.556,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 2,
+    "cidades_anuncios": ["Taubaté"],
+    "tipos": ["casa_condominio"],
+    "tipos_proibidos": ["casa"]
+  }
+}

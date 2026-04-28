@@ -545,6 +545,139 @@ def test_garantir_bairro_canonico_leilao_persiste_em_extra():
     upd.assert_called_once()
 
 
+# -----------------------------------------------------------------------------
+# B3 — TTL no reverse geocode do bairro canônico
+# -----------------------------------------------------------------------------
+
+class TestBairroCanonicoTTL:
+    def test_cache_fresco_evita_reverse_geocode(self):
+        """Quando há ``bairro_canonico`` recente + coords iguais, NÃO chama Google."""
+        import time
+        cli = MagicMock()
+        leilao = {
+            "id": "L1",
+            "cidade": "Taubaté",
+            "bairro": "Vila Esplanada",
+            "leilao_extra_json": {
+                "bairro_canonico": "Vila Esplanada",
+                "fonte_canonica_bairro": "google_reverse",
+                "bairro_canonico_resolvido_em_ms": int(time.time() * 1000) - 60_000,  # 1 min
+                "bairro_canonico_lat": -23.0,
+                "bairro_canonico_lon": -45.5,
+            },
+        }
+        with patch(
+            "leilao_ia_v2.services.cache_media_leilao._bairro_canonico_enabled",
+            return_value=True,
+        ):
+            with patch(
+                "leilao_ia_v2.services.cache_media_leilao.reverse_geocodificar_bairro",
+            ) as fake_rev:
+                with patch(
+                    "leilao_ia_v2.services.cache_media_leilao."
+                    "leilao_imoveis_repo.atualizar_leilao_imovel"
+                ):
+                    cml._garantir_bairro_canonico_leilao(
+                        cli, leilao, lat0=-23.0, lon0=-45.5
+                    )
+        fake_rev.assert_not_called()
+
+    def test_cache_expirado_chama_reverse_geocode(self):
+        """TTL expirado força nova chamada ao Google."""
+        import time
+        cli = MagicMock()
+        ttl_ms = cml._bairro_canonico_ttl_dias() * 24 * 60 * 60 * 1000
+        leilao = {
+            "id": "L1",
+            "cidade": "Taubaté",
+            "bairro": "Vila Esplanada",
+            "leilao_extra_json": {
+                "bairro_canonico": "Vila Esplanada",
+                "fonte_canonica_bairro": "google_reverse",
+                "bairro_canonico_resolvido_em_ms": int(time.time() * 1000) - ttl_ms - 60_000,
+                "bairro_canonico_lat": -23.0,
+                "bairro_canonico_lon": -45.5,
+            },
+        }
+        with patch(
+            "leilao_ia_v2.services.cache_media_leilao._bairro_canonico_enabled",
+            return_value=True,
+        ):
+            with patch(
+                "leilao_ia_v2.services.cache_media_leilao.reverse_geocodificar_bairro",
+                return_value=("Vila Esplanada", "google_reverse"),
+            ) as fake_rev:
+                with patch(
+                    "leilao_ia_v2.services.cache_media_leilao."
+                    "leilao_imoveis_repo.atualizar_leilao_imovel"
+                ):
+                    cml._garantir_bairro_canonico_leilao(
+                        cli, leilao, lat0=-23.0, lon0=-45.5
+                    )
+        fake_rev.assert_called_once()
+
+    def test_coords_diferentes_invalidam_cache(self):
+        """Mudança >50m nas coords força novo reverse geocode (pode ter mudado de bairro)."""
+        import time
+        cli = MagicMock()
+        leilao = {
+            "id": "L1",
+            "cidade": "Taubaté",
+            "bairro": "Vila Esplanada",
+            "leilao_extra_json": {
+                "bairro_canonico": "Vila Esplanada",
+                "bairro_canonico_resolvido_em_ms": int(time.time() * 1000),
+                "bairro_canonico_lat": -23.0,
+                "bairro_canonico_lon": -45.5,
+            },
+        }
+        with patch(
+            "leilao_ia_v2.services.cache_media_leilao._bairro_canonico_enabled",
+            return_value=True,
+        ):
+            with patch(
+                "leilao_ia_v2.services.cache_media_leilao.reverse_geocodificar_bairro",
+                return_value=("Outro Bairro", "google_reverse"),
+            ) as fake_rev:
+                with patch(
+                    "leilao_ia_v2.services.cache_media_leilao."
+                    "leilao_imoveis_repo.atualizar_leilao_imovel"
+                ):
+                    # Coord 5km de distância — invalida cache.
+                    cml._garantir_bairro_canonico_leilao(
+                        cli, leilao, lat0=-23.05, lon0=-45.55
+                    )
+        fake_rev.assert_called_once()
+
+    def test_cache_sem_timestamp_chama_reverse(self):
+        """Sem timestamp, o cache é considerado inválido."""
+        cli = MagicMock()
+        leilao = {
+            "id": "L1",
+            "cidade": "Taubaté",
+            "bairro": "Vila Esplanada",
+            "leilao_extra_json": {
+                "bairro_canonico": "Vila Esplanada",  # mas sem ts/coords
+            },
+        }
+        with patch(
+            "leilao_ia_v2.services.cache_media_leilao._bairro_canonico_enabled",
+            return_value=True,
+        ):
+            with patch(
+                "leilao_ia_v2.services.cache_media_leilao.reverse_geocodificar_bairro",
+                return_value=("Vila Esplanada", "google_reverse"),
+            ) as fake_rev:
+                with patch(
+                    "leilao_ia_v2.services.cache_media_leilao."
+                    "leilao_imoveis_repo.atualizar_leilao_imovel"
+                ):
+                    cml._garantir_bairro_canonico_leilao(
+                        cli, leilao, lat0=-23.0, lon0=-45.5
+                    )
+        fake_rev.assert_called_once()
+
+
 def test_fatias_amostras_cache():
     ads = [{"id": str(i)} for i in range(25)]
     pri, secs = cml._fatias_amostras_cache(ads, 10, 10)

@@ -77,6 +77,7 @@ def executar_comparaveis_pos_ingestao(
     extn: ExtracaoEditalLLM,
     ignorar_cache_firecrawl: bool = False,  # noqa: ARG001 - cache de scrape é sempre reusado (gratuito)
     max_chamadas_api_firecrawl: int | None = None,
+    leilao_dict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Executa a busca de comparáveis após a ingestão do edital.
 
@@ -104,6 +105,7 @@ def executar_comparaveis_pos_ingestao(
             client,
             extn=extn,
             max_chamadas_api_firecrawl=max_chamadas_api_firecrawl,
+            leilao_dict=leilao_dict,
         )
     except Exception:
         logger.exception("Comparaveis: falha — devolvendo erro sem propagar.")
@@ -123,6 +125,7 @@ def _executar(
     *,
     extn: ExtracaoEditalLLM,
     max_chamadas_api_firecrawl: int | None,
+    leilao_dict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cidade = (extn.cidade or "").strip()
     estado_raw = (extn.estado or "").strip()
@@ -168,9 +171,39 @@ def _executar(
         orcamento=orcamento,
         supabase_client=client,
         min_amostras_refino=_resolver_min_amostras_refino(),
+        leilao_dict=leilao_dict or _leilao_dict_de_extn(extn),
     )
 
     return _resultado_para_dict(resultado, orcamento)
+
+
+def _leilao_dict_de_extn(extn: ExtracaoEditalLLM) -> dict[str, Any]:
+    """Constrói um pseudo-dict do leilão a partir do :class:`ExtracaoEditalLLM`.
+
+    Inclui os campos consultados por
+    :func:`services.normalizacao_anuncio.leilao_indica_condominio` para que
+    a promoção ``casa → casa_condominio`` funcione já no caminho
+    pós-ingestão de URL — mesmo quando o caller não dispõe do registro
+    cru do Supabase.
+    """
+    descricao_partes: list[str] = []
+    for attr in (
+        "descricao",
+        "descricao_imovel",
+        "observacoes",
+        "edital_resumo",
+    ):
+        v = getattr(extn, attr, None)
+        if v:
+            descricao_partes.append(str(v))
+    return {
+        "cidade": (extn.cidade or "").strip(),
+        "estado": (extn.estado or "").strip(),
+        "bairro": (extn.bairro or "").strip(),
+        "tipo_imovel": (extn.tipo_imovel or "").strip().lower(),
+        "endereco": str(getattr(extn, "endereco", "") or "").strip(),
+        "descricao": "\n".join(descricao_partes).strip(),
+    }
 
 
 def executar_comparaveis_para_cache(
@@ -182,30 +215,36 @@ def executar_comparaveis_para_cache(
     tipo_imovel: str,
     area_ref: float = 0.0,
     max_chamadas_api: int | None = None,
-) -> tuple[int, int]:
+    leilao_dict: dict[str, Any] | None = None,
+) -> tuple[int, int, bool]:
     """Helper para o cache de média complementar amostras via Firecrawl.
 
-    Devolve a mesma assinatura esperada por
-    :func:`services.cache_media_leilao._uma_coleta_firecrawl_search`:
-    ``(n_anuncios_gravados, n_chamadas_api_estimadas)``.
+    Devolve ``(n_anuncios_gravados, n_chamadas_api_estimadas,
+    falha_por_filtros_persistencia)``.
 
     Diferente de :func:`executar_comparaveis_pos_ingestao`, esta variante
     aceita os campos individuais (a chamadora não tem um ``ExtracaoEditalLLM``).
-    Em caso de qualquer erro, devolve ``(0, 0)``.
+    Em caso de qualquer erro, devolve ``(0, 0, False)``.
+
+    O terceiro elemento — ``falha_por_filtros_persistencia`` — é ``True`` quando
+    o Firecrawl retornou cards mas TODOS foram descartados pelos filtros do
+    pipeline (cidade errada, validação geográfica, etc.). O caller pode usar
+    esse sinal para evitar repetir a mesma busca na mesma sessão (é
+    determinística — se falhou agora, vai falhar de novo).
     """
     cidade_l = (cidade or "").strip()
     estado_l = (estado_raw or "").strip()
     if not cidade_l or not estado_l:
-        return 0, 0
+        return 0, 0, False
     if not (os.getenv("FIRECRAWL_API_KEY") or "").strip():
-        return 0, 0
+        return 0, 0, False
     cap_fc = _resolver_cap(max_chamadas_api)
     if cap_fc <= 0:
-        return 0, 0
+        return 0, 0, False
 
     uf = estado_livre_para_sigla_uf(estado_l) or estado_l[:2].upper()
     if len(uf) != 2:
-        return 0, 0
+        return 0, 0, False
 
     leilao = LeilaoAlvo(
         cidade=cidade_l,
@@ -221,13 +260,19 @@ def executar_comparaveis_para_cache(
             orcamento=orcamento,
             supabase_client=client,
             min_amostras_refino=_resolver_min_amostras_refino(),
+            leilao_dict=leilao_dict,
         )
     except Exception:
-        logger.exception("Comparaveis (cache): falha — devolvendo (0,0).")
-        return 0, 0
+        logger.exception("Comparaveis (cache): falha — devolvendo (0,0,False).")
+        return 0, 0, False
 
     s = resultado.estatisticas
-    return int(s.persistidos), _chamadas_api(s)
+    falha_filtros = (
+        int(s.persistidos) == 0
+        and int(s.cards_extraidos) > 0
+        and int(s.cards_descartados_validacao) > 0
+    )
+    return int(s.persistidos), _chamadas_api(s), bool(falha_filtros)
 
 
 def _resultado_para_dict(

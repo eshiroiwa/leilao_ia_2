@@ -1,0 +1,36 @@
+{
+  "descricao": "Mesmo quando o leilão é apenas 'casa' (sem nome de empreendimento), se o título/URL do anúncio contém 'Condomínio Residencial X' ou 'Condomínio Fechado Y', o tipo do anúncio deve ser promovido a 'casa_condominio'.",
+  "leilao": {
+    "cidade": "Pindamonhangaba",
+    "estado_uf": "SP",
+    "tipo_imovel": "casa",
+    "bairro": "Mombaça",
+    "area_m2": 130
+  },
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/condominio-residencial-bosque/900/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/condominio-residencial-bosque/900/",
+      "markdown": "# Casas em condomínio em Pindamonhangaba SP\n\nCondomínio Residencial Bosque das Acácias em Pindamonhangaba SP.\n\n[Casa 130 m² Condomínio Residencial Bosque das Acácias Pindamonhangaba SP](https://www.zapimoveis.com.br/imovel/condominio-residencial-bosque/900/casa-1/)\nRua Bosque, 100 - Mombaça - Pindamonhangaba\nR$ 540.000\n130 m² - 3 suítes\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua bosque, 100", "rua bosque 100"],
+      "municipio": "Pindamonhangaba",
+      "lat": -22.918,
+      "lon": -45.470,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 1,
+    "cidades_anuncios": ["Pindamonhangaba"],
+    "tipos": ["casa_condominio"],
+    "tipos_proibidos": ["casa"]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "descricao": "Edital Caixa com texto boilerplate ('Condomínio: sob responsabilidade do comprador') NÃO indica condomínio real — cards do leilão devem permanecer como 'casa', não promover para 'casa_condominio'.",
+  "leilao": {
+    "cidade": "Aparecida",
+    "estado_uf": "SP",
+    "tipo_imovel": "casa",
+    "bairro": "Centro",
+    "area_m2": 90,
+    "descricao_imovel": "Casa térrea, 2 dormitórios, 1 banheiro. Condomínio: Sob responsabilidade do comprador. IPTU: Sob responsabilidade do comprador. Hipoteca cancelada conforme matrícula."
+  },
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/500/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/500/",
+      "markdown": "# Casas à venda em Centro Aparecida SP\n\nLista de casas no Centro de Aparecida SP.\n\n[Casa 90 m² Centro Aparecida SP](https://www.zapimoveis.com.br/imovel/500/casa-centro/)\nRua das Palmeiras, 80 - Centro - Aparecida\nR$ 280.000\n90 m² - 2 dormitórios\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua das palmeiras, 80", "rua das palmeiras 80"],
+      "municipio": "Aparecida",
+      "lat": -22.847,
+      "lon": -45.235,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 1,
+    "cidades_anuncios": ["Aparecida"],
+    "tipos": ["casa"],
+    "tipos_proibidos": ["casa_condominio"]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "descricao": "Quando o anúncio é claramente de outro bairro (ex.: 'Centro') e o leilão é em 'Vila Esplanada', o bairro do anúncio NÃO pode ser sobrescrito pelo bairro do leilão — ad bairro é o ad bairro.",
+  "leilao": {
+    "cidade": "Taubaté",
+    "estado_uf": "SP",
+    "tipo_imovel": "apartamento",
+    "bairro": "Vila Esplanada",
+    "area_m2": 70
+  },
+  "busca": {
+    "urls": [
+      "https://www.zapimoveis.com.br/imovel/centro/700/"
+    ]
+  },
+  "scrapes": [
+    {
+      "url": "https://www.zapimoveis.com.br/imovel/centro/700/",
+      "markdown": "# Apartamento à venda no Centro, Taubaté SP\n\nApartamento ótimo em Taubaté SP.\n\n[Apartamento 70 m² no bairro Centro, Taubaté SP](https://www.zapimoveis.com.br/imovel/centro/700/anuncio-700/)\nRua Sete de Setembro, 100 - Centro - Taubaté\nR$ 290.000\n70 m² - 2 dormitórios\n"
+    }
+  ],
+  "geocodes": [
+    {
+      "chaves": ["rua sete de setembro, 100", "rua sete de setembro 100"],
+      "municipio": "Taubaté",
+      "lat": -23.027,
+      "lon": -45.555,
+      "precisao": "rua"
+    }
+  ],
+  "esperado": {
+    "persistidos": 1,
+    "cidades_anuncios": ["Taubaté"],
+    "bairros_contem": ["centro"],
+    "bairros_proibidos": ["vila esplanada"]
+  }
+}

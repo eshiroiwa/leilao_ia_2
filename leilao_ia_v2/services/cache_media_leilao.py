@@ -43,6 +43,7 @@ from leilao_ia_v2.normalizacao import (
     normalizar_tipo_imovel,
 )
 from leilao_ia_v2.persistence import anuncios_mercado_repo, cache_media_bairro_repo, leilao_imoveis_repo
+from leilao_ia_v2.services import normalizacao_anuncio as norm_anuncio
 from leilao_ia_v2.services.exclusao_cache_listagem_leilao import filtrar_anuncios_mantendo_apenas_mercado_comparavel
 from leilao_ia_v2.services.geocoding import (
     geocodificar_anuncios_batch,
@@ -580,6 +581,8 @@ def _coletar_metricas_para_analise_liquidez(
     estado_raw: str,
     ignorar_cache_firecrawl: bool,
     max_chamadas_api_firecrawl: int | None = None,
+    leilao_dict: dict[str, Any] | None = None,
+    memo_falha_filtros: set[tuple[str, str, str]] | None = None,
 ) -> tuple[list[dict[str, float]], int, str]:
     """
     Coleta métricas para análise de liquidez (área/pm2/distância/tipo).
@@ -641,7 +644,7 @@ def _coletar_metricas_para_analise_liquidez(
         teto = min(orc, LIQ_METRAGEM_MAX_FIRECRAWL_CREDITOS)
         pode_fc = teto > 0
         if pode_fc:
-            n_fc, n_api = _uma_coleta_firecrawl_search(
+            n_fc, n_api, _falha = _uma_coleta_firecrawl_search(
                 client,
                 cidade=cidade,
                 estado_raw=estado_raw,
@@ -652,6 +655,8 @@ def _coletar_metricas_para_analise_liquidez(
                 ignorar_cache_firecrawl=ignorar_cache_firecrawl,
                 max_chamadas_api=teto,
                 frase_busca_override=None,
+                leilao_dict=leilao_dict,
+                memo_falha_filtros=memo_falha_filtros,
             )
             usados_fc += int(n_api or 0)
             if int(n_fc or 0) > 0:
@@ -794,6 +799,7 @@ def _persistir_analise_liquidez_metragem_leilao(
     estado_sigla: str,
     ignorar_cache_firecrawl: bool,
     max_chamadas_api_firecrawl: int | None = None,
+    memo_falha_filtros: set[tuple[str, str, str]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     cidade = str(leilao.get("cidade") or "").strip()
     bairro = str(leilao.get("bairro") or "").strip()
@@ -814,6 +820,8 @@ def _persistir_analise_liquidez_metragem_leilao(
         estado_raw=estado_raw,
         ignorar_cache_firecrawl=ignorar_cache_firecrawl,
         max_chamadas_api_firecrawl=max_chamadas_api_firecrawl,
+        leilao_dict=leilao,
+        memo_falha_filtros=memo_falha_filtros,
     )
     analise = _analise_liquidez_metragem(area_imovel, [float(m.get("area_m2") or 0.0) for m in metricas])
     pm2_ref = _pm2_imovel_referencia(leilao, area_imovel)
@@ -883,145 +891,105 @@ def _normalizar_lista_alias_bairro(v: Any) -> list[str]:
     return out
 
 
+# NOTA: As funções abaixo são delegações para
+# :mod:`leilao_ia_v2.services.normalizacao_anuncio`. Mantemos os aliases com
+# prefixo `_` por compatibilidade com chamadas internas espalhadas pelo módulo
+# (e por testes que importam os símbolos privados). A semântica é idêntica;
+# qualquer mudança de regra deve acontecer no módulo central.
+
 def _normalizar_nome_empreendimento(v: Any) -> str:
-    s = " ".join(str(v or "").strip().split())
-    if not s:
-        return ""
-    s = re.sub(r"(?i)^(condom[ií]nio|edif[ií]cio|pr[eé]dio)\s+", "", s).strip()
-    s = re.sub(r"\s{2,}", " ", s).strip(" -,:;.")
-    return s[:160]
+    return norm_anuncio.normalizar_nome_empreendimento(v)
 
 
-def _texto_boilerplate_condominio(s: str) -> bool:
-    t = str(s or "").lower()
-    if not t:
-        return False
-    termos = (
-        "regras para pagamento",
-        "despesas",
-        "sob responsabilidade do comprador",
-        "a caixa realizará o pagamento",
-        "limite de 10%",
-        "valor de avaliação",
-        "tributos",
-    )
-    return any(k in t for k in termos)
+def _texto_boilerplate_condominio(s: Any) -> bool:
+    return norm_anuncio.texto_eh_boilerplate_condominio(s)
 
 
 def _nome_empreendimento_valido(v: Any) -> str:
-    s = _normalizar_nome_empreendimento(v)
-    if not s or len(s) < 4:
-        return ""
-    if _texto_boilerplate_condominio(s):
-        return ""
-    return s
+    return norm_anuncio.nome_empreendimento_valido(v)
 
 
 def _nome_empreendimento_leilao(leilao: dict[str, Any]) -> str:
-    extra = _parse_extra(leilao)
-    for k in (
-        "nome_condominio",
-        "condominio",
-        "nome_predio",
-        "predio",
-        "nome_edificio",
-        "edificio",
-        "nome_empreendimento",
-        "empreendimento",
-    ):
-        v = _nome_empreendimento_valido(extra.get(k) or leilao.get(k))
-        if v:
-            return v
-    textos = [
-        str(extra.get("observacoes_markdown") or "").strip(),
-        str(leilao.get("endereco") or "").strip(),
-        str(leilao.get("descricao") or "").strip(),
-    ]
-    for obs in textos:
-        if not obs:
-            continue
-        for ln in obs.splitlines():
-            s = " ".join(str(ln or "").strip().split())
-            if len(s) < 8:
-                continue
-            if re.search(r"(?i)\b(condom[ií]nio|edif[ií]cio|pr[eé]dio)\b", s):
-                m = re.search(r"(?i)\b(condom[ií]nio|edif[ií]cio|pr[eé]dio)\b\s*[:\-]?\s*(.+)$", s)
-                if m:
-                    c = _nome_empreendimento_valido(m.group(2) or s)
-                    if c:
-                        return c
-                c2 = _nome_empreendimento_valido(s)
-                if c2:
-                    return c2
-    return ""
+    return norm_anuncio.nome_empreendimento_leilao(leilao)
 
 
 def _leilao_indica_condominio(leilao: dict[str, Any]) -> bool:
-    if _nome_empreendimento_leilao(leilao):
-        return True
-    extra = _parse_extra(leilao)
-    blob = " ".join(
-        str(x or "")
-        for x in (
-            leilao.get("endereco"),
-            leilao.get("descricao"),
-            extra.get("observacoes_markdown"),
-            extra.get("edital_resumo"),
-            leilao.get("edital_markdown"),
-        )
-    )
-    if _texto_boilerplate_condominio(blob):
-        return False
-    b = blob.lower()
-    # Evita falso positivo de texto jurídico "Condomínio: sob responsabilidade..."
-    if re.search(r"(?i)\bcondom[ií]nio\s*:", b):
-        return False
-    return bool(
-        re.search(
-            r"(?i)\b(condom[ií]nio\s+(residencial|fechado|[a-z0-9]))\b",
-            b,
-        )
-        or re.search(r"(?i)\bcasa\s+em\s+condom[ií]nio\b", b)
-    )
+    return norm_anuncio.leilao_indica_condominio(leilao)
 
 
 def _texto_norm_match(v: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", _slug_fold(v))
 
 
-def _anuncio_match_empreendimento(anuncio: dict[str, Any], nome_empreendimento_ref: str) -> bool:
-    ref = _normalizar_nome_empreendimento(nome_empreendimento_ref)
-    if not ref:
+def _anuncio_match_empreendimento(
+    anuncio: dict[str, Any], nome_empreendimento_ref: str
+) -> bool:
+    """Wrapper que normaliza ``metadados_json`` antes de delegar.
+
+    ``_metadados_anuncio_como_dict`` aceita os formatos variados que o
+    repositório pode devolver (string JSON, ``metadados`` inline, dict
+    aninhado). O módulo central, por design, espera apenas um dict — então
+    fazemos a conversão aqui.
+    """
+    if not isinstance(anuncio, dict):
+        return norm_anuncio.anuncio_match_empreendimento(anuncio, nome_empreendimento_ref)
+    md_dict = _metadados_anuncio_como_dict(anuncio)
+    anuncio_norm = dict(anuncio)
+    anuncio_norm["metadados_json"] = md_dict
+    return norm_anuncio.anuncio_match_empreendimento(anuncio_norm, nome_empreendimento_ref)
+
+
+def _bairro_canonico_ttl_dias() -> int:
+    """TTL para reverse-geocode do bairro canónico (default 30 dias).
+
+    O bairro canônico é estável: muda apenas quando o município/IBGE
+    redefine os limites territoriais. Não há motivo para refazer o reverse
+    geocode toda vez que o cache é recalculado — gastaríamos chamadas Google
+    Maps à toa.
+    """
+    try:
+        v = int(os.getenv("LEILAO_IA_V2_BAIRRO_CANONICO_TTL_DIAS") or "30")
+        return max(1, v)
+    except (TypeError, ValueError):
+        return 30
+
+
+def _bairro_canonico_cache_valido(
+    extra: dict[str, Any], lat0: float, lon0: float
+) -> bool:
+    """Devolve True quando podemos confiar no ``bairro_canonico`` em cache.
+
+    Critérios (ALL of):
+
+    - existe ``extra['bairro_canonico']`` não-vazio;
+    - existe timestamp ``extra['bairro_canonico_resolvido_em_ms']`` dentro do TTL;
+    - existe par de coords ``extra['bairro_canonico_lat']/lon`` que coincide
+      (até 50 m) com (lat0, lon0). Se as coords mudarem (ex.: usuário corrigiu
+      endereço), forçamos novo reverse geocode.
+    """
+    nome = str(extra.get("bairro_canonico") or "").strip()
+    if not nome:
         return False
-    ref_n = _texto_norm_match(ref)
-    if len(ref_n) < 6:
+    try:
+        ts_ms = int(extra.get("bairro_canonico_resolvido_em_ms") or 0)
+    except (TypeError, ValueError):
         return False
-    md = _metadados_anuncio_como_dict(anuncio)
-    blobs = [
-        anuncio.get("titulo"),
-        anuncio.get("url_anuncio"),
-        anuncio.get("logradouro"),
-        anuncio.get("bairro"),
-        md.get("nome_empreendimento"),
-        md.get("condominio"),
-        md.get("nome_condominio"),
-    ]
-    txt = _texto_norm_match(" ".join(str(x or "") for x in blobs))
-    if not txt:
+    if ts_ms <= 0:
         return False
-    if ref_n in txt:
-        return True
-    toks = [
-        _texto_norm_match(t)
-        for t in re.split(r"\s+", ref)
-        if _texto_norm_match(t)
-        and _texto_norm_match(t)
-        not in {"condominio", "residencial", "predio", "edificio", "torre", "bloco", "vila"}
-    ]
-    if not toks:
+    import time
+    idade_ms = int(time.time() * 1000) - ts_ms
+    if idade_ms <= 0:
         return False
-    hit = sum(1 for t in toks if t and t in txt)
-    return hit >= min(2, len(toks))
+    ttl_ms = _bairro_canonico_ttl_dias() * 24 * 60 * 60 * 1000
+    if idade_ms > ttl_ms:
+        return False
+    try:
+        lat_cache = float(extra.get("bairro_canonico_lat"))
+        lon_cache = float(extra.get("bairro_canonico_lon"))
+    except (TypeError, ValueError):
+        return False
+    # Tolerância: coords iguais até ~50m (haversine_km < 0.05)
+    return haversine_km(lat0, lon0, lat_cache, lon_cache) <= 0.05
 
 
 def _garantir_bairro_canonico_leilao(
@@ -1035,6 +1003,10 @@ def _garantir_bairro_canonico_leilao(
     Mantém trilha de bairro informado/canônico em ``leilao_extra_json``.
     Retorna (bairro_informado, bairro_referencia_cache), sem sobrescrever silenciosamente
     o campo textual principal do leilão.
+
+    **TTL**: se ``bairro_canonico`` já está em cache (com timestamp e coords
+    coincidentes) dentro do TTL configurado (default 30 dias), pulamos o
+    reverse geocode (que custa 1 chamada Google Maps por leilão recalculado).
     """
     bairro_informado = str(leilao.get("bairro") or "").strip()
     cidade = str(leilao.get("cidade") or "").strip()
@@ -1046,8 +1018,21 @@ def _garantir_bairro_canonico_leilao(
         extra["bairro_informado"] = bairro_informado
         mudou = True
     aliases = _normalizar_lista_alias_bairro(extra.get("bairro_aliases"))
-    nome_rev, fonte_rev = reverse_geocodificar_bairro(lat0, lon0)
+
     bairro_canonico = str(extra.get("bairro_canonico") or "").strip()
+    if _bairro_canonico_cache_valido(extra, lat0, lon0):
+        # Cache fresco: usa o que está em extra, sem chamar Google.
+        nome_rev, fonte_rev = bairro_canonico, str(
+            extra.get("fonte_canonica_bairro") or ""
+        ).strip()
+    else:
+        nome_rev, fonte_rev = reverse_geocodificar_bairro(lat0, lon0)
+        if nome_rev:
+            import time
+            extra["bairro_canonico_resolvido_em_ms"] = int(time.time() * 1000)
+            extra["bairro_canonico_lat"] = float(lat0)
+            extra["bairro_canonico_lon"] = float(lon0)
+            mudou = True
     if nome_rev:
         if nome_rev != bairro_canonico:
             extra["bairro_canonico"] = nome_rev
@@ -1503,18 +1488,43 @@ def _uma_coleta_firecrawl_search(
     ignorar_cache_firecrawl: bool,  # noqa: ARG001 - cache de scrape sempre reusado (gratuito)
     max_chamadas_api: int | None = None,
     frase_busca_override: str | None = None,  # noqa: ARG001 - v2 usa frase determinística
-) -> tuple[int, int]:
-    """Devolve ``(n_anuncios_gravados, n_chamadas_api_estimadas)``.
+    leilao_dict: dict[str, Any] | None = None,
+    memo_falha_filtros: set[tuple[str, str, str]] | None = None,
+) -> tuple[int, int, bool]:
+    """Devolve ``(n_anuncios_gravados, n_chamadas_api_estimadas, falha_por_filtros)``.
 
     Implementação v2: delega ao :mod:`leilao_ia_v2.comparaveis.integracao`.
     Os parâmetros ``leilao_id``, ``ignorar_cache_firecrawl`` e
     ``frase_busca_override`` são mantidos para compatibilidade da assinatura
     com chamadores antigos, mas ignorados pelo pipeline v2 (a frase é
     determinística por design e o cache em disco é sempre reusado).
+
+    Quando ``leilao_dict`` é fornecido, ele é propagado ao pipeline para
+    permitir aplicação das regras de :mod:`services.normalizacao_anuncio`
+    (promoção `casa → casa_condominio` quando o leilão é em condomínio,
+    decisão de bairro com proteção contra herança).
+
+    Quando ``memo_falha_filtros`` é fornecido, a função consulta o conjunto
+    antes de chamar Firecrawl: se ``(cidade, uf, tipo_imovel)`` já está lá,
+    significa que a mesma busca já foi tentada nesta sessão e todos os cards
+    foram descartados — pular evita repetir Firecrawl à toa. Ao final, se
+    falhar por filtros, a tupla é adicionada ao memo.
     """
     from leilao_ia_v2.comparaveis.integracao import executar_comparaveis_para_cache
 
-    return executar_comparaveis_para_cache(
+    chave_memo = (
+        str(cidade or "").strip().lower(),
+        str(estado_raw or "").strip().lower()[:2],
+        str(tipo_imovel or "").strip().lower(),
+    )
+    if memo_falha_filtros is not None and chave_memo in memo_falha_filtros:
+        logger.info(
+            "Firecrawl Search ignorado: mesma assinatura (%s) já falhou por filtros nesta sessão.",
+            chave_memo,
+        )
+        return 0, 0, True
+
+    n_salvos, n_api, falha_filtros = executar_comparaveis_para_cache(
         client,
         cidade=cidade,
         estado_raw=estado_raw,
@@ -1522,7 +1532,11 @@ def _uma_coleta_firecrawl_search(
         tipo_imovel=tipo_imovel,
         area_ref=float(area_ref or 0.0),
         max_chamadas_api=max_chamadas_api,
+        leilao_dict=leilao_dict,
     )
+    if memo_falha_filtros is not None and falha_filtros:
+        memo_falha_filtros.add(chave_memo)
+    return n_salvos, n_api, falha_filtros
 
 
 def _montar_payload_cache(
@@ -2183,6 +2197,7 @@ def _montar_amostras_para_tipos(
     max_chamadas_api_firecrawl: int | None = None,
     leilao: dict[str, Any] | None = None,
     frase_busca_firecrawl_override: str | None = None,
+    memo_falha_filtros: set[tuple[str, str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], bool, str, str, int]:
     """
     Devolve (amostras, usou_firecrawl_listagem, mensagem_erro, log_diagnostico, n_chamadas_api_fc).
@@ -2424,7 +2439,7 @@ def _montar_amostras_para_tipos(
     n_api_fc = 0
     pode_fc = pode_firecrawl_search and (max_chamadas_api_firecrawl is None or int(max_chamadas_api_firecrawl) > 0)
     if pode_fc:
-        n, n_api_fc = _uma_coleta_firecrawl_search(
+        n, n_api_fc, _falha = _uma_coleta_firecrawl_search(
             client,
             cidade=cidade,
             estado_raw=estado_raw,
@@ -2435,6 +2450,8 @@ def _montar_amostras_para_tipos(
             ignorar_cache_firecrawl=ignorar_cache_firecrawl,
             max_chamadas_api=max_chamadas_api_firecrawl,
             frase_busca_override=frase_busca_firecrawl_override,
+            leilao_dict=leilao,
+            memo_falha_filtros=memo_falha_filtros,
         )
         logger.info(
             "Complemento Firecrawl Search para cache: %s anúncios gravados (api_estimada=%s)",
@@ -2968,6 +2985,10 @@ def resolver_cache_media_pos_ingestao(
     Em sucesso, **substitui** ``cache_media_bairro_ids`` do imóvel pela lista resolvida.
     """
     bp = get_busca_mercado_parametros()
+    # Memo de tentativas Firecrawl Search já falhadas por filtros nesta sessão.
+    # Compartilhado entre montagem principal, terreno e análise de liquidez para
+    # evitar repetir a MESMA busca (cidade+UF+tipo) que sabemos que vai falhar.
+    memo_falha_filtros: set[tuple[str, str, str]] = set()
     orcamento_fc = (
         int(bp.max_firecrawl_creditos_analise)
         if max_chamadas_api_firecrawl is None
@@ -3142,6 +3163,7 @@ def resolver_cache_media_pos_ingestao(
             max_chamadas_api_firecrawl=orcamento_fc,
             leilao=leilao,
             frase_busca_firecrawl_override=frase_busca_firecrawl_override,
+            memo_falha_filtros=memo_falha_filtros,
         )
         if usou_vr:
             usou_fc = True
@@ -3229,6 +3251,7 @@ def resolver_cache_media_pos_ingestao(
                 max_chamadas_api_firecrawl=orcamento_fc,
                 leilao=leilao,
                 frase_busca_firecrawl_override=frase_busca_firecrawl_override,
+                memo_falha_filtros=memo_falha_filtros,
             )
             if usou_vr2:
                 usou_fc = True
@@ -3280,6 +3303,7 @@ def resolver_cache_media_pos_ingestao(
             estado_sigla=estado_sigla,
             ignorar_cache_firecrawl=ignorar_cache_firecrawl,
             max_chamadas_api_firecrawl=orcamento_fc,
+            memo_falha_filtros=memo_falha_filtros,
         )
         n_fc_cache += int(n_api_liq or 0)
         log_ok_extra = (
@@ -3407,6 +3431,9 @@ def criar_caches_media_para_leilao(
     diag_terrenos = ""
     diag_apoio_escala = ""
     ids_base_principal: set[str] = set()
+    # Memo de tentativas Firecrawl por (cidade, uf, tipo) já falhadas nesta
+    # sessão — evita repetir buscas determinísticas que sabemos que falharão.
+    memo_falha_filtros: set[tuple[str, str, str]] = set()
 
     tipos_principal = list(_TIPOS_RESIDENCIAIS_POOL) if tipo_l in _TIPOS_CASA_SOBRADO else [tipo_l]
     amostras, usou_vr, err, diag_principal, n_fc_pri = _montar_amostras_para_tipos(
@@ -3428,6 +3455,7 @@ def criar_caches_media_para_leilao(
         max_chamadas_api_firecrawl=orcamento_fc,
         leilao=leilao,
         frase_busca_firecrawl_override=frase_busca_firecrawl_override,
+        memo_falha_filtros=memo_falha_filtros,
     )
     if usou_vr:
         usou_fc = True
@@ -3502,6 +3530,7 @@ def criar_caches_media_para_leilao(
             max_chamadas_api_firecrawl=orcamento_fc,
             leilao=leilao,
             frase_busca_firecrawl_override=frase_busca_firecrawl_override,
+            memo_falha_filtros=memo_falha_filtros,
         )
         if usou_vr2:
             usou_fc = True
@@ -3543,6 +3572,7 @@ def criar_caches_media_para_leilao(
             estado_sigla=estado_sigla,
             ignorar_cache_firecrawl=ignorar_cache_firecrawl,
             max_chamadas_api_firecrawl=orcamento_fc,
+            memo_falha_filtros=memo_falha_filtros,
         )
         n_fc_cache += int(n_api_liq or 0)
         liq_line = (
